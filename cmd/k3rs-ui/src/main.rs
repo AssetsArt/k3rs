@@ -19,10 +19,16 @@ enum Route {
         Dashboard {},
         #[route("/nodes")]
         Nodes {},
-        #[route("/workloads")]
-        Workloads {},
+        #[route("/deployments")]
+        Deployments {},
         #[route("/services")]
         Services {},
+        #[route("/pods")]
+        Pods {},
+        #[route("/configmaps")]
+        ConfigMaps {},
+        #[route("/secrets")]
+        Secrets {},
         #[route("/ingress")]
         Ingress {},
         #[route("/events")]
@@ -66,6 +72,13 @@ fn Layout() -> Element {
             "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 transition-all"
         }
     };
+    let sub_link_cls = |target: &Route| {
+        if *target == route {
+            "flex items-center gap-2 pl-5 pr-3 py-1.5 rounded-lg text-[13px] font-medium text-blue-400 bg-blue-500/10"
+        } else {
+            "flex items-center gap-2 pl-5 pr-3 py-1.5 rounded-lg text-[13px] font-medium text-slate-500 hover:text-slate-300 hover:bg-slate-800/60 transition-all"
+        }
+    };
 
     rsx! {
         div { class: "flex min-h-screen",
@@ -87,7 +100,7 @@ fn Layout() -> Element {
                     }
                 }
 
-                div { class: "flex-1 px-3 py-1 space-y-0.5",
+                div { class: "flex-1 px-3 py-1 space-y-0.5 overflow-y-auto",
                     p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mb-1.5", "Menu" }
                     Link { class: link_cls(&Route::Dashboard {}), to: Route::Dashboard {},
                         Icon { width: 16, height: 16, icon: LdLayoutDashboard }
@@ -97,20 +110,40 @@ fn Layout() -> Element {
                         Icon { width: 16, height: 16, icon: LdServer }
                         span { "Nodes" }
                     }
-                    Link { class: link_cls(&Route::Workloads {}), to: Route::Workloads {},
-                        Icon { width: 16, height: 16, icon: LdBox }
-                        span { "Workloads" }
+
+                    // Workloads group
+                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mt-4 mb-1.5", "Workloads" }
+                    Link { class: sub_link_cls(&Route::Deployments {}), to: Route::Deployments {},
+                        Icon { width: 14, height: 14, icon: LdRocket }
+                        span { "Deployments" }
                     }
-                    Link { class: link_cls(&Route::Services {}), to: Route::Services {},
-                        Icon { width: 16, height: 16, icon: LdNetwork }
+                    Link { class: sub_link_cls(&Route::Services {}), to: Route::Services {},
+                        Icon { width: 14, height: 14, icon: LdNetwork }
                         span { "Services" }
                     }
-                    Link { class: link_cls(&Route::Ingress {}), to: Route::Ingress {},
-                        Icon { width: 16, height: 16, icon: LdGlobe }
+                    Link { class: sub_link_cls(&Route::Pods {}), to: Route::Pods {},
+                        Icon { width: 14, height: 14, icon: LdBox }
+                        span { "Pods" }
+                    }
+                    Link { class: sub_link_cls(&Route::ConfigMaps {}), to: Route::ConfigMaps {},
+                        Icon { width: 14, height: 14, icon: LdFileText }
+                        span { "ConfigMaps" }
+                    }
+                    Link { class: sub_link_cls(&Route::Secrets {}), to: Route::Secrets {},
+                        Icon { width: 14, height: 14, icon: LdKeyRound }
+                        span { "Secrets" }
+                    }
+
+                    // Other
+                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mt-4 mb-1.5", "Networking" }
+                    Link { class: sub_link_cls(&Route::Ingress {}), to: Route::Ingress {},
+                        Icon { width: 14, height: 14, icon: LdGlobe }
                         span { "Ingress" }
                     }
-                    Link { class: link_cls(&Route::Events {}), to: Route::Events {},
-                        Icon { width: 16, height: 16, icon: LdActivity }
+
+                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mt-4 mb-1.5", "Cluster" }
+                    Link { class: sub_link_cls(&Route::Events {}), to: Route::Events {},
+                        Icon { width: 14, height: 14, icon: LdActivity }
                         span { "Events" }
                     }
                 }
