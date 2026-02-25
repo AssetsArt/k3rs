@@ -1,0 +1,11 @@
+kind: Deployment
+id: "test-nginx"
+name: "test-nginx"
+namespace: "default"
+created_at: "2024-02-25T00:00:00Z"
+spec:
+  replicas: 2
+  template:
+    containers:
+      - name: "nginx"
+        image: "nginx:latest"

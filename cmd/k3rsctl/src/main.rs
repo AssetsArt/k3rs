@@ -19,6 +19,10 @@ struct Cli {
     #[arg(long, default_value = "http://127.0.0.1:6443")]
     server: String,
 
+    /// Authentication token
+    #[arg(long, default_value = "demo-token-123")]
+    token: String,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -118,8 +122,15 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
+    let mut headers = reqwest::header::HeaderMap::new();
+    let auth_value = format!("Bearer {}", cli.token);
+    let mut auth_header = reqwest::header::HeaderValue::from_str(&auth_value)?;
+    auth_header.set_sensitive(true);
+    headers.insert(reqwest::header::AUTHORIZATION, auth_header);
+
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
+        .default_headers(headers)
         .build()?;
 
     let base = cli.server.trim_end_matches('/');
