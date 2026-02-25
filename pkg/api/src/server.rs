@@ -84,6 +84,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     // Start leader-gated controllers
     let ctrl_store = store.clone();
     let ctrl_scheduler = scheduler.clone();
+    let ctrl_runtime = state.container_runtime.clone();
     tokio::spawn(async move {
         let mut rx = leader_rx;
         loop {
@@ -98,7 +99,12 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             let handles = vec![
                 NodeController::new(ctrl_store.clone()).start(),
                 DeploymentController::new(ctrl_store.clone()).start(),
-                ReplicaSetController::new(ctrl_store.clone(), ctrl_scheduler.clone()).start(),
+                ReplicaSetController::new(
+                    ctrl_store.clone(),
+                    ctrl_scheduler.clone(),
+                    ctrl_runtime.clone(),
+                )
+                .start(),
                 DaemonSetController::new(ctrl_store.clone()).start(),
                 JobController::new(ctrl_store.clone(), ctrl_scheduler.clone()).start(),
                 CronJobController::new(ctrl_store.clone()).start(),
