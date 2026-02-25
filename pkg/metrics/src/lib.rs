@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 /// A lightweight, thread-safe metrics registry that renders in Prometheus text exposition format.
 pub struct MetricsRegistry {

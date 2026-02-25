@@ -1,6 +1,7 @@
 pub mod cluster;
 pub mod drain;
 pub mod endpoints;
+pub mod exec;
 pub mod heartbeat;
 pub mod processes;
 pub mod register;

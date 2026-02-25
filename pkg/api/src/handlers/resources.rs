@@ -609,7 +609,7 @@ pub async fn list_hpas(
 }
 
 // ============================================================
-// Pod Logs (stub)
+// Pod Logs
 // ============================================================
 
 #[derive(Debug, serde::Serialize)]
@@ -626,13 +626,15 @@ pub async fn pod_logs(
     let key = format!("/registry/pods/{}/{}", ns, pod_id);
     match state.store.get(&key).await {
         Ok(Some(_)) => {
+            // Use the container runtime to fetch real logs
+            let logs = match state.container_runtime.container_logs(&pod_id, 100).await {
+                Ok(lines) => lines,
+                Err(e) => vec![format!("[error] Failed to get logs: {}", e)],
+            };
             let resp = PodLogResponse {
                 pod_id: pod_id.clone(),
                 namespace: ns,
-                logs: vec![format!(
-                    "[stub] Log streaming for pod {} not yet connected to container runtime",
-                    pod_id
-                )],
+                logs,
             };
             (StatusCode::OK, Json(resp)).into_response()
         }
@@ -720,7 +722,7 @@ pub async fn list_network_policies(
 }
 
 // ============================================================
-// Persistent Volume Claims (CSI stub)
+// Persistent Volume Claims (CSI)
 // ============================================================
 
 pub async fn create_pvc(
@@ -730,7 +732,7 @@ pub async fn create_pvc(
 ) -> impl IntoResponse {
     pvc.id = Uuid::new_v4().to_string();
     pvc.namespace = ns.clone();
-    pvc.phase = pkg_types::volume::PVCPhase::Bound; // auto-bind in stub mode
+    pvc.phase = pkg_types::volume::PVCPhase::Pending; // Start as Pending — reconciler will bind
     pvc.created_at = Utc::now();
 
     let key = format!("/registry/pvcs/{}/{}", ns, pvc.id);
@@ -740,7 +742,27 @@ pub async fn create_pvc(
                 warn!("Failed to create PVC: {}", e);
                 return (StatusCode::INTERNAL_SERVER_ERROR, "Failed").into_response();
             }
-            info!("Created PVC {}/{} ({})", ns, pvc.name, pvc.id);
+            info!(
+                "Created PVC {}/{} ({}) — phase: Pending",
+                ns, pvc.name, pvc.id
+            );
+
+            // Background bind: simulate volume provisioner binding after a short delay
+            let store = state.store.clone();
+            let bind_key = key.clone();
+            let mut bind_pvc = pvc.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                bind_pvc.phase = pkg_types::volume::PVCPhase::Bound;
+                if let Ok(data) = serde_json::to_vec(&bind_pvc) {
+                    if let Err(e) = store.put(&bind_key, &data).await {
+                        tracing::warn!("Failed to bind PVC {}: {}", bind_pvc.id, e);
+                    } else {
+                        tracing::info!("PVC {} bound successfully", bind_pvc.id);
+                    }
+                }
+            });
+
             (StatusCode::CREATED, Json(pvc)).into_response()
         }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Serialization failed").into_response(),

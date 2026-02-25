@@ -210,7 +210,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Pod Sync loop
-    let runtime = Arc::new(ContainerRuntime::new(None::<&str>)?);
+    let runtime = Arc::new(ContainerRuntime::new(None::<&str>).await?);
     let sync_client = client.clone();
     let sync_server_base = server.clone();
     let sync_token = token.clone();

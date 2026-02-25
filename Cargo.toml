@@ -29,10 +29,10 @@ async-trait = "0.1.89"
 anyhow = "1.0.102"
 slatedb = "0.10.1"
 axum = "0.8.8"
-reqwest = { version = "0.12.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", features = ["json", "rustls"] }
 clap = { version = "4.5.23", features = ["derive"] }
 uuid = { version = "1.16", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde_yaml = "0.9"
 tokio-stream = { version = "0.1", features = ["sync"] }
-sysinfo = "0.34"
+sysinfo = "0.38"

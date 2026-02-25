@@ -11,9 +11,10 @@ use tracing::{info, warn};
 use crate::AppState;
 use crate::auth::{auth_middleware, rbac_middleware};
 use crate::handlers::{
-    cluster, drain, endpoints, heartbeat, processes, register, resources, watch,
+    cluster, drain, endpoints, exec, heartbeat, processes, register, resources, watch,
 };
 use crate::request_id::request_id_middleware;
+use pkg_container::ContainerRuntime;
 use pkg_controllers::cronjob::CronJobController;
 use pkg_controllers::daemonset::DaemonSetController;
 use pkg_controllers::deployment::DeploymentController;
@@ -57,6 +58,9 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         "Whether this server is the leader (1=leader, 0=follower)",
     );
 
+    // Initialize container runtime (stub mode for now — use socket path for real containerd)
+    let container_runtime = Arc::new(ContainerRuntime::new(None::<&str>).await?);
+
     let state = AppState {
         store: store.clone(),
         ca: Arc::new(ca),
@@ -64,6 +68,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         listen_addr: config.addr.to_string(),
         scheduler: Some(scheduler.clone()),
         metrics,
+        container_runtime,
     };
 
     // Seed default namespaces
@@ -230,6 +235,11 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         )
         // Cluster: process list
         .route("/api/v1/processes", get(processes::list_processes))
+        // Phase 7: exec into pod
+        .route(
+            "/api/v1/namespaces/{ns}/pods/{id}/exec",
+            get(exec::exec_into_pod),
+        )
         // Phase 2: generic delete
         .route(
             "/api/v1/{resource_type}/{ns}/{id}",

@@ -19,4 +19,5 @@ pkg-state = { path = "../state" }
 pkg-scheduler = { path = "../scheduler" }
 pkg-controllers = { path = "../controllers" }
 pkg-metrics = { path = "../metrics" }
+pkg-container = { path = "../container" }
 sysinfo = { workspace = true }
