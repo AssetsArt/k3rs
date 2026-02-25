@@ -21,10 +21,14 @@ echo ""
 # Clean up agent ports
 ./scripts/cleanup-port.sh "$PROXY_PORT" "$SERVICE_PROXY_PORT" "$DNS_PORT" 2>/dev/null || true
 
-cargo run --bin k3rs-agent -- \
-    --server "$SERVER" \
-    --token "$TOKEN" \
-    --node-name "$NODE_NAME" \
-    --proxy-port "$PROXY_PORT" \
-    --service-proxy-port "$SERVICE_PROXY_PORT" \
-    --dns-port "$DNS_PORT"
+# Ensure cargo-watch is installed
+if ! command -v cargo-watch &>/dev/null; then
+    echo "📦 Installing cargo-watch..."
+    cargo install cargo-watch
+fi
+
+cargo watch \
+    -x "run --bin k3rs-agent -- --server $SERVER --token $TOKEN --node-name $NODE_NAME --proxy-port $PROXY_PORT --service-proxy-port $SERVICE_PROXY_PORT --dns-port $DNS_PORT" \
+    -w pkg/ \
+    -w cmd/ \
+    -i "target/*"
