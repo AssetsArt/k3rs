@@ -3596,9 +3596,11 @@ dependencies = [
  "chrono",
  "dioxus",
  "dioxus-free-icons",
+ "gloo-timers",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

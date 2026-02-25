@@ -11,9 +11,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 reqwest = { version = "0.13", features = ["json"], optional = true }
+tokio = { workspace = true, optional = true }
+gloo-timers = "0.3"
 
 [features]
 default = ["web", "server"]
 web = ["dioxus/web"]
-server = ["dioxus/server", "dep:reqwest"]
+server = ["dioxus/server", "dep:reqwest", "dep:tokio"]
 desktop = ["dioxus/desktop"]

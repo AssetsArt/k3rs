@@ -1,16 +1,86 @@
 use crate::api;
 use dioxus::prelude::*;
+use dioxus_free_icons::icons::ld_icons::*;
+use dioxus_free_icons::Icon;
 
 #[component]
 pub fn ProcessList() -> Element {
-    let processes =
-        use_resource(move || async move { api::get_processes().await.unwrap_or_default() });
+    let mut refresh_tick = use_signal(|| 0u32);
+    let mut auto_reload = use_signal(|| true);
+    let mut interval_secs = use_signal(|| 3u64);
+
+    // Auto-reload timer
+    use_future(move || async move {
+        loop {
+            let secs = *interval_secs.read();
+            let dur = std::time::Duration::from_secs(secs);
+            #[cfg(feature = "server")]
+            tokio::time::sleep(dur).await;
+            #[cfg(all(feature = "web", not(feature = "server")))]
+            gloo_timers::future::sleep(dur).await;
+            let is_auto = *auto_reload.read();
+            if is_auto {
+                refresh_tick += 1;
+            }
+        }
+    });
+
+    // Fetch processes (re-fetches when refresh_tick changes)
+    let processes = use_resource(move || {
+        let _tick = *refresh_tick.read(); // subscribe to refresh_tick
+        async move { api::get_processes().await.unwrap_or_default() }
+    });
     let procs_data = processes.read();
 
     rsx! {
-        div { class: "mb-6",
-            h2 { class: "text-xl font-semibold text-white", "Process List" }
-            p { class: "text-sm text-slate-400 mt-1", "Running processes across cluster nodes" }
+        div { class: "flex items-center justify-between mb-6",
+            div {
+                h2 { class: "text-xl font-semibold text-white", "Process List" }
+                p { class: "text-sm text-slate-400 mt-1", "Running k3rs processes across cluster nodes" }
+            }
+
+            div { class: "flex items-center gap-3",
+                // Manual reload button
+                button {
+                    class: "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 bg-slate-800 border border-slate-700 hover:bg-slate-700 hover:text-white transition-all active:scale-95",
+                    onclick: move |_| refresh_tick += 1,
+                    Icon { width: 14, height: 14, icon: LdRefreshCw }
+                    span { "Reload" }
+                }
+
+                // Auto-reload toggle
+                button {
+                    class: if *auto_reload.read() {
+                        "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 hover:bg-emerald-500/20 transition-all"
+                    } else {
+                        "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-slate-500 bg-slate-800 border border-slate-700 hover:bg-slate-700 transition-all"
+                    },
+                    onclick: move |_| { let v = *auto_reload.read(); auto_reload.set(!v); },
+                    Icon { width: 14, height: 14, icon: LdTimer }
+                    span { "Auto" }
+                }
+
+                // Interval input
+                div { class: "flex items-center gap-1.5",
+                    input {
+                        r#type: "number",
+                        min: "1",
+                        max: "60",
+                        value: "{interval_secs}",
+                        class: "w-14 bg-slate-800 border border-slate-700 rounded-md px-2 py-1.5 text-xs text-slate-300 text-center outline-none focus:border-blue-500 transition-colors",
+                        onchange: move |evt| {
+                            if let Ok(v) = evt.value().parse::<u64>() {
+                                if v >= 3 && v <= 60 {
+                                    interval_secs.set(v);
+                                } else {
+                                    interval_secs.set(3);
+                                }
+                            }
+                        },
+                    }
+                    span { class: "text-xs text-slate-500", "s" }
+                }
+            }
         }
 
         div { class: "bg-slate-900 border border-slate-800 rounded-xl overflow-hidden",
@@ -20,7 +90,7 @@ pub fn ProcessList() -> Element {
                         th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Node" }
                         th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Process Name" }
                         th { class: "text-right px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "CPU %" }
-                        th { class: "text-right px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Memory" }
+                        th { class: "text-right px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Memory (RSS)" }
                         th { class: "text-right px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "PID" }
                     }
                 }
@@ -28,7 +98,7 @@ pub fn ProcessList() -> Element {
                     if let Some(procs) = procs_data.as_ref() {
                         if procs.is_empty() {
                             tr {
-                                td { colspan: "5", class: "text-center py-16 text-slate-500 text-sm", "No processes found" }
+                                td { colspan: "5", class: "text-center py-16 text-slate-500 text-sm", "No k3rs processes found" }
                             }
                         } else {
                             for p in procs.iter() {

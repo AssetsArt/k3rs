@@ -6,3 +6,7 @@
     font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
   }
 }
+
+button {
+  @apply cursor-pointer;
+}
