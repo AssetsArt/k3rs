@@ -293,22 +293,25 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - Supports `PathType::Prefix` and `PathType::Exact` matching
 
 ### Phase 3.5: Management UI (Dioxus)
-- [x] Scaffold `cmd/k3rs-ui` Dioxus web project with `dx init`.
-- [x] Implement Dashboard page — cluster overview with node/pod counts and status cards.
-    - 4 stat cards: Nodes (ready count), Pods (running count), Services, Version
-    - Recent nodes table with status badges
-- [x] Implement Nodes page — list all nodes with status, labels, registered time.
-- [x] Implement Workloads page — tabbed view for Pods, Deployments, Services, ConfigMaps, Secrets.
-    - Tabbed UI with 4 sub-tables (Pods, Deployments, ConfigMaps, Secrets)
-- [x] Implement Services page — list with type badges, ClusterIP, ports.
-- [x] Implement Namespace selector — dropdown/sidebar to switch active namespace.
-    - Global `AppContext` signal with reactive namespace switching
-- [x] Implement Events page — live event stream via SSE from `/api/v1/watch`.
-- [x] Implement Ingress & Networking page — view Ingress rules (host/path/backend).
-- [x] Add dark mode and responsive layout.
-    - Full dark-mode CSS design system (sidebar, cards, tables, badges, modals)
-    - Responsive breakpoint at 768px (collapsed sidebar)
-- [x] Integrate with API Server — reqwest-based HTTP client with Bearer auth.
+- [x] Scaffold `cmd/k3rs-ui` Dioxus fullstack web project.
+- [x] Implement Dashboard page — cluster overview with stat cards and nodes table.
+    - 4 stat cards (Nodes, Pods, Services, Version) with Lucide icons
+- [x] Implement Nodes page — list all nodes with status badges, labels, registered time.
+- [x] Implement Deployments page — replicas, namespace, ID.
+- [x] Implement Services page — type badges (ClusterIP/NodePort/LB), cluster IP, ports.
+- [x] Implement Pods page — status, node assignment.
+- [x] Implement ConfigMaps page — key count, namespace.
+- [x] Implement Secrets page — key count, namespace.
+- [x] Implement Ingress page — host/path/backend routing rules.
+- [x] Implement Events page — event stream with type badges.
+- [x] Implement Namespace selector — sidebar dropdown, reactive via `Signal` context.
+- [x] Grouped sidebar navigation:
+    - **Menu**: Dashboard, Nodes
+    - **Workloads**: Deployments, Services, Pods, ConfigMaps, Secrets
+    - **Networking**: Ingress
+    - **Cluster**: Events
+- [x] Dark mode with Tailwind CSS v4.1.5 + `dioxus-free-icons` (Lucide).
+- [x] Dioxus server functions (`#[get]`) — reqwest proxies to k3rs API (server-side only).
 
 ### Phase 4: Deployments & Controllers
 - [ ] Implement Deployment and ReplicaSet controllers with rolling update strategy.
