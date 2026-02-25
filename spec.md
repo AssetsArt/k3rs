@@ -347,10 +347,29 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - All 7 controllers (Node + 6 new) started at server boot
 
 ### Phase 5: Reliability & High Availability
-- [ ] Implement multi-server mode with leader election via SlateDB leases.
-- [ ] Implement graceful node shutdown and Pingora zero-downtime proxy upgrades.
-- [ ] Implement workload rescheduling on node failure.
-- [ ] Implement namespace resource quotas and network policies.
+- [x] Implement multi-server mode with leader election via SlateDB leases.
+    - `LeaderElection` engine in `pkg/state/src/leader.rs` using `/registry/leases/controller-leader` key
+    - TTL-based lease (15s) with automatic renewal every 5s
+    - Leader-gated controllers: only the leader runs Scheduler + all 8 controllers
+    - On leadership loss: controllers are aborted; on re-acquisition: controllers restart
+    - All servers serve API reads regardless of leader status
+- [x] Implement graceful node shutdown and Pingora zero-downtime proxy upgrades.
+    - `POST /api/v1/nodes/:name/cordon` — mark node unschedulable + add NoSchedule taint
+    - `POST /api/v1/nodes/:name/uncordon` — remove unschedulable flag + taint, restore Ready
+    - `POST /api/v1/nodes/:name/drain` — cordon + evict all pods (reset to Pending for rescheduling)
+    - `Node.unschedulable` field used by Scheduler to skip cordoned nodes
+    - Agent handles SIGTERM: clean up lock file on graceful exit
+    - `k3rsctl node drain/cordon/uncordon <name>` CLI commands
+- [x] Implement workload rescheduling on node failure.
+    - `EvictionController` (30s interval) watches for nodes in `Unknown` state
+    - After 5-minute grace period, evicts all pods from failed nodes
+    - Evicted pods reset to `Pending` with `node_id = None` for automatic rescheduling
+    - Skips master/control-plane nodes and already-terminal pods
+- [x] Implement namespace resource quotas and network policies.
+    - `ResourceQuota` type: `max_pods`, `max_cpu_millis`, `max_memory_bytes` per namespace
+    - `POST/GET /api/v1/namespaces/:ns/resourcequotas` CRUD endpoints
+    - `NetworkPolicy` type: pod selector, ingress/egress rules, peer/port matching
+    - `POST/GET /api/v1/namespaces/:ns/networkpolicies` CRUD endpoints
 
 ### Phase 6: Observability & Extensibility
 - [ ] Add Prometheus-compatible `/metrics` endpoints on Server and Agent.

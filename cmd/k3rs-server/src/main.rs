@@ -79,7 +79,8 @@ async fn main() -> anyhow::Result<()> {
         addr: SocketAddr::from(([0, 0, 0, 0], port)),
         data_dir,
         join_token: token,
-        node_name,
+        node_name: node_name.clone(),
+        server_id: node_name,
     };
 
     start_server(config).await?;

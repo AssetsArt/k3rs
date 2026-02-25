@@ -640,3 +640,81 @@ pub async fn pod_logs(
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
+
+// ============================================================
+// Resource Quotas
+// ============================================================
+
+pub async fn create_resource_quota(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+    Json(mut quota): Json<pkg_types::quota::ResourceQuota>,
+) -> impl IntoResponse {
+    quota.namespace = ns.clone();
+    quota.created_at = Utc::now();
+
+    let key = format!("/registry/resourcequotas/{}/{}", ns, quota.name);
+    match serde_json::to_vec(&quota) {
+        Ok(data) => {
+            if let Err(e) = state.store.put(&key, &data).await {
+                warn!("Failed to create resource quota: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed").into_response();
+            }
+            info!("Created resource quota {}/{}", ns, quota.name);
+            (StatusCode::CREATED, Json(quota)).into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Serialization failed").into_response(),
+    }
+}
+
+pub async fn list_resource_quotas(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+) -> impl IntoResponse {
+    let prefix = format!("/registry/resourcequotas/{}/", ns);
+    let entries = state.store.list_prefix(&prefix).await.unwrap_or_default();
+    let items: Vec<pkg_types::quota::ResourceQuota> = entries
+        .into_iter()
+        .filter_map(|(_, v)| serde_json::from_slice(&v).ok())
+        .collect();
+    (StatusCode::OK, Json(items)).into_response()
+}
+
+// ============================================================
+// Network Policies
+// ============================================================
+
+pub async fn create_network_policy(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+    Json(mut policy): Json<pkg_types::network_policy::NetworkPolicy>,
+) -> impl IntoResponse {
+    policy.namespace = ns.clone();
+    policy.created_at = Utc::now();
+
+    let key = format!("/registry/networkpolicies/{}/{}", ns, policy.name);
+    match serde_json::to_vec(&policy) {
+        Ok(data) => {
+            if let Err(e) = state.store.put(&key, &data).await {
+                warn!("Failed to create network policy: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed").into_response();
+            }
+            info!("Created network policy {}/{}", ns, policy.name);
+            (StatusCode::CREATED, Json(policy)).into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Serialization failed").into_response(),
+    }
+}
+
+pub async fn list_network_policies(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+) -> impl IntoResponse {
+    let prefix = format!("/registry/networkpolicies/{}/", ns);
+    let entries = state.store.list_prefix(&prefix).await.unwrap_or_default();
+    let items: Vec<pkg_types::network_policy::NetworkPolicy> = entries
+        .into_iter()
+        .filter_map(|(_, v)| serde_json::from_slice(&v).ok())
+        .collect();
+    (StatusCode::OK, Json(items)).into_response()
+}

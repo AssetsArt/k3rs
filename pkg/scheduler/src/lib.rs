@@ -46,6 +46,11 @@ impl Scheduler {
             return false;
         }
 
+        // 2. Node must not be unschedulable (cordoned)
+        if node.unschedulable {
+            return false;
+        }
+
         // 2. Check node affinity (all required labels must match)
         for (key, value) in &pod.spec.node_affinity {
             match node.labels.get(key) {
@@ -138,6 +143,7 @@ mod tests {
                 memory_bytes: 8_000_000_000,
             },
             allocated: ResourceRequirements::default(),
+            unschedulable: false,
         }
     }
 

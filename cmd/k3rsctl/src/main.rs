@@ -93,6 +93,21 @@ enum ClusterAction {
 enum NodeAction {
     /// List all registered nodes
     List,
+    /// Drain a node (cordon + evict pods)
+    Drain {
+        /// Node name
+        name: String,
+    },
+    /// Mark a node as unschedulable
+    Cordon {
+        /// Node name
+        name: String,
+    },
+    /// Mark a node as schedulable again
+    Uncordon {
+        /// Node name
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -143,6 +158,43 @@ async fn main() -> anyhow::Result<()> {
                 }
                 if nodes.is_empty() {
                     println!("(no nodes registered)");
+                }
+            }
+            NodeAction::Drain { name } => {
+                let url = format!("{}/api/v1/nodes/{}/drain", base, name);
+                let resp = client.post(&url).send().await?;
+                if resp.status().is_success() {
+                    let body: serde_json::Value = resp.json().await?;
+                    println!(
+                        "Node {} drained ({} pods evicted)",
+                        name,
+                        body.get("evicted_pods")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0)
+                    );
+                } else {
+                    eprintln!("Failed to drain node {}: {}", name, resp.status());
+                    if let Ok(text) = resp.text().await {
+                        eprintln!("  {}", text);
+                    }
+                }
+            }
+            NodeAction::Cordon { name } => {
+                let url = format!("{}/api/v1/nodes/{}/cordon", base, name);
+                let resp = client.post(&url).send().await?;
+                if resp.status().is_success() {
+                    println!("Node {} cordoned", name);
+                } else {
+                    eprintln!("Failed to cordon node {}: {}", name, resp.status());
+                }
+            }
+            NodeAction::Uncordon { name } => {
+                let url = format!("{}/api/v1/nodes/{}/uncordon", base, name);
+                let resp = client.post(&url).send().await?;
+                if resp.status().is_success() {
+                    println!("Node {} uncordoned", name);
+                } else {
+                    eprintln!("Failed to uncordon node {}: {}", name, resp.status());
                 }
             }
         },

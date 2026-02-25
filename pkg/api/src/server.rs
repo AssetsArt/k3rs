@@ -6,14 +6,15 @@ use chrono::Utc;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::AppState;
 use crate::auth::{auth_middleware, rbac_middleware};
-use crate::handlers::{cluster, endpoints, heartbeat, register, resources, watch};
+use crate::handlers::{cluster, drain, endpoints, heartbeat, register, resources, watch};
 use pkg_controllers::cronjob::CronJobController;
 use pkg_controllers::daemonset::DaemonSetController;
 use pkg_controllers::deployment::DeploymentController;
+use pkg_controllers::eviction::EvictionController;
 use pkg_controllers::hpa::HPAController;
 use pkg_controllers::job::JobController;
 use pkg_controllers::node::NodeController;
@@ -21,6 +22,7 @@ use pkg_controllers::replicaset::ReplicaSetController;
 use pkg_pki::ca::ClusterCA;
 use pkg_scheduler::Scheduler;
 use pkg_state::client::StateStore;
+use pkg_state::leader::LeaderElection;
 
 /// Server configuration passed from the binary's CLI.
 pub struct ServerConfig {
@@ -28,6 +30,7 @@ pub struct ServerConfig {
     pub data_dir: String,
     pub join_token: String,
     pub node_name: String,
+    pub server_id: String,
 }
 
 pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
@@ -50,14 +53,48 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     // Seed master node
     seed_master_node(&store, &config.node_name).await?;
 
-    // Start controllers
-    NodeController::new(store.clone()).start();
-    DeploymentController::new(store.clone()).start();
-    ReplicaSetController::new(store.clone(), scheduler.clone()).start();
-    DaemonSetController::new(store.clone()).start();
-    JobController::new(store.clone(), scheduler.clone()).start();
-    CronJobController::new(store.clone()).start();
-    HPAController::new(store.clone()).start();
+    // Start leader election
+    let election = LeaderElection::new(store.clone(), config.server_id.clone());
+    let (_election_handle, leader_rx) = election.start();
+
+    // Start leader-gated controllers
+    let ctrl_store = store.clone();
+    let ctrl_scheduler = scheduler.clone();
+    tokio::spawn(async move {
+        let mut rx = leader_rx;
+        loop {
+            // Wait until we become leader
+            while !*rx.borrow() {
+                if rx.changed().await.is_err() {
+                    return;
+                }
+            }
+
+            info!("Starting controllers (leader mode)");
+            let handles = vec![
+                NodeController::new(ctrl_store.clone()).start(),
+                DeploymentController::new(ctrl_store.clone()).start(),
+                ReplicaSetController::new(ctrl_store.clone(), ctrl_scheduler.clone()).start(),
+                DaemonSetController::new(ctrl_store.clone()).start(),
+                JobController::new(ctrl_store.clone(), ctrl_scheduler.clone()).start(),
+                CronJobController::new(ctrl_store.clone()).start(),
+                HPAController::new(ctrl_store.clone()).start(),
+                EvictionController::new(ctrl_store.clone()).start(),
+            ];
+
+            // Wait until we lose leadership
+            while *rx.borrow() {
+                if rx.changed().await.is_err() {
+                    return;
+                }
+            }
+
+            warn!("Lost leadership — stopping controllers");
+            for h in handles {
+                h.abort();
+            }
+        }
+    });
 
     // Protected API routes
     let api_routes = Router::new()
@@ -153,6 +190,20 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             "/api/v1/namespaces/{ns}/hpa",
             post(resources::create_hpa).get(resources::list_hpas),
         )
+        // Phase 5: node drain/cordon/uncordon
+        .route("/api/v1/nodes/{name}/cordon", post(drain::cordon_node))
+        .route("/api/v1/nodes/{name}/uncordon", post(drain::uncordon_node))
+        .route("/api/v1/nodes/{name}/drain", post(drain::drain_node))
+        // Phase 5: resource quotas
+        .route(
+            "/api/v1/namespaces/{ns}/resourcequotas",
+            post(resources::create_resource_quota).get(resources::list_resource_quotas),
+        )
+        // Phase 5: network policies
+        .route(
+            "/api/v1/namespaces/{ns}/networkpolicies",
+            post(resources::create_network_policy).get(resources::list_network_policies),
+        )
         // Phase 2: generic delete
         .route(
             "/api/v1/{resource_type}/{ns}/{id}",
@@ -228,6 +279,7 @@ async fn seed_master_node(store: &StateStore, name: &str) -> anyhow::Result<()> 
             }],
             capacity: pkg_types::pod::ResourceRequirements::default(),
             allocated: pkg_types::pod::ResourceRequirements::default(),
+            unschedulable: false,
         };
         let data = serde_json::to_vec(&node)?;
         store.put(&key, &data).await?;

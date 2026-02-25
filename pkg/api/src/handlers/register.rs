@@ -69,6 +69,7 @@ pub async fn register_node(
             taints: vec![],
             capacity: ResourceRequirements::default(),
             allocated: ResourceRequirements::default(),
+            unschedulable: false,
         }
     };
 

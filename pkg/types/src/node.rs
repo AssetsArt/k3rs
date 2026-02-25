@@ -66,6 +66,9 @@ pub struct Node {
     pub capacity: ResourceRequirements,
     #[serde(default)]
     pub allocated: ResourceRequirements,
+    /// If true, the scheduler will not place new pods on this node.
+    #[serde(default)]
+    pub unschedulable: bool,
 }
 
 // --- Cluster info ---
