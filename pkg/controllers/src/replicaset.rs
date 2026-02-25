@@ -114,6 +114,28 @@ impl ReplicaSetController {
                 }
             }
 
+            // Stub mode: auto-promote Scheduled → Running when no real agent is present.
+            // In production, the k3rs-agent handles this transition after pulling images
+            // and starting containers. For dev/single-node, we simulate it here.
+            let pod_prefix_check = format!("/registry/pods/{}/", ns);
+            let current_pods = self.store.list_prefix(&pod_prefix_check).await?;
+            for (pod_key, pod_value) in current_pods {
+                if let Ok(pod) = serde_json::from_slice::<Pod>(&pod_value) {
+                    if pod.owner_ref.as_deref() == Some(&rs.id)
+                        && pod.status == PodStatus::Scheduled
+                    {
+                        let mut updated = pod.clone();
+                        updated.status = PodStatus::Running;
+                        let data = serde_json::to_vec(&updated)?;
+                        self.store.put(&pod_key, &data).await?;
+                        info!(
+                            "RS {}: auto-promoted pod {} → Running (stub mode)",
+                            rs.name, pod.name
+                        );
+                    }
+                }
+            }
+
             // Recount pods for status update
             let pod_prefix = format!("/registry/pods/{}/", ns);
             let pod_entries = self.store.list_prefix(&pod_prefix).await?;
