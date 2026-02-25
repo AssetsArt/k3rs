@@ -405,14 +405,22 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
 
 ### Phase 7: Implementation Complete
 
-#### Container Runtime (`pkg/container/src/lib.rs`)
-Real `containerd-client` v0.8.0 gRPC integration with stub fallback:
-- [x] `pull_image()` — ImagesClient gRPC (with stub fallback)
-- [x] `create_container()` — ContainersClient gRPC (with stub fallback)
-- [x] `start_container()` — TasksClient::create + start gRPC (with stub fallback)
-- [x] `stop_container()` — TasksClient::kill + delete gRPC (with stub fallback)
-- [x] `list_containers()` — ContainersClient::list gRPC (with stub fallback)
-- [x] `container_logs()` — File-based log reader + stub simulation
+#### Container Runtime (`pkg/container/`) — Direct OCI Integration 🏆
+Rust-native, daemonless container runtime with pluggable `RuntimeBackend` trait:
+
+**Architecture:** `oci-client` → `tar`+`flate2` → `youki`/`crun`/`runc` (Podman-style)
+
+| Module | Crate | Purpose |
+|--------|-------|---------|
+| `image.rs` | `oci-client` | Pull images from OCI registries (Docker Hub, GHCR) |
+| `rootfs.rs` | `tar` + `flate2` | Extract image layers → rootfs + generate `config.json` |
+| `backend.rs` | `oci-spec` | `RuntimeBackend` trait + OCI/Stub/Firecracker backends |
+| `runtime.rs` | — | `ContainerRuntime` facade orchestrating the full lifecycle |
+
+**Backends:**
+- [x] `StubBackend` — dev/test mode (log-only)
+- [x] `OciBackend` — invokes `youki`/`crun`/`runc` via `std::process::Command`
+- [ ] `FirecrackerBackend` — microVM via REST API over Unix socket (roadmap)
 
 #### Pod Logs (`pkg/api/src/handlers/resources.rs`)
 - [x] Pod logs wired to `ContainerRuntime::container_logs()` via `AppState`

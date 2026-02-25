@@ -8,6 +8,10 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
-containerd-client = "0.8"
-prost-types = "0.13"
-tonic = "0.12"
+serde = { workspace = true }
+serde_json = { workspace = true }
+oci-client = "0.14"
+oci-spec = "0.7"
+flate2 = "1.1"
+tar = "0.4"
+async-trait = "0.1"
