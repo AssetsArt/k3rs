@@ -115,7 +115,7 @@ pub fn ProcessList() -> Element {
                                     let cpu_str = format!("{:.1}", p.cpu_percent);
                                     let cpu_cls = if p.cpu_percent > 50.0 {
                                         "text-red-400"
-                                    } else if p.cpu_percent > 10.0 {
+                                    } else if p.cpu_percent > 20.0 {
                                         "text-amber-400"
                                     } else {
                                         "text-emerald-400"
