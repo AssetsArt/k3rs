@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # k3rs dev server — auto-restart on code changes using cargo-watch
-# Usage: ./scripts/dev.sh [--port 6443] [--token demo-token-123]
+# Usage: ./scripts/dev.sh [port] [token]
 
 PORT="${1:-6443}"
 TOKEN="${2:-demo-token-123}"
@@ -18,7 +18,7 @@ if ! command -v cargo-watch &>/dev/null; then
     cargo install cargo-watch
 fi
 
-# Clean up port before starting
+# Clean up all ports before starting (server, agent proxy, service proxy, DNS)
 ./scripts/cleanup-port.sh "$PORT" 2>/dev/null || true
 
 # Watch for changes and restart
