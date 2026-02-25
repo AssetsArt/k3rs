@@ -12,7 +12,8 @@ members = [
     "pkg/proxy",
     "pkg/scheduler",
     "pkg/state",
-    "pkg/types"
+    "pkg/types",
+    "cmd/k3rs-ui"
 ]
 
 [workspace.dependencies]

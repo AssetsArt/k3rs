@@ -293,7 +293,7 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - Supports `PathType::Prefix` and `PathType::Exact` matching
 
 ### Phase 3.5: Management UI (Dioxus)
-- [ ] Scaffold `cmd/k3rs-ui` Dioxus web project with `dx init`.
+- [x] Scaffold `cmd/k3rs-ui` Dioxus web project with `dx init`.
 - [ ] Implement Dashboard page — cluster overview with node/pod counts and status cards.
 - [ ] Implement Nodes page — list all nodes with status, labels, registered time.
 - [ ] Implement Workloads page — tabbed view for Pods, Deployments, Services, ConfigMaps, Secrets.
