@@ -1,3 +1,4 @@
+pub mod config;
 pub mod configmap;
 pub mod deployment;
 pub mod endpoint;

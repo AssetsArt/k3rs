@@ -2730,9 +2730,11 @@ dependencies = [
 name = "pkg-types"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "serde",
  "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]

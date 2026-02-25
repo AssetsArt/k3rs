@@ -3,6 +3,7 @@ use pkg_container::ContainerRuntime;
 use pkg_network::dns::DnsServer;
 use pkg_proxy::service_proxy::ServiceProxy;
 use pkg_proxy::tunnel::TunnelProxy;
+use pkg_types::config::{AgentConfigFile, load_config_file};
 use pkg_types::node::NodeRegistrationRequest;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -12,36 +13,65 @@ use tracing::{error, info, warn};
 #[derive(Parser, Debug)]
 #[command(name = "k3rs-agent", about = "k3rs node agent (data plane)")]
 struct Cli {
+    /// Path to YAML config file
+    #[arg(long, short, default_value = "/etc/k3rs/agent-config.yaml")]
+    config: String,
+
     /// Server API endpoint
-    #[arg(long, default_value = "http://127.0.0.1:6443")]
-    server: String,
+    #[arg(long)]
+    server: Option<String>,
 
     /// Join token for registration
-    #[arg(long, default_value = "demo-token-123")]
-    token: String,
+    #[arg(long)]
+    token: Option<String>,
 
     /// Node name
-    #[arg(long, default_value = "node-1")]
-    node_name: String,
+    #[arg(long)]
+    node_name: Option<String>,
 
     /// Local port for the tunnel proxy
-    #[arg(long, default_value = "6444")]
-    proxy_port: u16,
+    #[arg(long)]
+    proxy_port: Option<u16>,
 
     /// Local port for the service proxy
-    #[arg(long, default_value = "10256")]
-    service_proxy_port: u16,
+    #[arg(long)]
+    service_proxy_port: Option<u16>,
 
     /// Local port for the embedded DNS server
-    #[arg(long, default_value = "5353")]
-    dns_port: u16,
+    #[arg(long)]
+    dns_port: Option<u16>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
-    info!("Starting k3rs-agent for node: {}", cli.node_name);
+
+    // Load config file (returns defaults if file not found)
+    let file_cfg: AgentConfigFile = load_config_file(&cli.config)?;
+    info!("Config file: {}", cli.config);
+
+    // Merge: CLI args > config file > defaults
+    let server = cli
+        .server
+        .or(file_cfg.server)
+        .unwrap_or_else(|| "http://127.0.0.1:6443".to_string());
+    let token = cli
+        .token
+        .or(file_cfg.token)
+        .unwrap_or_else(|| "demo-token-123".to_string());
+    let node_name = cli
+        .node_name
+        .or(file_cfg.node_name)
+        .unwrap_or_else(|| "node-1".to_string());
+    let proxy_port = cli.proxy_port.or(file_cfg.proxy_port).unwrap_or(6444);
+    let service_proxy_port = cli
+        .service_proxy_port
+        .or(file_cfg.service_proxy_port)
+        .unwrap_or(10256);
+    let dns_port = cli.dns_port.or(file_cfg.dns_port).unwrap_or(5353);
+
+    info!("Starting k3rs-agent for node: {}", node_name);
 
     // 1. Register with the Server
     let client = reqwest::Client::builder()
@@ -49,12 +79,12 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     let req = NodeRegistrationRequest {
-        token: cli.token.clone(),
-        node_name: cli.node_name.clone(),
+        token: token.clone(),
+        node_name: node_name.clone(),
         labels: HashMap::new(),
     };
 
-    let url = format!("{}/register", cli.server.trim_end_matches('/'));
+    let url = format!("{}/register", server.trim_end_matches('/'));
     info!("Registering with server at {}", url);
 
     let my_node_id: String;
@@ -71,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
                 );
 
                 // Store certs to disk for future mTLS connections
-                let cert_dir = format!("/tmp/k3rs-agent-{}", cli.node_name);
+                let cert_dir = format!("/tmp/k3rs-agent-{}", node_name);
                 tokio::fs::create_dir_all(&cert_dir).await?;
                 tokio::fs::write(format!("{}/node.crt", cert_dir), &reg_resp.certificate).await?;
                 tokio::fs::write(format!("{}/node.key", cert_dir), &reg_resp.private_key).await?;
@@ -94,19 +124,18 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 2. Start the Pingora tunnel proxy
-    let server_host = cli
-        .server
+    let server_host = server
         .trim_start_matches("http://")
         .trim_start_matches("https://");
-    let proxy = TunnelProxy::new(server_host, cli.proxy_port);
+    let proxy = TunnelProxy::new(server_host, proxy_port);
     proxy.start().await?;
 
     // 3. Start the Pingora Service Proxy (Phase 3)
-    let service_proxy = Arc::new(ServiceProxy::new(cli.service_proxy_port));
+    let service_proxy = Arc::new(ServiceProxy::new(service_proxy_port));
     service_proxy.start().await?;
 
     // 4. Start the embedded DNS server (Phase 3)
-    let dns_addr: SocketAddr = format!("0.0.0.0:{}", cli.dns_port).parse()?;
+    let dns_addr: SocketAddr = format!("0.0.0.0:{}", dns_port).parse()?;
     let dns_server = Arc::new(DnsServer::new(dns_addr));
     dns_server.start().await?;
 
@@ -114,10 +143,10 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting node controllers (heartbeat, pod-sync, route-sync)");
 
     // Heartbeat loop
-    let server_base = cli.server.clone();
-    let node_name = cli.node_name.clone();
+    let server_base = server.clone();
+    let heartbeat_node_name = node_name.clone();
     let heartbeat_client = client.clone();
-    let token_clone = cli.token.clone();
+    let token_clone = token.clone();
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
@@ -126,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
             let url = format!(
                 "{}/api/v1/nodes/{}/heartbeat",
                 server_base.trim_end_matches('/'),
-                node_name
+                heartbeat_node_name
             );
             match heartbeat_client
                 .put(&url)
@@ -135,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
                 .await
             {
                 Ok(_) => {
-                    info!("Heartbeat sent for {}", node_name);
+                    info!("Heartbeat sent for {}", heartbeat_node_name);
                 }
                 Err(e) => {
                     warn!("Heartbeat failed: {}", e);
@@ -147,8 +176,8 @@ async fn main() -> anyhow::Result<()> {
     // Pod Sync loop
     let runtime = Arc::new(ContainerRuntime::new(None::<&str>)?);
     let sync_client = client.clone();
-    let sync_server_base = cli.server.clone();
-    let sync_token = cli.token.clone();
+    let sync_server_base = server.clone();
+    let sync_token = token.clone();
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
@@ -219,8 +248,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Route Sync loop (Phase 3) — synchronize Service Proxy and DNS with cluster state
     let route_sync_client = client.clone();
-    let route_sync_server = cli.server.clone();
-    let route_sync_token = cli.token.clone();
+    let route_sync_server = server.clone();
+    let route_sync_token = token.clone();
     let route_service_proxy = service_proxy.clone();
     let route_dns_server = dns_server.clone();
 

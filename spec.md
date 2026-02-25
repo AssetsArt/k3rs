@@ -207,6 +207,25 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - `k3rsctl node list` — `GET /api/v1/nodes`, displays formatted table (ID, NAME, STATUS, REGISTERED)
     - `--server` flag for configurable API endpoint
     - Agent: heartbeat loop (10s interval), registration with real certs, tunnel proxy startup
+- [x] YAML configuration file support (K3s-style).
+    - `--config` / `-c` flag on both `k3rs-server` (default `/etc/k3rs/config.yaml`) and `k3rs-agent` (default `/etc/k3rs/agent-config.yaml`)
+    - 3-layer merge: CLI args > YAML config file > hardcoded defaults
+    - Server config keys: `port`, `data-dir`, `token`
+    - Agent config keys: `server`, `token`, `node-name`, `proxy-port`, `service-proxy-port`, `dns-port`
+    - Gracefully skips missing config file (uses defaults)
+    - Example server `config.yaml`:
+      ```yaml
+      port: 6443
+      data-dir: /var/lib/k3rs/data
+      token: my-secret-token
+      ```
+    - Example agent `agent-config.yaml`:
+      ```yaml
+      server: https://10.0.0.1:6443
+      token: my-secret-token
+      node-name: worker-1
+      dns-port: 5353
+      ```
 
 ### Phase 2: Orchestration Logic
 - [x] Implement Node Registration and health-check ping mechanisms.
