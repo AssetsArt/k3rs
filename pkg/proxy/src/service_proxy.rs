@@ -52,13 +52,13 @@ impl ProxyHttp for ServiceProxyHandler {
         let table = self.routing_table.read().await;
 
         // Try to match against the routing table
-        if let Some(backends) = table.routes.get(&host) {
-            if !backends.is_empty() {
-                let idx = self.round_robin.fetch_add(1, Ordering::Relaxed) % backends.len();
-                let backend = &backends[idx];
-                let peer = HttpPeer::new(backend, false, String::new());
-                return Ok(Box::new(peer));
-            }
+        if let Some(backends) = table.routes.get(&host)
+            && !backends.is_empty()
+        {
+            let idx = self.round_robin.fetch_add(1, Ordering::Relaxed) % backends.len();
+            let backend = &backends[idx];
+            let peer = HttpPeer::new(backend, false, String::new());
+            return Ok(Box::new(peer));
         }
 
         // Fallback: try without port matching (just plain host)

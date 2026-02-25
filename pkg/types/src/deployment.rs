@@ -34,21 +34,11 @@ impl Default for DeploymentStrategy {
 
 // --- Deployment status ---
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeploymentStatus {
     pub ready_replicas: u32,
     pub available_replicas: u32,
     pub updated_replicas: u32,
-}
-
-impl Default for DeploymentStatus {
-    fn default() -> Self {
-        Self {
-            ready_replicas: 0,
-            available_replicas: 0,
-            updated_replicas: 0,
-        }
-    }
 }
 
 // --- Deployment spec ---

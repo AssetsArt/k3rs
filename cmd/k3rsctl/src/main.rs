@@ -108,10 +108,7 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
                 let nodes: Vec<Node> = resp.json().await?;
-                println!(
-                    "{:<38} {:<16} {:<10} {}",
-                    "ID", "NAME", "STATUS", "REGISTERED"
-                );
+                println!("{:<38} {:<16} {:<10} REGISTERED", "ID", "NAME", "STATUS");
                 for node in &nodes {
                     println!(
                         "{:<38} {:<16} {:<10} {}",
@@ -135,8 +132,8 @@ async fn main() -> anyhow::Result<()> {
                 let resp = client.get(&url).send().await?;
                 let pods: Vec<Pod> = resp.json().await?;
                 println!(
-                    "{:<38} {:<20} {:<12} {:<10} {}",
-                    "ID", "NAME", "NAMESPACE", "STATUS", "NODE"
+                    "{:<38} {:<20} {:<12} {:<10} NODE",
+                    "ID", "NAME", "NAMESPACE", "STATUS"
                 );
                 for pod in &pods {
                     println!(
@@ -157,8 +154,8 @@ async fn main() -> anyhow::Result<()> {
                 let resp = client.get(&url).send().await?;
                 let svcs: Vec<Service> = resp.json().await?;
                 println!(
-                    "{:<38} {:<20} {:<12} {:<14} {}",
-                    "ID", "NAME", "NAMESPACE", "TYPE", "CLUSTER-IP"
+                    "{:<38} {:<20} {:<12} {:<14} CLUSTER-IP",
+                    "ID", "NAME", "NAMESPACE", "TYPE"
                 );
                 for svc in &svcs {
                     println!(
@@ -196,7 +193,7 @@ async fn main() -> anyhow::Result<()> {
                 let url = format!("{}/api/v1/namespaces/{}/configmaps", base, namespace);
                 let resp = client.get(&url).send().await?;
                 let cms: Vec<ConfigMap> = resp.json().await?;
-                println!("{:<38} {:<20} {:<12} {}", "ID", "NAME", "NAMESPACE", "KEYS");
+                println!("{:<38} {:<20} {:<12} KEYS", "ID", "NAME", "NAMESPACE");
                 for cm in &cms {
                     println!(
                         "{:<38} {:<20} {:<12} {}",
@@ -214,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
                 let url = format!("{}/api/v1/namespaces/{}/secrets", base, namespace);
                 let resp = client.get(&url).send().await?;
                 let secrets: Vec<Secret> = resp.json().await?;
-                println!("{:<38} {:<20} {:<12} {}", "ID", "NAME", "NAMESPACE", "KEYS");
+                println!("{:<38} {:<20} {:<12} KEYS", "ID", "NAME", "NAMESPACE");
                 for s in &secrets {
                     println!(
                         "{:<38} {:<20} {:<12} {}",
@@ -232,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
                 let url = format!("{}/api/v1/namespaces", base);
                 let resp = client.get(&url).send().await?;
                 let nss: Vec<Namespace> = resp.json().await?;
-                println!("{:<20} {}", "NAME", "CREATED");
+                println!("{:<20} CREATED", "NAME");
                 for ns in &nss {
                     println!(
                         "{:<20} {}",

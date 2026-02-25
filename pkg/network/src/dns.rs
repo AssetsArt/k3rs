@@ -58,10 +58,9 @@ impl DnsServer {
                 match socket.recv_from(&mut buf).await {
                     Ok((len, src)) => {
                         if let Some(response) = Self::handle_dns_query(&buf[..len], &records).await
+                            && let Err(e) = socket.send_to(&response, src).await
                         {
-                            if let Err(e) = socket.send_to(&response, src).await {
-                                warn!("DNS send error: {}", e);
-                            }
+                            warn!("DNS send error: {}", e);
                         }
                     }
                     Err(e) => {
