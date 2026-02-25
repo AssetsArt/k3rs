@@ -41,6 +41,7 @@ fi
 PORT="${1:-6443}"
 TOKEN="${2:-demo-token-123}"
 DATA_DIR="/tmp/k3rs-data"
+NODE_NAME="master-1"
 
 echo "🚀 Starting k3rs dev server (port=$PORT, data=$DATA_DIR)"
 echo "   Press Ctrl-C to stop"
@@ -57,7 +58,7 @@ fi
 
 # Watch for changes and restart
 cargo watch \
-    -x "run --bin k3rs-server -- --port $PORT --token $TOKEN --data-dir $DATA_DIR" \
+    -x "run --bin k3rs-server -- --port $PORT --token $TOKEN --data-dir $DATA_DIR --node-name $NODE_NAME --allow-colocate" \
     -w pkg/ \
     -w cmd/k3rs-server \
     -i "target/*"

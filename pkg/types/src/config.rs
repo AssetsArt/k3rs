@@ -16,6 +16,8 @@ pub struct ServerConfigFile {
     pub data_dir: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
+    #[serde(default, alias = "node-name")]
+    pub node_name: Option<String>,
 }
 
 /// Agent configuration file (YAML).

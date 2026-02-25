@@ -28,7 +28,7 @@ if ! command -v cargo-watch &>/dev/null; then
 fi
 
 cargo watch \
-    -x "run --bin k3rs-agent -- --server $SERVER --token $TOKEN --node-name $NODE_NAME --proxy-port $PROXY_PORT --service-proxy-port $SERVICE_PROXY_PORT --dns-port $DNS_PORT" \
+    -x "run --bin k3rs-agent -- --server $SERVER --token $TOKEN --node-name $NODE_NAME --proxy-port $PROXY_PORT --service-proxy-port $SERVICE_PROXY_PORT --dns-port $DNS_PORT --allow-colocate" \
     -w pkg/ \
     -w cmd/k3rs-agent \
     -i "target/*"

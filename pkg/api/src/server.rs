@@ -27,6 +27,7 @@ pub struct ServerConfig {
     pub addr: SocketAddr,
     pub data_dir: String,
     pub join_token: String,
+    pub node_name: String,
 }
 
 pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
@@ -47,7 +48,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     seed_default_namespaces(&store).await?;
 
     // Seed master node
-    seed_master_node(&store).await?;
+    seed_master_node(&store, &config.node_name).await?;
 
     // Start controllers
     NodeController::new(store.clone()).start();
@@ -201,8 +202,7 @@ async fn seed_default_namespaces(store: &StateStore) -> anyhow::Result<()> {
 }
 
 /// Seed the master node on startup.
-async fn seed_master_node(store: &StateStore) -> anyhow::Result<()> {
-    let name = "master";
+async fn seed_master_node(store: &StateStore, name: &str) -> anyhow::Result<()> {
     let key = format!("/registry/nodes/{}", name);
     if store.get(&key).await?.is_none() {
         let node = pkg_types::node::Node {

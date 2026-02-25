@@ -16,3 +16,4 @@ pkg-pki = { path = "../../pkg/pki" }
 pkg-state = { path = "../../pkg/state" }
 pkg-controllers = { path = "../../pkg/controllers" }
 pkg-scheduler = { path = "../../pkg/scheduler" }
+libc = "0.2"

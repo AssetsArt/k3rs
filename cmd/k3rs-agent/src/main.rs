@@ -7,8 +7,12 @@ use pkg_types::config::{AgentConfigFile, load_config_file};
 use pkg_types::node::NodeRegistrationRequest;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use tracing::{error, info, warn};
+
+const SERVER_LOCK: &str = "/tmp/k3rs-server.lock";
+const AGENT_LOCK: &str = "/tmp/k3rs-agent.lock";
 
 #[derive(Parser, Debug)]
 #[command(name = "k3rs-agent", about = "k3rs node agent (data plane)")]
@@ -40,12 +44,25 @@ struct Cli {
     /// Local port for the embedded DNS server
     #[arg(long)]
     dns_port: Option<u16>,
+
+    /// Allow running alongside k3rs-server on the same machine (dev only)
+    #[arg(long, default_value_t = false)]
+    allow_colocate: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+
+    // Colocation guard: prevent agent + server on the same machine
+    if !cli.allow_colocate && is_process_alive(SERVER_LOCK) {
+        error!("❌ k3rs-server is already running on this machine.");
+        error!("   Running server and agent on the same node is not supported.");
+        error!("   Use --allow-colocate to override (dev only).");
+        std::process::exit(1);
+    }
+    write_lock_file(AGENT_LOCK)?;
 
     // Load config file (returns defaults if file not found)
     let file_cfg: AgentConfigFile = load_config_file(&cli.config)?;
@@ -307,5 +324,35 @@ async fn main() -> anyhow::Result<()> {
     tokio::signal::ctrl_c().await?;
     info!("Shutting down agent");
 
+    // Clean up lock file on graceful exit
+    let _ = std::fs::remove_file(AGENT_LOCK);
+
     Ok(())
+}
+
+/// Write a lock file containing the current PID.
+fn write_lock_file(path: &str) -> anyhow::Result<()> {
+    std::fs::write(path, std::process::id().to_string())?;
+    Ok(())
+}
+
+/// Check if a lock file exists and the PID inside is still alive.
+fn is_process_alive(lock_path: &str) -> bool {
+    let path = Path::new(lock_path);
+    if !path.exists() {
+        return false;
+    }
+    match std::fs::read_to_string(path) {
+        Ok(pid_str) => {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                // kill(pid, 0) checks if process exists without sending a signal
+                unsafe { libc::kill(pid, 0) == 0 }
+            } else {
+                // Corrupt lock file, remove it
+                let _ = std::fs::remove_file(path);
+                false
+            }
+        }
+        Err(_) => false,
+    }
 }

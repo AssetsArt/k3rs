@@ -3557,6 +3557,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "pkg-container",
  "pkg-network",
  "pkg-proxy",
@@ -3576,6 +3577,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "libc",
  "pkg-api",
  "pkg-controllers",
  "pkg-pki",
