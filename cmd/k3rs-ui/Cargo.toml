@@ -4,14 +4,15 @@ version = "0.1.0"
 authors = ["Aitthi Arsa <meanstack20@gmail.com>"]
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 dioxus = { version = "0.7.1", features = ["router", "fullstack"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+reqwest = { version = "0.13", features = ["json"], optional = true }
 
 [features]
-default = ["web"]
+default = ["web", "server"]
 web = ["dioxus/web"]
+server = ["dioxus/server", "dep:reqwest"]
 desktop = ["dioxus/desktop"]
-mobile = ["dioxus/mobile"]
-server = ["dioxus/server"]

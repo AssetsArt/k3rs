@@ -294,15 +294,21 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
 
 ### Phase 3.5: Management UI (Dioxus)
 - [x] Scaffold `cmd/k3rs-ui` Dioxus web project with `dx init`.
-- [ ] Implement Dashboard page — cluster overview with node/pod counts and status cards.
-- [ ] Implement Nodes page — list all nodes with status, labels, registered time.
-- [ ] Implement Workloads page — tabbed view for Pods, Deployments, Services, ConfigMaps, Secrets.
-- [ ] Implement Namespace selector — dropdown/sidebar to switch active namespace.
-- [ ] Implement Events page — live event stream via SSE from `/api/v1/watch`.
-- [ ] Implement Create/Delete actions — modal forms for creating resources.
-- [ ] Implement Ingress & Networking page — view/create Ingress rules and Endpoints.
-- [ ] Add dark mode and responsive layout.
-- [ ] Integrate with API Server — serve WASM assets from the API server or as standalone.
+- [x] Implement Dashboard page — cluster overview with node/pod counts and status cards.
+    - 4 stat cards: Nodes (ready count), Pods (running count), Services, Version
+    - Recent nodes table with status badges
+- [x] Implement Nodes page — list all nodes with status, labels, registered time.
+- [x] Implement Workloads page — tabbed view for Pods, Deployments, Services, ConfigMaps, Secrets.
+    - Tabbed UI with 4 sub-tables (Pods, Deployments, ConfigMaps, Secrets)
+- [x] Implement Services page — list with type badges, ClusterIP, ports.
+- [x] Implement Namespace selector — dropdown/sidebar to switch active namespace.
+    - Global `AppContext` signal with reactive namespace switching
+- [x] Implement Events page — live event stream via SSE from `/api/v1/watch`.
+- [x] Implement Ingress & Networking page — view Ingress rules (host/path/backend).
+- [x] Add dark mode and responsive layout.
+    - Full dark-mode CSS design system (sidebar, cards, tables, badges, modals)
+    - Responsive breakpoint at 768px (collapsed sidebar)
+- [x] Integrate with API Server — reqwest-based HTTP client with Bearer auth.
 
 ### Phase 4: Deployments & Controllers
 - [ ] Implement Deployment and ReplicaSet controllers with rolling update strategy.
