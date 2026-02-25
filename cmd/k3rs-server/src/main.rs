@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     let node_name = cli
         .node_name
         .or(file_cfg.node_name)
-        .unwrap_or_else(|| hostname());
+        .unwrap_or_else(hostname);
 
     info!("Starting k3rs-server");
     info!("  Node:      {}", node_name);

@@ -70,7 +70,7 @@ pub fn ProcessList() -> Element {
                         class: "w-14 bg-slate-800 border border-slate-700 rounded-md px-2 py-1.5 text-xs text-slate-300 text-center outline-none focus:border-blue-500 transition-colors",
                         onchange: move |evt| {
                             if let Ok(v) = evt.value().parse::<u64>() {
-                                if v >= 3 && v <= 60 {
+                                if (3..=60).contains(&v) {
                                     interval_secs.set(v);
                                 } else {
                                     interval_secs.set(3);

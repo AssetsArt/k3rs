@@ -27,7 +27,7 @@ The server binary encapsulates all control plane processes:
 The agent binary runs on worker nodes and executes workloads:
 - **Tunnel Proxy (powered by Pingora)**: Maintains a persistent, secure reverse tunnel back to the Server (similar to K3s). Pingora's connection pooling and multiplexing capabilities make it ideal for managing these reverse tunnels dynamically without dropping packets.
 - **Agent Node Supervisor (Kubelet equivalent)**: Communicates with the Server API, manages container lifecycles, and reports node resource utilization and health status.
-- **Container Runtime Integrator**: Interfaces directly with `containerd` via gRPC to pull required images, and start, stop, and monitor containers/pods.
+- **Container Runtime Integrator**: Pulls OCI images directly from registries via `oci-client`, extracts rootfs layers, and invokes OCI runtimes (`youki`/`crun`/`runc`) to start, stop, and monitor containers — no daemon required.
 - **Service Proxy (powered by Pingora)**: Replaces `kube-proxy`. Uses Pingora to dynamically manage advanced L4/L7 load balancing for services running on the node, routing traffic seamlessly to the correct local or remote Pods.
 - **Overlay Networking (CNI)**: Manages pod-to-pod networking (similar to Flannel or Cilium).
 
@@ -257,10 +257,10 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - Filtering: node status (Ready only), node affinity labels, taint/toleration matching, resource availability
     - Integrated into `POST /api/v1/namespaces/:ns/pods` — auto-schedules on creation
     - 3 unit tests: round-robin, skip-not-ready, no-eligible-nodes
-- [x] Connect Agent to `containerd` using `tonic` gRPC clients to pull images and start simple containers.
-    - `ContainerRuntime` with stub mode (`--runtime stub`) for macOS development
+- [x] Implement Direct OCI container runtime with pluggable `RuntimeBackend` trait.
+    - `ContainerRuntime` with stub mode for macOS development, OCI backend for Linux
     - API: `pull_image`, `create_container`, `start_container`, `stop_container`, `list_containers`
-    - Real gRPC integration deferred to when containerd socket is available
+    - Image pulling via `oci-client`, rootfs extraction via `tar`+`flate2`, runtime via `youki`/`crun`/`runc`
 - [x] Implement RBAC engine and API authentication flow.
     - `Role`, `PolicyRule`, `RoleBinding`, `Subject` types defined
     - Built-in roles planned: `cluster-admin`, `namespace-admin`, `viewer`
@@ -454,27 +454,33 @@ k3rs/
 │   ├── k3rs-ui/                # Management UI (Dioxus web app)
 │   └── k3rsctl/                # CLI tool binary
 ├── pkg/
-│   ├── api/                    # Axum HTTP API & gRPC definitions
-│   ├── container/              # containerd integration logic
-│   ├── controllers/            # Control loops (Deployment, Node, etc.)
-│   ├── network/                # CNI & DNS (hickory-dns) integration
+│   ├── api/                    # Axum HTTP API & handlers
+│   ├── container/              # Direct OCI container runtime (oci-client + youki/crun/runc)
+│   ├── controllers/            # Control loops (Deployment, ReplicaSet, DaemonSet, Job, CronJob, HPA)
+│   ├── metrics/                # Prometheus-format metrics registry
+│   ├── network/                # CNI (pod networking) & DNS (svc.cluster.local)
 │   ├── pki/                    # CA and mTLS certificate management
-│   ├── proxy/                  # Pingora-based Service & Tunnel proxy
+│   ├── proxy/                  # Pingora-based Service, Ingress & Tunnel proxy
 │   ├── scheduler/              # Workload placement logic
 │   ├── state/                  # SlateDB storage integration
-│   └── types/                  # Cluster object models (Pods, Services)
-└── docs/                       # Architecture diagrams and specifications
+│   └── types/                  # Cluster object models
+└── spec.md                     # Project specification
 ```
 
 ## Tech Stack
 - **Language**: Rust
 - **HTTP API**: `axum`
 - **Management UI**: `dioxus` 0.7 (Rust-native fullstack web framework, WASM SPA)
-- **Container Runtime**: `containerd` (communicating over `tonic` gRPC)
+- **Container Runtime**: Direct OCI Integration (daemonless, Podman-style)
+  - **Image Pull**: `oci-client` (OCI Distribution spec — Docker Hub, GHCR, etc.)
+  - **Rootfs**: `tar` + `flate2` (extract image layers → filesystem)
+  - **OCI Runtime**: `youki` / `crun` / `runc` (auto-detected in `$PATH`)
+  - **Future**: Firecracker microVM support via pluggable `RuntimeBackend` trait
 - **Storage**: `slatedb` (Embedded key-value database on object storage)
 - **Object Storage**: S3 / Cloudflare R2 / MinIO / Local filesystem
 - **DNS**: `hickory-dns` (Embedded DNS resolver)
-- **Serialization**: `serde`, `prost` (Protocol Buffers)
-- **Async Runtime**: `tokio` (Pingora and Tonic dependency)
+- **Observability**: `opentelemetry` + `opentelemetry-otlp` (OTLP tracing export)
+- **Serialization**: `serde`, `serde_json`
+- **Async Runtime**: `tokio`
 - **CLI**: `clap` (CLI argument parsing)
 - **Crypto**: `rustls` (TLS), `rcgen` (Certificate generation)

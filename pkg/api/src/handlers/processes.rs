@@ -44,7 +44,7 @@ pub async fn list_processes() -> Json<Vec<ProcessInfo>> {
         .collect();
 
     // Sort by memory descending (heaviest first)
-    procs.sort_by(|a, b| b.memory_bytes.cmp(&a.memory_bytes));
+    procs.sort_by_key(|b| std::cmp::Reverse(b.memory_bytes));
 
     Json(procs)
 }

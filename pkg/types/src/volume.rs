@@ -45,17 +45,12 @@ pub enum AccessMode {
     ReadWriteMany,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum PVCPhase {
+    #[default]
     Pending,
     Bound,
     Lost,
-}
-
-impl Default for PVCPhase {
-    fn default() -> Self {
-        PVCPhase::Pending
-    }
 }
 
 impl std::fmt::Display for PVCPhase {

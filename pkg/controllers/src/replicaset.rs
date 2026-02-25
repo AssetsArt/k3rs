@@ -107,7 +107,7 @@ impl ReplicaSetController {
                 // Scale down — delete excess pods (newest first)
                 let to_delete = (current_count - rs.spec.replicas) as usize;
                 let mut pods_to_delete: Vec<(String, Pod)> = owned_pods;
-                pods_to_delete.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
+                pods_to_delete.sort_by_key(|b| std::cmp::Reverse(b.1.created_at));
                 for (pod_key, pod) in pods_to_delete.into_iter().take(to_delete) {
                     self.store.delete(&pod_key).await?;
                     info!("RS {}: deleted pod {}", rs.name, pod.name);

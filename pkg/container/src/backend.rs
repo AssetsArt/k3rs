@@ -101,15 +101,15 @@ impl OciBackend {
     /// Priority: youki → crun → runc
     pub fn detect() -> Result<Self> {
         for name in &["youki", "crun", "runc"] {
-            if let Ok(output) = std::process::Command::new("which").arg(name).output() {
-                if output.status.success() {
-                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    tracing::info!("Detected OCI runtime: {} at {}", name, path);
-                    return Ok(Self {
-                        runtime_path: path,
-                        runtime_name: name.to_string(),
-                    });
-                }
+            if let Ok(output) = std::process::Command::new("which").arg(name).output()
+                && output.status.success()
+            {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                tracing::info!("Detected OCI runtime: {} at {}", name, path);
+                return Ok(Self {
+                    runtime_path: path,
+                    runtime_name: name.to_string(),
+                });
             }
         }
         Err(anyhow::anyhow!(

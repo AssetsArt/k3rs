@@ -51,7 +51,7 @@ impl ImageManager {
 
         // Pull image manifest and layers
         let auth = oci_client::secrets::RegistryAuth::Anonymous;
-        let _accepted_media_types = vec![
+        let _accepted_media_types = [
             oci_client::manifest::OCI_IMAGE_MEDIA_TYPE.to_string(),
             oci_client::manifest::IMAGE_MANIFEST_MEDIA_TYPE.to_string(),
             oci_client::manifest::IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE.to_string(),

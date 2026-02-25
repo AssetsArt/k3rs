@@ -93,18 +93,17 @@ impl EvictionController {
                 Err(_) => continue,
             };
 
-            if let Some(ref node_id) = pod.node_id {
-                if failed_node_ids.contains(node_id)
-                    && pod.status != PodStatus::Pending
-                    && pod.status != PodStatus::Succeeded
-                    && pod.status != PodStatus::Failed
-                {
-                    info!("Evicting pod {} (was on failed node {})", pod.name, node_id);
-                    pod.node_id = None;
-                    pod.status = PodStatus::Pending;
-                    let data = serde_json::to_vec(&pod)?;
-                    self.store.put(&key, &data).await?;
-                }
+            if let Some(ref node_id) = pod.node_id
+                && failed_node_ids.contains(node_id)
+                && pod.status != PodStatus::Pending
+                && pod.status != PodStatus::Succeeded
+                && pod.status != PodStatus::Failed
+            {
+                info!("Evicting pod {} (was on failed node {})", pod.name, node_id);
+                pod.node_id = None;
+                pod.status = PodStatus::Pending;
+                let data = serde_json::to_vec(&pod)?;
+                self.store.put(&key, &data).await?;
             }
         }
 

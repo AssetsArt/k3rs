@@ -114,15 +114,15 @@ pub async fn drain_node(
     };
 
     for (key, value) in entries {
-        if let Ok(mut pod) = serde_json::from_slice::<Pod>(&value) {
-            if pod.node_id.as_deref() == Some(&node_name) {
-                info!("Evicting pod {} from node {}", pod.name, node_name);
-                pod.node_id = None;
-                pod.status = PodStatus::Pending;
-                if let Ok(data) = serde_json::to_vec(&pod) {
-                    let _ = state.store.put(&key, &data).await;
-                    evicted += 1;
-                }
+        if let Ok(mut pod) = serde_json::from_slice::<Pod>(&value)
+            && pod.node_id.as_deref() == Some(&node_name)
+        {
+            info!("Evicting pod {} from node {}", pod.name, node_name);
+            pod.node_id = None;
+            pod.status = PodStatus::Pending;
+            if let Ok(data) = serde_json::to_vec(&pod) {
+                let _ = state.store.put(&key, &data).await;
+                evicted += 1;
             }
         }
     }
@@ -149,13 +149,13 @@ where
     let entries = state.store.list_prefix("/registry/nodes/").await?;
 
     for (key, value) in entries {
-        if let Ok(mut node) = serde_json::from_slice::<Node>(&value) {
-            if node.name == node_name {
-                mutate(&mut node);
-                let data = serde_json::to_vec(&node)?;
-                state.store.put(&key, &data).await?;
-                return Ok(());
-            }
+        if let Ok(mut node) = serde_json::from_slice::<Node>(&value)
+            && node.name == node_name
+        {
+            mutate(&mut node);
+            let data = serde_json::to_vec(&node)?;
+            state.store.put(&key, &data).await?;
+            return Ok(());
         }
     }
 
