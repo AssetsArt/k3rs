@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use crate::AppState;
 use crate::auth::{auth_middleware, rbac_middleware};
 use crate::handlers::{
-    cluster, drain, endpoints, exec, heartbeat, processes, register, resources, watch,
+    cluster, drain, endpoints, exec, heartbeat, images, processes, register, resources, watch,
 };
 use crate::request_id::request_id_middleware;
 use pkg_container::ContainerRuntime;
@@ -239,6 +239,14 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         .route(
             "/api/v1/namespaces/{ns}/pods/{id}/exec",
             get(exec::exec_into_pod),
+        )
+        // Image management
+        .route("/api/v1/images", get(images::list_images))
+        .route("/api/v1/images/pull", post(images::pull_image))
+        .route("/api/v1/images/{id}", delete(images::delete_image))
+        .route(
+            "/api/v1/nodes/{name}/images",
+            put(images::report_node_images),
         )
         // Phase 2: generic delete
         .route(

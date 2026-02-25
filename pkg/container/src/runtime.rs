@@ -110,4 +110,14 @@ impl ContainerRuntime {
     pub async fn container_logs(&self, id: &str, tail: usize) -> Result<Vec<String>> {
         self.backend.logs(id, tail).await
     }
+
+    // ─── Image Management ───────────────────────────────────────
+
+    pub async fn list_images(&self) -> Result<Vec<crate::image::ImageInfo>> {
+        self.image_manager.list_images().await
+    }
+
+    pub async fn delete_image(&self, image_id: &str) -> Result<()> {
+        self.image_manager.delete_image(image_id).await
+    }
 }

@@ -41,6 +41,8 @@ enum Route {
         Volumes {},
         #[route("/processes")]
         ProcessList {},
+        #[route("/images")]
+        Images {},
 }
 
 // ============================================================
@@ -172,6 +174,10 @@ fn Layout() -> Element {
                     Link { class: sub_link_cls(&Route::Events {}), to: Route::Events {},
                         Icon { width: 14, height: 14, icon: LdActivity }
                         span { "Events" }
+                    }
+                    Link { class: sub_link_cls(&Route::Images {}), to: Route::Images {},
+                        Icon { width: 14, height: 14, icon: LdPackage }
+                        span { "Images" }
                     }
                 }
             }
@@ -366,4 +372,24 @@ pub struct ProcessInfo {
     pub cpu_percent: f32,
     #[serde(default)]
     pub memory_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ImageInfo {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub node_name: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub size_human: String,
+    #[serde(default)]
+    pub layers: usize,
+    #[serde(default)]
+    pub architecture: String,
+    #[serde(default)]
+    pub os: String,
+    #[serde(default)]
+    pub created: String,
 }

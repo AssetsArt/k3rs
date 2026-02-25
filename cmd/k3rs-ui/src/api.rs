@@ -214,3 +214,19 @@ pub async fn get_processes() -> Result<Vec<ProcessInfo>> {
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(procs)
 }
+
+#[get("/api/ui/images")]
+pub async fn get_images() -> Result<Vec<ImageInfo>> {
+    let url = format!("{}/api/v1/images", K3RS_API);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", K3RS_TOKEN))
+        .send()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let imgs: Vec<ImageInfo> = resp
+        .json()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(imgs)
+}

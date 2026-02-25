@@ -132,6 +132,112 @@ impl ImageManager {
             None
         }
     }
+
+    /// List all cached images with metadata.
+    pub async fn list_images(&self) -> Result<Vec<ImageInfo>> {
+        let mut images = Vec::new();
+
+        if !self.images_dir.exists() {
+            return Ok(images);
+        }
+
+        let mut entries = tokio::fs::read_dir(&self.images_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let manifest_path = path.join("manifest.json");
+            if !manifest_path.exists() {
+                continue;
+            }
+
+            // Read config.json for image metadata (cmd, env, etc.)
+            let config_path = path.join("config.json");
+            let (architecture, os, created) = if config_path.exists() {
+                let data = tokio::fs::read_to_string(&config_path)
+                    .await
+                    .unwrap_or_default();
+                let v: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
+                (
+                    v.get("architecture")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    v.get("os")
+                        .and_then(|o| o.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    v.get("created")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                )
+            } else {
+                ("unknown".to_string(), "unknown".to_string(), String::new())
+            };
+
+            // Calculate total size of all layers
+            let layers_dir = path.join("layers");
+            let mut total_size: u64 = 0;
+            let mut layer_count: usize = 0;
+            if layers_dir.exists() {
+                let mut layer_entries = tokio::fs::read_dir(&layers_dir).await?;
+                while let Some(le) = layer_entries.next_entry().await? {
+                    if let Ok(meta) = le.metadata().await {
+                        total_size += meta.len();
+                        layer_count += 1;
+                    }
+                }
+            }
+
+            let hash = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
+            images.push(ImageInfo {
+                id: hash,
+                node_name: String::new(), // Set by server when aggregating across nodes
+                size: total_size,
+                size_human: format_size(total_size),
+                layers: layer_count,
+                architecture,
+                os,
+                created,
+            });
+        }
+
+        images.sort_by_key(|i| std::cmp::Reverse(i.size));
+        Ok(images)
+    }
+
+    /// Delete a cached image by its hash ID.
+    pub async fn delete_image(&self, image_id: &str) -> Result<()> {
+        let image_dir = self.images_dir.join(image_id);
+        if image_dir.exists() {
+            tokio::fs::remove_dir_all(&image_dir).await?;
+            info!("Deleted cached image: {}", image_id);
+        } else {
+            anyhow::bail!("Image {} not found", image_id);
+        }
+        Ok(())
+    }
+}
+
+/// Metadata about a cached OCI image.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ImageInfo {
+    pub id: String,
+    pub node_name: String,
+    pub size: u64,
+    pub size_human: String,
+    pub layers: usize,
+    pub architecture: String,
+    pub os: String,
+    pub created: String,
 }
 
 /// Simple hash for image reference → directory name.

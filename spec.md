@@ -422,6 +422,14 @@ Rust-native, daemonless container runtime with pluggable `RuntimeBackend` trait:
 - [x] `OciBackend` — invokes `youki`/`crun`/`runc` via `std::process::Command`
 - [ ] `FirecrackerBackend` — microVM via REST API over Unix socket (roadmap)
 
+#### Image & Registry Management (multi-node)
+- [x] `GET /api/v1/images` — aggregated image list across all nodes
+- [x] `POST /api/v1/images/pull` — pull image from OCI registry
+- [x] `DELETE /api/v1/images/{id}` — delete cached image
+- [x] `PUT /api/v1/nodes/{name}/images` — agent reports per-node images (every 30s)
+- [x] `ImageInfo` — id, node_name, size, layers, architecture, os
+- [x] UI: Images page in sidebar (Cluster section) with per-node table
+
 #### Pod Logs (`pkg/api/src/handlers/resources.rs`)
 - [x] Pod logs wired to `ContainerRuntime::container_logs()` via `AppState`
 

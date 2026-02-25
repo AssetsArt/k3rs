@@ -209,8 +209,42 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Image report loop — report cached images to server every 30s
+    let img_server = server.clone();
+    let img_node_name = node_name.clone();
+    let img_client = client.clone();
+    let img_token = token.clone();
+
     // Pod Sync loop
     let runtime = Arc::new(ContainerRuntime::new(None::<&str>).await?);
+
+    let img_runtime = runtime.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            match img_runtime.list_images().await {
+                Ok(images) => {
+                    let url = format!(
+                        "{}/api/v1/nodes/{}/images",
+                        img_server.trim_end_matches('/'),
+                        img_node_name
+                    );
+                    match img_client
+                        .put(&url)
+                        .header("Authorization", format!("Bearer {}", img_token))
+                        .json(&images)
+                        .send()
+                        .await
+                    {
+                        Ok(_) => info!("Reported {} images for {}", images.len(), img_node_name),
+                        Err(e) => warn!("Image report failed: {}", e),
+                    }
+                }
+                Err(e) => warn!("Failed to list images: {}", e),
+            }
+        }
+    });
     let sync_client = client.clone();
     let sync_server_base = server.clone();
     let sync_token = token.clone();
