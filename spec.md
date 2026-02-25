@@ -218,6 +218,27 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
 - [ ] CSI-based persistent storage interface (future).
 - [ ] Blue/Green and Canary deployment strategies via Pingora (future).
 
+## Project Structure
+
+```text
+k3rs/
+├── cmd/
+│   ├── k3rs-server/            # Control plane binary
+│   ├── k3rs-agent/             # Data plane binary
+│   └── k3rsctl/                # CLI tool binary
+├── pkg/
+│   ├── api/                    # Pingora API Gateway & gRPC definitions
+│   ├── container/              # containerd integration logic
+│   ├── controllers/            # Control loops (Deployment, Node, etc.)
+│   ├── network/                # CNI & DNS (hickory-dns) integration
+│   ├── pki/                    # CA and mTLS certificate management
+│   ├── proxy/                  # Pingora-based Service & Tunnel proxy
+│   ├── scheduler/              # Workload placement logic
+│   ├── state/                  # SlateDB storage integration
+│   └── types/                  # Cluster object models (Pods, Services)
+└── docs/                       # Architecture diagrams and specifications
+```
+
 ## Tech Stack
 - **Language**: Rust
 - **Networking/Proxy/Ingress**: `pingora` (Cloudflare)
