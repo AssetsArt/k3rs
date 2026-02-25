@@ -52,11 +52,12 @@ pub async fn watch_events(
 
     let live_stream = stream.filter_map(move |result| match result {
         Ok(event) => {
-            if prefix_clone.is_empty() || event.key.starts_with(&prefix_clone) {
-                if let Ok(data) = serde_json::to_string(&event) {
-                    return Some(Ok::<_, Infallible>(Event::default().data(data)));
-                }
+            if (prefix_clone.is_empty() || event.key.starts_with(&prefix_clone))
+                && let Ok(data) = serde_json::to_string(&event)
+            {
+                return Some(Ok::<_, Infallible>(Event::default().data(data)));
             }
+
             None
         }
         Err(_) => None,

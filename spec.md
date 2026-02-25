@@ -238,11 +238,30 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - RBAC middleware structure ready for token-based auth integration
 
 ### Phase 3: Networking & Services
-- [ ] Implement the Pingora-based Service Proxy (kube-proxy alternative) on Agents.
-- [ ] Pod-to-Pod networking setup (integrate with a lightweight CNI or write a custom eBPF/Veth router).
-- [ ] Distribute dynamic routing updates from Server to Agents whenever a new service/pod is created.
-- [ ] Implement embedded DNS server for service discovery on each Agent.
-- [ ] Implement Ingress controller via Pingora for external traffic routing.
+- [x] Implement the Pingora-based Service Proxy (kube-proxy alternative) on Agents.
+    - `ServiceProxy` with dynamic `RoutingTable` (ClusterIP:port → pod backends)
+    - `ServiceProxyHandler` implements Pingora's `ProxyHttp` trait with round-robin backend selection
+    - Configurable listen port (`--service-proxy-port`, default 10256)
+- [x] Pod-to-Pod networking setup (integrate with a lightweight CNI or write a custom eBPF/Veth router).
+    - `PodNetwork` CNI-like IP allocator from CIDR block (default `10.42.0.0/16`)
+    - `allocate_ip`, `release_ip`, `get_pod_ip`, `list_allocations` API
+    - 4 unit tests: allocate, release, unique-allocations, idempotent-allocation
+- [x] Distribute dynamic routing updates from Server to Agents whenever a new service/pod is created.
+    - `Endpoint` type: maps services → pod IP:port backends
+    - `Ingress` type: host/path-based external routing rules
+    - `POST/GET /api/v1/namespaces/:ns/endpoints` — CRUD endpoints
+    - `POST/GET /api/v1/namespaces/:ns/ingresses` — CRUD ingresses
+    - Agent route sync loop (10s interval): fetches services + endpoints, updates ServiceProxy routing table + DNS records
+- [x] Implement embedded DNS server for service discovery on each Agent.
+    - `DnsServer` lightweight UDP DNS resolver (no external deps)
+    - Resolves `<service>.<namespace>.svc.cluster.local` → ClusterIP via A-record queries
+    - Configurable listen port (`--dns-port`, default 5353)
+    - `update_records(services)` rebuilds DNS from Service state
+- [x] Implement Ingress controller via Pingora for external traffic routing.
+    - `IngressProxy` with compiled `IngressRouteRule` list
+    - `IngressProxyHandler` implements Pingora's `ProxyHttp` trait: Host header + URI path matching
+    - `update_rules(ingresses, services)` resolves backends to ClusterIP:port
+    - Supports `PathType::Prefix` and `PathType::Exact` matching
 
 ### Phase 4: Deployments & Controllers
 - [ ] Implement Deployment and ReplicaSet controllers with rolling update strategy.

@@ -10,7 +10,7 @@ use tracing::info;
 
 use crate::AppState;
 use crate::auth::{auth_middleware, rbac_middleware};
-use crate::handlers::{cluster, heartbeat, register, resources, watch};
+use crate::handlers::{cluster, endpoints, heartbeat, register, resources, watch};
 use pkg_controllers::node::NodeController;
 use pkg_pki::ca::ClusterCA;
 use pkg_scheduler::Scheduler;
@@ -92,6 +92,16 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         .route(
             "/api/v1/namespaces/{ns}/secrets",
             post(resources::create_secret).get(resources::list_secrets),
+        )
+        // Phase 3: endpoints
+        .route(
+            "/api/v1/namespaces/{ns}/endpoints",
+            post(endpoints::create_endpoint).get(endpoints::list_endpoints),
+        )
+        // Phase 3: ingresses
+        .route(
+            "/api/v1/namespaces/{ns}/ingresses",
+            post(endpoints::create_ingress).get(endpoints::list_ingresses),
         )
         // Phase 2: generic delete
         .route(

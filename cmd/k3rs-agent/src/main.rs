@@ -1,8 +1,12 @@
 use clap::Parser;
 use pkg_container::ContainerRuntime;
+use pkg_network::dns::DnsServer;
+use pkg_proxy::service_proxy::ServiceProxy;
 use pkg_proxy::tunnel::TunnelProxy;
 use pkg_types::node::NodeRegistrationRequest;
 use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
@@ -23,6 +27,14 @@ struct Cli {
     /// Local port for the tunnel proxy
     #[arg(long, default_value = "6444")]
     proxy_port: u16,
+
+    /// Local port for the service proxy
+    #[arg(long, default_value = "10256")]
+    service_proxy_port: u16,
+
+    /// Local port for the embedded DNS server
+    #[arg(long, default_value = "5353")]
+    dns_port: u16,
 }
 
 #[tokio::main]
@@ -82,7 +94,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 2. Start the Pingora tunnel proxy
-    // Parse the server host:port for the proxy upstream
     let server_host = cli
         .server
         .trim_start_matches("http://")
@@ -90,8 +101,17 @@ async fn main() -> anyhow::Result<()> {
     let proxy = TunnelProxy::new(server_host, cli.proxy_port);
     proxy.start().await?;
 
-    // 3. Hearbeat and Pod Sync loops
-    info!("Starting node controllers (heartbeat, pod-sync)");
+    // 3. Start the Pingora Service Proxy (Phase 3)
+    let service_proxy = Arc::new(ServiceProxy::new(cli.service_proxy_port));
+    service_proxy.start().await?;
+
+    // 4. Start the embedded DNS server (Phase 3)
+    let dns_addr: SocketAddr = format!("0.0.0.0:{}", cli.dns_port).parse()?;
+    let dns_server = Arc::new(DnsServer::new(dns_addr));
+    dns_server.start().await?;
+
+    // 5. Heartbeat and Pod Sync loops
+    info!("Starting node controllers (heartbeat, pod-sync, route-sync)");
 
     // Heartbeat loop
     let server_base = cli.server.clone();
@@ -125,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Pod Sync loop
-    let runtime = std::sync::Arc::new(ContainerRuntime::new(None::<&str>)?);
+    let runtime = Arc::new(ContainerRuntime::new(None::<&str>)?);
     let sync_client = client.clone();
     let sync_server_base = cli.server.clone();
     let sync_token = cli.token.clone();
@@ -159,43 +179,97 @@ async fn main() -> anyhow::Result<()> {
             if let Ok(pods) = resp.json::<Vec<pkg_types::pod::Pod>>().await {
                 for pod in pods {
                     // Only process pods assigned to this node and not yet running
-                    if pod.node_id.as_deref() == Some(my_node_id.as_str()) {
-                        if pod.status == pkg_types::pod::PodStatus::Scheduled {
-                            info!("Found new scheduled pod: {}", pod.name);
+                    if pod.node_id.as_deref() == Some(my_node_id.as_str())
+                        && pod.status == pkg_types::pod::PodStatus::Scheduled
+                    {
+                        info!("Found new scheduled pod: {}", pod.name);
 
-                            // 1. Pull Image (using first container for demo)
-                            let image = pod
-                                .spec
-                                .containers
-                                .get(0)
-                                .map(|c| c.image.as_str())
-                                .unwrap_or("alpine:latest");
-                            let _ = runtime.pull_image(image).await;
+                        // 1. Pull Image (using first container for demo)
+                        let image = pod
+                            .spec
+                            .containers
+                            .first()
+                            .map(|c| c.image.as_str())
+                            .unwrap_or("alpine:latest");
+                        let _ = runtime.pull_image(image).await;
 
-                            // 2. Create & Start
-                            let _ = runtime.create_container(&pod.id, image, &[]).await;
-                            let _ = runtime.start_container(&pod.id).await;
+                        // 2. Create & Start
+                        let _ = runtime.create_container(&pod.id, image, &[]).await;
+                        let _ = runtime.start_container(&pod.id).await;
 
-                            // 3. Update Status
-                            let status_url = format!(
-                                "{}/api/v1/namespaces/{}/pods/{}/status",
-                                sync_server_base.trim_end_matches('/'),
-                                ns,
-                                pod.id
-                            );
-                            let new_status = pkg_types::pod::PodStatus::Running;
-                            let _ = sync_client
-                                .put(&status_url)
-                                .header("Authorization", format!("Bearer {}", sync_token))
-                                .json(&new_status)
-                                .send()
-                                .await;
-                        } else if pod.status == pkg_types::pod::PodStatus::Running {
-                            // Already running, monitor in future
-                        }
+                        // 3. Update Status
+                        let status_url = format!(
+                            "{}/api/v1/namespaces/{}/pods/{}/status",
+                            sync_server_base.trim_end_matches('/'),
+                            ns,
+                            pod.id
+                        );
+                        let new_status = pkg_types::pod::PodStatus::Running;
+                        let _ = sync_client
+                            .put(&status_url)
+                            .header("Authorization", format!("Bearer {}", sync_token))
+                            .json(&new_status)
+                            .send()
+                            .await;
                     }
                 }
             }
+        }
+    });
+
+    // Route Sync loop (Phase 3) — synchronize Service Proxy and DNS with cluster state
+    let route_sync_client = client.clone();
+    let route_sync_server = cli.server.clone();
+    let route_sync_token = cli.token.clone();
+    let route_service_proxy = service_proxy.clone();
+    let route_dns_server = dns_server.clone();
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+
+            let ns = "default";
+            let base = route_sync_server.trim_end_matches('/');
+            let auth_header = format!("Bearer {}", route_sync_token);
+
+            // Fetch services
+            let services_url = format!("{}/api/v1/namespaces/{}/services", base, ns);
+            let services: Vec<pkg_types::service::Service> = match route_sync_client
+                .get(&services_url)
+                .header("Authorization", &auth_header)
+                .send()
+                .await
+            {
+                Ok(r) => r.json().await.unwrap_or_default(),
+                Err(e) => {
+                    warn!("Route sync: failed to fetch services: {}", e);
+                    continue;
+                }
+            };
+
+            // Fetch endpoints
+            let endpoints_url = format!("{}/api/v1/namespaces/{}/endpoints", base, ns);
+            let endpoints: Vec<pkg_types::endpoint::Endpoint> = match route_sync_client
+                .get(&endpoints_url)
+                .header("Authorization", &auth_header)
+                .send()
+                .await
+            {
+                Ok(r) => r.json().await.unwrap_or_default(),
+                Err(e) => {
+                    warn!("Route sync: failed to fetch endpoints: {}", e);
+                    continue;
+                }
+            };
+
+            // Update Service Proxy routing table
+            route_service_proxy
+                .update_routes(&services, &endpoints)
+                .await;
+
+            // Update DNS records
+            route_dns_server.update_records(&services).await;
         }
     });
 

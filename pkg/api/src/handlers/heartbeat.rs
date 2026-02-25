@@ -25,21 +25,21 @@ pub async fn node_heartbeat(
     };
 
     for (key, value) in entries {
-        if let Ok(mut node) = serde_json::from_slice::<Node>(&value) {
-            if node.name == node_name {
-                node.last_heartbeat = Utc::now();
-                node.status = NodeStatus::Ready;
-                match serde_json::to_vec(&node) {
-                    Ok(data) => {
-                        if let Err(e) = state.store.put(&key, &data).await {
-                            warn!("Failed to update heartbeat: {}", e);
-                            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                        }
-                        return (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
-                            .into_response();
+        if let Ok(mut node) = serde_json::from_slice::<Node>(&value)
+            && node.name == node_name
+        {
+            node.last_heartbeat = Utc::now();
+            node.status = NodeStatus::Ready;
+            match serde_json::to_vec(&node) {
+                Ok(data) => {
+                    if let Err(e) = state.store.put(&key, &data).await {
+                        warn!("Failed to update heartbeat: {}", e);
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                     }
-                    Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    return (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+                        .into_response();
                 }
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             }
         }
     }

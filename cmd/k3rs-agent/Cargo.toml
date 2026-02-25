@@ -11,6 +11,8 @@ reqwest = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 pkg-types = { path = "../../pkg/types" }
 pkg-proxy = { path = "../../pkg/proxy" }
 pkg-container = { path = "../../pkg/container" }
+pkg-network = { path = "../../pkg/network" }

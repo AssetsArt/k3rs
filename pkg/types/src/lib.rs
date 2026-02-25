@@ -1,5 +1,7 @@
 pub mod configmap;
 pub mod deployment;
+pub mod endpoint;
+pub mod ingress;
 pub mod namespace;
 pub mod node;
 pub mod pod;

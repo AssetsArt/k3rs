@@ -1747,9 +1747,11 @@ dependencies = [
  "anyhow",
  "clap",
  "pkg-container",
+ "pkg-network",
  "pkg-proxy",
  "pkg-types",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -2666,6 +2668,14 @@ dependencies = [
 [[package]]
 name = "pkg-network"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pkg-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "pkg-pki"
@@ -2685,6 +2695,9 @@ dependencies = [
  "anyhow",
  "async-trait",
  "pingora",
+ "pkg-types",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
