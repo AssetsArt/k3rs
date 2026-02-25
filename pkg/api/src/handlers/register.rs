@@ -3,7 +3,6 @@ use chrono::Utc;
 use pkg_types::node::{Node, NodeRegistrationRequest, NodeRegistrationResponse, NodeStatus};
 use pkg_types::pod::ResourceRequirements;
 use tracing::{info, warn};
-use uuid::Uuid;
 
 use crate::AppState;
 
@@ -43,22 +42,36 @@ pub async fn register_node(
         }
     };
 
-    // Persist the node in the state store
-    let now = Utc::now();
-    let node_id = Uuid::new_v4().to_string();
-    let node = Node {
-        id: node_id.clone(),
-        name: payload.node_name.clone(),
-        status: NodeStatus::Ready,
-        registered_at: now,
-        last_heartbeat: now,
-        labels: payload.labels.clone(),
-        taints: vec![],
-        capacity: ResourceRequirements::default(),
-        allocated: ResourceRequirements::default(),
+    // Check if node already exists
+    let key = format!("/registry/nodes/{}", payload.node_name);
+    let existing_node = match state.store.get(&key).await {
+        Ok(Some(data)) => serde_json::from_slice::<Node>(&data).ok(),
+        _ => None,
     };
 
-    let key = format!("/registry/nodes/{}", node_id);
+    let now = Utc::now();
+    let node_id = payload.node_name.clone();
+
+    let node = if let Some(mut existing) = existing_node {
+        info!("Updating existing node: {}", node_id);
+        existing.status = NodeStatus::Ready;
+        existing.last_heartbeat = now;
+        existing.labels.extend(payload.labels.clone());
+        existing
+    } else {
+        Node {
+            id: node_id.clone(),
+            name: payload.node_name.clone(),
+            status: NodeStatus::Ready,
+            registered_at: now,
+            last_heartbeat: now,
+            labels: payload.labels.clone(),
+            taints: vec![],
+            capacity: ResourceRequirements::default(),
+            allocated: ResourceRequirements::default(),
+        }
+    };
+
     match serde_json::to_vec(&node) {
         Ok(data) => {
             if let Err(e) = state.store.put(&key, &data).await {

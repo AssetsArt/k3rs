@@ -56,7 +56,15 @@ impl NodeController {
                 .to_std()
                 .unwrap_or_default();
 
-            let new_status = if age >= self.unknown_threshold {
+            let is_master = node.labels.contains_key("node-role.kubernetes.io/master")
+                || node
+                    .labels
+                    .contains_key("node-role.kubernetes.io/control-plane");
+
+            let new_status = if is_master {
+                // The master node runs alongside the server and doesn't send heartbeats.
+                NodeStatus::Ready
+            } else if age >= self.unknown_threshold {
                 NodeStatus::Unknown
             } else if age >= self.not_ready_threshold {
                 NodeStatus::NotReady

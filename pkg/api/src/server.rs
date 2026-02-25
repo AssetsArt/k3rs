@@ -46,6 +46,9 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     // Seed default namespaces
     seed_default_namespaces(&store).await?;
 
+    // Seed master node
+    seed_master_node(&store).await?;
+
     // Start controllers
     NodeController::new(store.clone()).start();
     DeploymentController::new(store.clone()).start();
@@ -193,6 +196,42 @@ async fn seed_default_namespaces(store: &StateStore) -> anyhow::Result<()> {
             store.put(&key, &data).await?;
             info!("Seeded namespace: {}", name);
         }
+    }
+    Ok(())
+}
+
+/// Seed the master node on startup.
+async fn seed_master_node(store: &StateStore) -> anyhow::Result<()> {
+    let name = "master";
+    let key = format!("/registry/nodes/{}", name);
+    if store.get(&key).await?.is_none() {
+        let node = pkg_types::node::Node {
+            id: name.to_string(),
+            name: name.to_string(),
+            status: pkg_types::node::NodeStatus::Ready,
+            registered_at: Utc::now(),
+            last_heartbeat: Utc::now(),
+            labels: std::collections::HashMap::from([
+                (
+                    "node-role.kubernetes.io/master".to_string(),
+                    "true".to_string(),
+                ),
+                (
+                    "node-role.kubernetes.io/control-plane".to_string(),
+                    "true".to_string(),
+                ),
+            ]),
+            taints: vec![pkg_types::node::Taint {
+                key: "node-role.kubernetes.io/master".to_string(),
+                value: "true".to_string(),
+                effect: pkg_types::pod::TaintEffect::NoSchedule,
+            }],
+            capacity: pkg_types::pod::ResourceRequirements::default(),
+            allocated: pkg_types::pod::ResourceRequirements::default(),
+        };
+        let data = serde_json::to_vec(&node)?;
+        store.put(&key, &data).await?;
+        info!("Seeded master node");
     }
     Ok(())
 }
