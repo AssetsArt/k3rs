@@ -6,6 +6,7 @@ edition = "2021"
 
 [dependencies]
 dioxus = { version = "0.7.1", features = ["router", "fullstack"] }
+dioxus-free-icons = { version = "0.10", features = ["lucide"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

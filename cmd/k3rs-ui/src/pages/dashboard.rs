@@ -1,20 +1,18 @@
 use crate::api;
 use dioxus::prelude::*;
+use dioxus_free_icons::icons::ld_icons::*;
+use dioxus_free_icons::Icon;
 
-/// Dashboard page — cluster overview with status cards and recent resources.
 #[component]
 pub fn Dashboard() -> Element {
     let ns = use_context::<Signal<String>>();
 
     let cluster_info = use_resource(move || async move { api::get_cluster_info().await.ok() });
-
     let nodes = use_resource(move || async move { api::get_nodes().await.unwrap_or_default() });
-
     let pods = use_resource(move || {
         let ns = ns.read().clone();
         async move { api::get_pods(ns).await.unwrap_or_default() }
     });
-
     let services = use_resource(move || {
         let ns = ns.read().clone();
         async move { api::get_services(ns).await.unwrap_or_default() }
@@ -38,70 +36,76 @@ pub fn Dashboard() -> Element {
     let svc_count = svcs_data.as_ref().map(|s| s.len()).unwrap_or(0);
 
     rsx! {
-        div { class: "page-header",
-            h2 { "Dashboard" }
-            p { "Cluster overview and resource summary" }
+        div { class: "mb-6",
+            h2 { class: "text-xl font-semibold text-white", "Dashboard" }
+            p { class: "text-sm text-slate-400 mt-1", "Cluster overview" }
         }
 
-        div { class: "stats-grid",
-            div { class: "stat-card success",
-                div { class: "label", "Nodes" }
-                div { class: "value", "{node_count}" }
-                div { class: "sub", "{ready_nodes} ready" }
+        // Stat cards — inlined icons directly
+        div { class: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8",
+            // Nodes
+            div { class: "bg-slate-900 border border-slate-800 rounded-xl p-5 hover:border-emerald-500/40 transition-all",
+                div { class: "flex items-center justify-between mb-3",
+                    span { class: "text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Nodes" }
+                    span { class: "text-emerald-400", Icon { width: 18, height: 18, icon: LdServer } }
+                }
+                div { class: "text-2xl font-bold text-emerald-400", "{node_count}" }
+                div { class: "text-xs text-slate-500 mt-1", "{ready_nodes} ready" }
             }
-            div { class: "stat-card info",
-                div { class: "label", "Pods" }
-                div { class: "value", "{pod_count}" }
-                div { class: "sub", "{running_pods} running" }
+            // Pods
+            div { class: "bg-slate-900 border border-slate-800 rounded-xl p-5 hover:border-blue-500/40 transition-all",
+                div { class: "flex items-center justify-between mb-3",
+                    span { class: "text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Pods" }
+                    span { class: "text-blue-400", Icon { width: 18, height: 18, icon: LdBox } }
+                }
+                div { class: "text-2xl font-bold text-blue-400", "{pod_count}" }
+                div { class: "text-xs text-slate-500 mt-1", "{running_pods} running" }
             }
-            div { class: "stat-card accent",
-                div { class: "label", "Services" }
-                div { class: "value", "{svc_count}" }
-                div { class: "sub", "in current namespace" }
+            // Services
+            div { class: "bg-slate-900 border border-slate-800 rounded-xl p-5 hover:border-violet-500/40 transition-all",
+                div { class: "flex items-center justify-between mb-3",
+                    span { class: "text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Services" }
+                    span { class: "text-violet-400", Icon { width: 18, height: 18, icon: LdNetwork } }
+                }
+                div { class: "text-2xl font-bold text-violet-400", "{svc_count}" }
+                div { class: "text-xs text-slate-500 mt-1", "current namespace" }
             }
+            // Version
             if let Some(Some(ci)) = info.as_ref() {
-                div { class: "stat-card warning",
-                    div { class: "label", "Version" }
-                    div { class: "value", style: "font-size: 20px;", "{ci.version}" }
-                    div { class: "sub", "{ci.state_store}" }
+                div { class: "bg-slate-900 border border-slate-800 rounded-xl p-5 hover:border-amber-500/40 transition-all",
+                    div { class: "flex items-center justify-between mb-3",
+                        span { class: "text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Version" }
+                        span { class: "text-amber-400", Icon { width: 18, height: 18, icon: LdInfo } }
+                    }
+                    div { class: "text-2xl font-bold text-amber-400", "{ci.version}" }
+                    div { class: "text-xs text-slate-500 mt-1", "{ci.state_store}" }
                 }
             }
         }
 
-        div { class: "data-table-wrap",
-            div { class: "table-header",
-                h3 { "Nodes" }
+        // Nodes table
+        div { class: "bg-slate-900 border border-slate-800 rounded-xl overflow-hidden",
+            div { class: "px-5 py-3.5 border-b border-slate-800",
+                h3 { class: "text-sm font-semibold text-white", "Recent Nodes" }
             }
-            table { class: "data-table",
+            table { class: "w-full",
                 thead {
-                    tr {
-                        th { "Name" }
-                        th { "Status" }
-                        th { "ID" }
+                    tr { class: "border-b border-slate-800",
+                        th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Name" }
+                        th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Status" }
+                        th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "ID" }
                     }
                 }
                 tbody {
                     if let Some(nodes) = nodes_data.as_ref() {
                         if nodes.is_empty() {
-                            tr {
-                                td { colspan: "3",
-                                    div { class: "empty-state",
-                                        div { class: "icon", "🖥️" }
-                                        p { "No nodes registered" }
-                                    }
-                                }
-                            }
+                            tr { td { colspan: "3", class: "text-center py-12 text-slate-500 text-sm", "No nodes registered" } }
                         } else {
                             for node in nodes.iter() {
-                                tr {
-                                    td { "{node.name}" }
-                                    td {
-                                        span {
-                                            class: format!("badge badge-{}", node.status.to_lowercase()),
-                                            "{node.status}"
-                                        }
-                                    }
-                                    td { class: "mono", "{node.id}" }
+                                tr { class: "border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors",
+                                    td { class: "px-5 py-3 text-sm text-slate-300", "{node.name}" }
+                                    td { class: "px-5 py-3", StatusBadge { status: node.status.clone() } }
+                                    td { class: "px-5 py-3 text-xs font-mono text-slate-500", "{node.id}" }
                                 }
                             }
                         }
@@ -109,5 +113,20 @@ pub fn Dashboard() -> Element {
                 }
             }
         }
+    }
+}
+
+#[component]
+pub fn StatusBadge(status: String) -> Element {
+    let cls = match status.as_str() {
+        "Ready" | "Running" => "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20",
+        "NotReady" | "Pending" | "Scheduled" => {
+            "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+        }
+        "Failed" | "Terminated" => "bg-red-500/10 text-red-400 border border-red-500/20",
+        _ => "bg-slate-500/10 text-slate-400 border border-slate-500/20",
+    };
+    rsx! {
+        span { class: "inline-block px-2.5 py-0.5 rounded-full text-[11px] font-medium {cls}", "{status}" }
     }
 }

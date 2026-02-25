@@ -1,7 +1,6 @@
 use crate::api;
 use dioxus::prelude::*;
 
-/// A flattened row for displaying ingress rules in a table.
 struct IngressRow {
     name: String,
     id: String,
@@ -10,19 +9,15 @@ struct IngressRow {
     backend: String,
 }
 
-/// Ingress & Networking page — view Ingress rules.
 #[component]
 pub fn Ingress() -> Element {
     let ns = use_context::<Signal<String>>();
-
     let ingresses = use_resource(move || {
         let ns = ns.read().clone();
         async move { api::get_ingresses(ns).await.unwrap_or_default() }
     });
-
     let ing_data = ingresses.read();
 
-    // Flatten ingress rules into rows
     let rows: Vec<IngressRow> = ing_data
         .as_ref()
         .map(|ings| {
@@ -46,43 +41,33 @@ pub fn Ingress() -> Element {
         .unwrap_or_default();
 
     rsx! {
-        div { class: "page-header",
-            h2 { "Ingress & Networking" }
-            p { "External traffic routing rules" }
+        div { class: "mb-6",
+            h2 { class: "text-xl font-semibold text-white", "Ingress" }
+            p { class: "text-sm text-slate-400 mt-1", "External traffic routing" }
         }
 
-        div { class: "data-table-wrap",
-            div { class: "table-header",
-                h3 { "Ingress Rules" }
-            }
-            table { class: "data-table",
+        div { class: "bg-slate-900 border border-slate-800 rounded-xl overflow-hidden",
+            table { class: "w-full",
                 thead {
-                    tr {
-                        th { "Name" }
-                        th { "Host" }
-                        th { "Path" }
-                        th { "Backend" }
-                        th { "ID" }
+                    tr { class: "border-b border-slate-800",
+                        th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Name" }
+                        th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Host" }
+                        th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Path" }
+                        th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Backend" }
+                        th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "ID" }
                     }
                 }
                 tbody {
                     if rows.is_empty() {
-                        tr {
-                            td { colspan: "5",
-                                div { class: "empty-state",
-                                    div { class: "icon", "🌐" }
-                                    p { "No ingress rules found" }
-                                }
-                            }
-                        }
+                        tr { td { colspan: "5", class: "text-center py-16 text-slate-500 text-sm", "No ingress rules found" } }
                     } else {
                         for row in rows.iter() {
-                            tr {
-                                td { "{row.name}" }
-                                td { "{row.host}" }
-                                td { class: "mono", "{row.path}" }
-                                td { class: "mono", "{row.backend}" }
-                                td { class: "mono", "{row.id}" }
+                            tr { class: "border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors",
+                                td { class: "px-5 py-3 text-sm text-slate-300 font-medium", "{row.name}" }
+                                td { class: "px-5 py-3 text-sm text-slate-400", "{row.host}" }
+                                td { class: "px-5 py-3 text-xs font-mono text-slate-500", "{row.path}" }
+                                td { class: "px-5 py-3 text-xs font-mono text-slate-500", "{row.backend}" }
+                                td { class: "px-5 py-3 text-xs font-mono text-slate-600", "{row.id}" }
                             }
                         }
                     }

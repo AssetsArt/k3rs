@@ -1,4 +1,6 @@
 use dioxus::prelude::*;
+use dioxus_free_icons::icons::ld_icons::*;
+use dioxus_free_icons::Icon;
 use serde::{Deserialize, Serialize};
 
 mod api;
@@ -7,7 +9,7 @@ mod pages;
 use pages::*;
 
 // ============================================================
-// Route definitions
+// Routes
 // ============================================================
 #[derive(Debug, Clone, Routable, PartialEq)]
 #[rustfmt::skip]
@@ -32,10 +34,8 @@ enum Route {
 // ============================================================
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const MAIN_CSS: Asset = asset!("/assets/main.css");
+const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
-// ============================================================
-// Entry point
-// ============================================================
 fn main() {
     dioxus::launch(App);
 }
@@ -45,69 +45,79 @@ fn App() -> Element {
     rsx! {
         document::Link { rel: "icon", href: FAVICON }
         document::Link { rel: "stylesheet", href: MAIN_CSS }
+        document::Link { rel: "stylesheet", href: TAILWIND_CSS }
         Router::<Route> {}
     }
 }
 
 // ============================================================
-// Layout — sidebar + main content area
+// Layout
 // ============================================================
 #[component]
 fn Layout() -> Element {
     let mut namespace = use_signal(|| "default".to_string());
     let route: Route = use_route();
-
-    let nav_items = vec![
-        ("📊", "Dashboard", Route::Dashboard {}),
-        ("🖥️", "Nodes", Route::Nodes {}),
-        ("📦", "Workloads", Route::Workloads {}),
-        ("🔗", "Services", Route::Services {}),
-        ("🌐", "Ingress", Route::Ingress {}),
-        ("📋", "Events", Route::Events {}),
-    ];
-
-    // Provide namespace as context for pages
     use_context_provider(move || namespace);
 
+    let link_cls = |target: &Route| {
+        if *target == route {
+            "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium text-blue-400 bg-blue-500/10"
+        } else {
+            "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 transition-all"
+        }
+    };
+
     rsx! {
-        div { class: "app-layout",
+        div { class: "flex min-h-screen",
             // Sidebar
-            nav { class: "sidebar",
-                div { class: "sidebar-brand",
-                    h1 { "k3rs" }
-                    div { class: "subtitle", "Management UI" }
+            nav { class: "w-56 bg-slate-900 border-r border-slate-800 fixed top-0 left-0 bottom-0 flex flex-col",
+                div { class: "px-5 py-5 border-b border-slate-800",
+                    h1 { class: "text-lg font-bold text-white tracking-tight", "k3rs" }
+                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest mt-0.5", "management" }
                 }
 
-                // Namespace selector
-                div { class: "sidebar-section",
-                    div { class: "sidebar-section-title", "Namespace" }
+                div { class: "px-3 py-3",
+                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mb-1.5", "Namespace" }
                     select {
-                        class: "ns-selector",
+                        class: "w-full bg-slate-800 border border-slate-700 rounded-md px-2.5 py-1.5 text-xs text-slate-300 outline-none focus:border-blue-500 transition-colors",
                         value: "{namespace}",
-                        onchange: move |evt| {
-                            namespace.set(evt.value());
-                        },
+                        onchange: move |evt| namespace.set(evt.value()),
                         option { value: "default", "default" }
                         option { value: "k3rs-system", "k3rs-system" }
                     }
                 }
 
-                // Nav links
-                div { class: "sidebar-section",
-                    div { class: "sidebar-section-title", "Navigation" }
-                    for (icon, label, target) in nav_items {
-                        Link {
-                            class: if route == target { "sidebar-link active" } else { "sidebar-link" },
-                            to: target,
-                            span { class: "icon", "{icon}" }
-                            span { "{label}" }
-                        }
+                div { class: "flex-1 px-3 py-1 space-y-0.5",
+                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mb-1.5", "Menu" }
+                    Link { class: link_cls(&Route::Dashboard {}), to: Route::Dashboard {},
+                        Icon { width: 16, height: 16, icon: LdLayoutDashboard }
+                        span { "Dashboard" }
+                    }
+                    Link { class: link_cls(&Route::Nodes {}), to: Route::Nodes {},
+                        Icon { width: 16, height: 16, icon: LdServer }
+                        span { "Nodes" }
+                    }
+                    Link { class: link_cls(&Route::Workloads {}), to: Route::Workloads {},
+                        Icon { width: 16, height: 16, icon: LdBox }
+                        span { "Workloads" }
+                    }
+                    Link { class: link_cls(&Route::Services {}), to: Route::Services {},
+                        Icon { width: 16, height: 16, icon: LdNetwork }
+                        span { "Services" }
+                    }
+                    Link { class: link_cls(&Route::Ingress {}), to: Route::Ingress {},
+                        Icon { width: 16, height: 16, icon: LdGlobe }
+                        span { "Ingress" }
+                    }
+                    Link { class: link_cls(&Route::Events {}), to: Route::Events {},
+                        Icon { width: 16, height: 16, icon: LdActivity }
+                        span { "Events" }
                     }
                 }
             }
 
-            // Main content
-            main { class: "main-content",
+            // Main
+            main { class: "ml-56 flex-1 p-8 min-h-screen",
                 Outlet::<Route> {}
             }
         }
@@ -115,7 +125,7 @@ fn Layout() -> Element {
 }
 
 // ============================================================
-// Shared types (matching k3rs API types)
+// Shared types
 // ============================================================
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Node {
