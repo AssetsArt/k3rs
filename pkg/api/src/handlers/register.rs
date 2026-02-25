@@ -1,6 +1,7 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use chrono::Utc;
 use pkg_types::node::{Node, NodeRegistrationRequest, NodeRegistrationResponse, NodeStatus};
+use pkg_types::pod::ResourceRequirements;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -43,13 +44,18 @@ pub async fn register_node(
     };
 
     // Persist the node in the state store
+    let now = Utc::now();
     let node_id = Uuid::new_v4().to_string();
     let node = Node {
         id: node_id.clone(),
         name: payload.node_name.clone(),
         status: NodeStatus::Ready,
-        registered_at: Utc::now(),
+        registered_at: now,
+        last_heartbeat: now,
         labels: payload.labels.clone(),
+        taints: vec![],
+        capacity: ResourceRequirements::default(),
+        allocated: ResourceRequirements::default(),
     };
 
     let key = format!("/registry/nodes/{}", node_id);

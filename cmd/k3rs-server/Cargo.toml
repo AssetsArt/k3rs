@@ -14,3 +14,5 @@ pkg-api = { path = "../../pkg/api" }
 pkg-types = { path = "../../pkg/types" }
 pkg-pki = { path = "../../pkg/pki" }
 pkg-state = { path = "../../pkg/state" }
+pkg-controllers = { path = "../../pkg/controllers" }
+pkg-scheduler = { path = "../../pkg/scheduler" }

@@ -1,0 +1,108 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+// --- Resource requirements ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ResourceRequirements {
+    /// CPU in millicores (1000 = 1 core)
+    #[serde(default)]
+    pub cpu_millis: u64,
+    /// Memory in bytes
+    #[serde(default)]
+    pub memory_bytes: u64,
+}
+
+// --- Container spec ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerSpec {
+    pub name: String,
+    pub image: String,
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub resources: ResourceRequirements,
+}
+
+// --- Pod status ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PodStatus {
+    Pending,
+    Scheduled,
+    Running,
+    Succeeded,
+    Failed,
+    Unknown,
+}
+
+impl std::fmt::Display for PodStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PodStatus::Pending => write!(f, "Pending"),
+            PodStatus::Scheduled => write!(f, "Scheduled"),
+            PodStatus::Running => write!(f, "Running"),
+            PodStatus::Succeeded => write!(f, "Succeeded"),
+            PodStatus::Failed => write!(f, "Failed"),
+            PodStatus::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
+// --- Pod spec ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodSpec {
+    pub containers: Vec<ContainerSpec>,
+    #[serde(default)]
+    pub node_affinity: HashMap<String, String>,
+    #[serde(default)]
+    pub tolerations: Vec<Toleration>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Toleration {
+    pub key: String,
+    #[serde(default)]
+    pub operator: TolerationOperator,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub effect: TaintEffect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum TolerationOperator {
+    #[default]
+    Equal,
+    Exists,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum TaintEffect {
+    #[default]
+    NoSchedule,
+    PreferNoSchedule,
+    NoExecute,
+}
+
+// --- Pod ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pod {
+    pub id: String,
+    pub name: String,
+    pub namespace: String,
+    pub spec: PodSpec,
+    pub status: PodStatus,
+    /// The node this pod is assigned to (set by scheduler)
+    #[serde(default)]
+    pub node_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}

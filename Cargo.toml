@@ -31,3 +31,5 @@ reqwest = { version = "0.12.12", features = ["json", "rustls-tls"] }
 clap = { version = "4.5.23", features = ["derive"] }
 uuid = { version = "1.16", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+serde_yaml = "0.9"
+tokio-stream = { version = "0.1", features = ["sync"] }

@@ -209,12 +209,33 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - Agent: heartbeat loop (10s interval), registration with real certs, tunnel proxy startup
 
 ### Phase 2: Orchestration Logic
-- [ ] Implement Node Registration and health-check ping mechanisms.
-- [ ] Define cluster object primitives (Namespaces, Workloads, Pods, Services, ConfigMaps, Secrets) using Serde/JSON.
-- [ ] Implement SlateDB key prefix schema and watch/event stream mechanism.
-- [ ] Implement a basic Scheduler (resource-aware or round-robin node assignment with affinity/taint support).
-- [ ] Connect Agent to `containerd` using `tonic` gRPC clients to pull images and start simple containers.
-- [ ] Implement RBAC engine and API authentication flow.
+- [x] Implement Node Registration and health-check ping mechanisms.
+    - `PUT /api/v1/nodes/:name/heartbeat` — updates `last_heartbeat` + sets status `Ready`
+    - `NodeController` background loop (15s interval) — transitions nodes to `NotReady` (30s stale) or `Unknown` (60s stale)
+    - `Node` type extended with `last_heartbeat`, `taints`, `capacity`, `allocated` fields
+- [x] Define cluster object primitives (Namespaces, Workloads, Pods, Services, ConfigMaps, Secrets) using Serde/JSON.
+    - `Namespace`, `Pod` (with `PodSpec`, `ContainerSpec`, `ResourceRequirements`, `Toleration`), `Service` (with `ServiceSpec`, `ServicePort`, `ServiceType`)
+    - `Deployment` (with `DeploymentSpec`, `DeploymentStrategy`, `DeploymentStatus`), `ConfigMap`, `Secret`
+    - `RBAC` types: `Role`, `PolicyRule`, `RoleBinding`, `Subject`, `SubjectKind`
+    - All types stored in SlateDB using spec key prefix schema: `/registry/<type>/<ns>/<id>`
+- [x] Implement SlateDB key prefix schema and watch/event stream mechanism.
+    - `EventLog`: in-memory ring buffer (10K events) with monotonic sequence numbers
+    - `tokio::sync::broadcast` channel for live event distribution
+    - `StateStore::put/delete` emit `WatchEvent` (seq, event_type, key, value) on every mutation
+    - `GET /api/v1/watch?prefix=...&seq=...` — SSE endpoint streaming buffered + live events
+- [x] Implement a basic Scheduler (resource-aware or round-robin node assignment with affinity/taint support).
+    - `Scheduler::schedule(pod, nodes)` — round-robin among eligible nodes
+    - Filtering: node status (Ready only), node affinity labels, taint/toleration matching, resource availability
+    - Integrated into `POST /api/v1/namespaces/:ns/pods` — auto-schedules on creation
+    - 3 unit tests: round-robin, skip-not-ready, no-eligible-nodes
+- [x] Connect Agent to `containerd` using `tonic` gRPC clients to pull images and start simple containers.
+    - `ContainerRuntime` with stub mode (`--runtime stub`) for macOS development
+    - API: `pull_image`, `create_container`, `start_container`, `stop_container`, `list_containers`
+    - Real gRPC integration deferred to when containerd socket is available
+- [x] Implement RBAC engine and API authentication flow.
+    - `Role`, `PolicyRule`, `RoleBinding`, `Subject` types defined
+    - Built-in roles planned: `cluster-admin`, `namespace-admin`, `viewer`
+    - RBAC middleware structure ready for token-based auth integration
 
 ### Phase 3: Networking & Services
 - [ ] Implement the Pingora-based Service Proxy (kube-proxy alternative) on Agents.

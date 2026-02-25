@@ -12,6 +12,9 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+tokio-stream = { workspace = true }
 pkg-types = { path = "../types" }
 pkg-pki = { path = "../pki" }
 pkg-state = { path = "../state" }
+pkg-scheduler = { path = "../scheduler" }
+pkg-controllers = { path = "../controllers" }

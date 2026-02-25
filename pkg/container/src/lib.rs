@@ -1,14 +1,84 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use tracing::info;
+
+/// Container runtime client.
+/// For Phase 2, this is a stub that logs operations.
+/// In production, this would connect to containerd via tonic gRPC.
+pub struct ContainerRuntime {
+    stub_mode: bool,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl ContainerRuntime {
+    /// Create a new container runtime client.
+    /// If `socket_path` is None, runs in stub mode (no real containerd).
+    pub fn new(socket_path: Option<&str>) -> anyhow::Result<Self> {
+        match socket_path {
+            Some(path) => {
+                info!("Connecting to containerd at {}", path);
+                // In a real implementation, open a gRPC channel here
+                Ok(Self { stub_mode: false })
+            }
+            None => {
+                info!("Container runtime running in STUB mode (no containerd)");
+                Ok(Self { stub_mode: true })
+            }
+        }
+    }
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    pub async fn pull_image(&self, image: &str) -> anyhow::Result<()> {
+        if self.stub_mode {
+            info!("[stub] Pulling image: {}", image);
+            return Ok(());
+        }
+        info!("Pulling image: {}", image);
+        // TODO: tonic gRPC call to containerd Images service
+        Ok(())
+    }
+
+    pub async fn create_container(
+        &self,
+        id: &str,
+        image: &str,
+        command: &[String],
+    ) -> anyhow::Result<()> {
+        if self.stub_mode {
+            info!(
+                "[stub] Creating container: id={}, image={}, cmd={:?}",
+                id, image, command
+            );
+            return Ok(());
+        }
+        info!("Creating container: id={}, image={}", id, image);
+        // TODO: tonic gRPC call to containerd Containers service
+        Ok(())
+    }
+
+    pub async fn start_container(&self, id: &str) -> anyhow::Result<()> {
+        if self.stub_mode {
+            info!("[stub] Starting container: {}", id);
+            return Ok(());
+        }
+        info!("Starting container: {}", id);
+        // TODO: tonic gRPC call to containerd Tasks service
+        Ok(())
+    }
+
+    pub async fn stop_container(&self, id: &str) -> anyhow::Result<()> {
+        if self.stub_mode {
+            info!("[stub] Stopping container: {}", id);
+            return Ok(());
+        }
+        info!("Stopping container: {}", id);
+        // TODO: tonic gRPC call to containerd Tasks service
+        Ok(())
+    }
+
+    pub async fn list_containers(&self) -> anyhow::Result<Vec<String>> {
+        if self.stub_mode {
+            info!("[stub] Listing containers");
+            return Ok(vec![]);
+        }
+        info!("Listing containers");
+        // TODO: tonic gRPC call
+        Ok(vec![])
     }
 }

@@ -1763,7 +1763,9 @@ dependencies = [
  "axum",
  "clap",
  "pkg-api",
+ "pkg-controllers",
  "pkg-pki",
+ "pkg-scheduler",
  "pkg-state",
  "pkg-types",
  "tokio",
@@ -1781,6 +1783,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2618,12 +2621,15 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "pkg-controllers",
  "pkg-pki",
+ "pkg-scheduler",
  "pkg-state",
  "pkg-types",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tracing",
  "uuid",
 ]
@@ -2637,10 +2643,24 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 [[package]]
 name = "pkg-container"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "pkg-controllers"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "pkg-state",
+ "pkg-types",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "pkg-network"
@@ -2671,6 +2691,13 @@ dependencies = [
 [[package]]
 name = "pkg-scheduler"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "pkg-types",
+ "serde",
+ "tracing",
+]
 
 [[package]]
 name = "pkg-state"
@@ -2681,6 +2708,7 @@ dependencies = [
  "serde_json",
  "slatedb",
  "tokio",
+ "tokio-stream",
  "tracing",
 ]
 
@@ -3772,6 +3800,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

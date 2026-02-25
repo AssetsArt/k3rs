@@ -4,11 +4,14 @@ use slatedb::object_store::path::Path;
 use std::sync::Arc;
 use tracing::info;
 
+use crate::watch::{EventLog, EventType};
+
 /// Persistent state store backed by SlateDB on a local filesystem.
-/// In production this would use S3/R2/MinIO via the `object_store` crate.
+/// Integrates with EventLog to emit watch events on mutations.
 #[derive(Clone)]
 pub struct StateStore {
     db: Db,
+    pub event_log: EventLog,
 }
 
 impl StateStore {
@@ -27,15 +30,23 @@ impl StateStore {
         let db = Db::open(Path::from("/"), object_store)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to open SlateDB: {}", e))?;
-        Ok(Self { db })
+
+        Ok(Self {
+            db,
+            event_log: EventLog::new(10_000),
+        })
     }
 
-    /// Store a value under the given key.
+    /// Store a value under the given key. Emits a `Put` watch event.
     pub async fn put(&self, key: &str, value: &[u8]) -> anyhow::Result<()> {
         self.db
             .put(key.as_bytes(), value)
             .await
-            .map_err(|e| anyhow::anyhow!("SlateDB put failed: {}", e))
+            .map_err(|e| anyhow::anyhow!("SlateDB put failed: {}", e))?;
+        self.event_log
+            .emit(EventType::Put, key.to_string(), Some(value.to_vec()))
+            .await;
+        Ok(())
     }
 
     /// Retrieve the value for a key, or `None` if it does not exist.
@@ -47,16 +58,19 @@ impl StateStore {
         }
     }
 
-    /// Delete a key from the store.
+    /// Delete a key from the store. Emits a `Delete` watch event.
     pub async fn delete(&self, key: &str) -> anyhow::Result<()> {
         self.db
             .delete(key.as_bytes())
             .await
-            .map_err(|e| anyhow::anyhow!("SlateDB delete failed: {}", e))
+            .map_err(|e| anyhow::anyhow!("SlateDB delete failed: {}", e))?;
+        self.event_log
+            .emit(EventType::Delete, key.to_string(), None)
+            .await;
+        Ok(())
     }
 
     /// List all key-value pairs whose keys start with `prefix`.
-    /// Returns them as `(key_string, raw_bytes)`.
     pub async fn list_prefix(&self, prefix: &str) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
         let mut results = Vec::new();
         let mut iter = self
