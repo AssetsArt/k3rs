@@ -22,7 +22,7 @@ if [ -z "${TMUX:-}" ] && [ "${1:-}" != "--server-only" ]; then
     tmux new-session -d -s "$SESSION" "bash \"$0\" --server-only $*"
     
     # Split horizontally for the agent
-    tmux split-window -h "./scripts/dev-agent.sh"
+    # tmux split-window -h "./scripts/dev-agent.sh"
     
     # Split the right pane vertically for the UI
     tmux split-window -v "./scripts/dev-ui.sh"
