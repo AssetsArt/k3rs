@@ -39,6 +39,16 @@ A command-line interface for cluster management:
 - **Configuration**: `k3rsctl config set-context`, kubeconfig-compatible credential management
 - Communicates with the API Server via gRPC/REST with token-based authentication.
 
+### 4. Management UI (`k3rs-ui`) — powered by [Dioxus 0.7](https://dioxuslabs.com/learn/0.7/)
+A web-based management dashboard built with [Dioxus](https://dioxuslabs.com/learn/0.7/), a Rust-native fullstack UI framework:
+- **Dashboard**: Real-time cluster overview — node count, pod status, resource utilization, and recent events.
+- **Node Management**: View nodes, status, labels, taints. Drain/cordon operations.
+- **Workload Management**: Browse/create/delete Pods, Deployments, Services, ConfigMaps, Secrets.
+- **Namespace Viewer**: Switch between namespaces, view resource quotas.
+- **Ingress & Networking**: Configure Ingress rules, view Endpoints, DNS records.
+- **Events Stream**: Live-updating event feed from the watch/event stream (SSE).
+- **Built with Dioxus Web**: Ships as a WASM SPA, served by the API Server or standalone via `dx serve`. Uses RSX syntax (HTML/CSS), typesafe Dioxus Router, and reactive signals for state management.
+
 ## Security & Authentication
 
 ### Node Join & Identity
@@ -282,6 +292,18 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - `update_rules(ingresses, services)` resolves backends to ClusterIP:port
     - Supports `PathType::Prefix` and `PathType::Exact` matching
 
+### Phase 3.5: Management UI (Dioxus)
+- [ ] Scaffold `cmd/k3rs-ui` Dioxus web project with `dx init`.
+- [ ] Implement Dashboard page — cluster overview with node/pod counts and status cards.
+- [ ] Implement Nodes page — list all nodes with status, labels, registered time.
+- [ ] Implement Workloads page — tabbed view for Pods, Deployments, Services, ConfigMaps, Secrets.
+- [ ] Implement Namespace selector — dropdown/sidebar to switch active namespace.
+- [ ] Implement Events page — live event stream via SSE from `/api/v1/watch`.
+- [ ] Implement Create/Delete actions — modal forms for creating resources.
+- [ ] Implement Ingress & Networking page — view/create Ingress rules and Endpoints.
+- [ ] Add dark mode and responsive layout.
+- [ ] Integrate with API Server — serve WASM assets from the API server or as standalone.
+
 ### Phase 4: Deployments & Controllers
 - [ ] Implement Deployment and ReplicaSet controllers with rolling update strategy.
 - [ ] Implement DaemonSet controller.
@@ -310,6 +332,7 @@ k3rs/
 ├── cmd/
 │   ├── k3rs-server/            # Control plane binary
 │   ├── k3rs-agent/             # Data plane binary
+│   ├── k3rs-ui/                # Management UI (Dioxus web app)
 │   └── k3rsctl/                # CLI tool binary
 ├── pkg/
 │   ├── api/                    # Axum HTTP API & gRPC definitions
@@ -327,6 +350,7 @@ k3rs/
 ## Tech Stack
 - **Language**: Rust
 - **HTTP API**: `axum`
+- **Management UI**: `dioxus` 0.7 (Rust-native fullstack web framework, WASM SPA)
 - **Container Runtime**: `containerd` (communicating over `tonic` gRPC)
 - **Storage**: `slatedb` (Embedded key-value database on object storage)
 - **Object Storage**: S3 / Cloudflare R2 / MinIO / Local filesystem
