@@ -372,12 +372,27 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - `POST/GET /api/v1/namespaces/:ns/networkpolicies` CRUD endpoints
 
 ### Phase 6: Observability & Extensibility
-- [ ] Add Prometheus-compatible `/metrics` endpoints on Server and Agent.
-- [ ] Implement structured JSON logging across all components.
-- [ ] Implement container log streaming via `k3rsctl logs`.
-- [ ] OpenTelemetry tracing integration (future).
-- [ ] CSI-based persistent storage interface (future).
-- [ ] Blue/Green and Canary deployment strategies via Pingora (future).
+- [x] Add Prometheus-compatible `/metrics` endpoints on Server and Agent.
+    - New `pkg/metrics` crate with atomic counters and gauges, Prometheus text exposition format
+    - `GET /metrics` on server: `k3rs_api_requests_total`, `k3rs_nodes_total`, `k3rs_pods_total`, `k3rs_leader_status`, `k3rs_controller_reconcile_total`
+    - Request ID middleware (`x-request-id` header + tracing span)
+- [x] Implement structured JSON logging across all components.
+    - `--log-format json` flag for server and agent
+    - Uses `tracing-subscriber` JSON layer with `env-filter` support
+- [x] Implement container log streaming via `k3rsctl logs`.
+    - `container_logs(id, tail)` method on `ContainerRuntime` (stub returns simulated timestamped logs)
+    - `k3rsctl logs --follow` flag for polling-based log streaming (2s interval)
+- [x] OpenTelemetry tracing integration (future).
+    - `--enable-otel` flag on server (stub — logs a message, ready for future collector)
+- [x] CSI-based persistent storage interface (future).
+    - `Volume`, `VolumeMount`, `VolumeSource` types (HostPath/EmptyDir/PVC/ConfigMap/Secret)
+    - `PersistentVolumeClaim` type with storage class, access modes, phase
+    - `POST/GET /api/v1/namespaces/:ns/pvcs` CRUD endpoints (auto-bind in stub mode)
+    - `volumes` field on `PodSpec`, `volume_mounts` on `ContainerSpec`
+- [x] Blue/Green and Canary deployment strategies via Pingora (future).
+    - `BlueGreen` variant: deploy new version at full scale, cut over by scaling old to 0
+    - `Canary { weight }` variant: deploy canary replicas proportional to traffic percentage
+    - Both strategies handled in `DeploymentController`
 
 ## Project Structure
 

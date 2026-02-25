@@ -69,6 +69,9 @@ enum Commands {
         /// Namespace
         #[arg(short, long, default_value = "default")]
         namespace: String,
+        /// Follow log output (poll every 2s)
+        #[arg(short, long, default_value_t = false)]
+        follow: bool,
     },
     /// Execute a command in a pod
     Exec {
@@ -569,23 +572,39 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("Failed to delete: {}", resp.status());
             }
         }
-        Commands::Logs { pod_id, namespace } => {
+        Commands::Logs {
+            pod_id,
+            namespace,
+            follow,
+        } => {
             let url = format!(
                 "{}/api/v1/namespaces/{}/pods/{}/logs",
                 base, namespace, pod_id
             );
-            let resp = client.get(&url).send().await?;
-            if resp.status().is_success() {
-                let body: serde_json::Value = resp.json().await?;
-                if let Some(logs) = body.get("logs").and_then(|l| l.as_array()) {
-                    for line in logs {
-                        println!("{}", line.as_str().unwrap_or(""));
+
+            loop {
+                let resp = client.get(&url).send().await?;
+                if resp.status().is_success() {
+                    let body: serde_json::Value = resp.json().await?;
+                    if let Some(logs) = body.get("logs").and_then(|l| l.as_array()) {
+                        for line in logs {
+                            println!("{}", line.as_str().unwrap_or(""));
+                        }
                     }
+                } else if resp.status().as_u16() == 404 {
+                    eprintln!("Pod {} not found in namespace {}", pod_id, namespace);
+                    break;
+                } else {
+                    eprintln!("Failed to get logs: {}", resp.status());
+                    break;
                 }
-            } else if resp.status().as_u16() == 404 {
-                eprintln!("Pod {} not found in namespace {}", pod_id, namespace);
-            } else {
-                eprintln!("Failed to get logs: {}", resp.status());
+
+                if !follow {
+                    break;
+                }
+
+                // Poll every 2 seconds in follow mode
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }
         Commands::Exec {

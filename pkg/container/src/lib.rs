@@ -81,4 +81,30 @@ impl ContainerRuntime {
         // TODO: tonic gRPC call
         Ok(vec![])
     }
+
+    /// Get logs from a container. In stub mode, returns simulated log lines.
+    pub async fn container_logs(&self, id: &str, tail: usize) -> anyhow::Result<Vec<String>> {
+        if self.stub_mode {
+            info!("[stub] Getting logs for container: {}", id);
+            let now = chrono::Utc::now();
+            let logs: Vec<String> = (0..tail.min(20))
+                .map(|i| {
+                    let ts = now - chrono::Duration::seconds((tail - i) as i64);
+                    format!(
+                        "{} [container/{}] simulated log line {}",
+                        ts.format("%Y-%m-%dT%H:%M:%SZ"),
+                        id,
+                        i + 1
+                    )
+                })
+                .collect();
+            return Ok(logs);
+        }
+        info!("Getting logs for container: {}", id);
+        // TODO: tonic gRPC call to containerd Loggers service
+        Ok(vec![format!(
+            "[{}] Real log streaming not yet connected",
+            id
+        )])
+    }
 }

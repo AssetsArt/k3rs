@@ -28,6 +28,8 @@ pub struct ContainerSpec {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub resources: ResourceRequirements,
+    #[serde(default)]
+    pub volume_mounts: Vec<crate::volume::VolumeMount>,
 }
 
 // --- Pod status ---
@@ -64,6 +66,8 @@ pub struct PodSpec {
     pub node_affinity: HashMap<String, String>,
     #[serde(default)]
     pub tolerations: Vec<Toleration>,
+    #[serde(default)]
+    pub volumes: Vec<crate::volume::Volume>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

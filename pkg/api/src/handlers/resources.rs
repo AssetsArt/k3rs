@@ -718,3 +718,44 @@ pub async fn list_network_policies(
         .collect();
     (StatusCode::OK, Json(items)).into_response()
 }
+
+// ============================================================
+// Persistent Volume Claims (CSI stub)
+// ============================================================
+
+pub async fn create_pvc(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+    Json(mut pvc): Json<pkg_types::volume::PersistentVolumeClaim>,
+) -> impl IntoResponse {
+    pvc.id = Uuid::new_v4().to_string();
+    pvc.namespace = ns.clone();
+    pvc.phase = pkg_types::volume::PVCPhase::Bound; // auto-bind in stub mode
+    pvc.created_at = Utc::now();
+
+    let key = format!("/registry/pvcs/{}/{}", ns, pvc.id);
+    match serde_json::to_vec(&pvc) {
+        Ok(data) => {
+            if let Err(e) = state.store.put(&key, &data).await {
+                warn!("Failed to create PVC: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed").into_response();
+            }
+            info!("Created PVC {}/{} ({})", ns, pvc.name, pvc.id);
+            (StatusCode::CREATED, Json(pvc)).into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Serialization failed").into_response(),
+    }
+}
+
+pub async fn list_pvcs(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+) -> impl IntoResponse {
+    let prefix = format!("/registry/pvcs/{}/", ns);
+    let entries = state.store.list_prefix(&prefix).await.unwrap_or_default();
+    let items: Vec<pkg_types::volume::PersistentVolumeClaim> = entries
+        .into_iter()
+        .filter_map(|(_, v)| serde_json::from_slice(&v).ok())
+        .collect();
+    (StatusCode::OK, Json(items)).into_response()
+}

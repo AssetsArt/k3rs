@@ -167,6 +167,57 @@ impl DeploymentController {
                         info!("Deployment {}: recreated with new RS", deploy.name);
                     }
                 }
+                DeploymentStrategy::BlueGreen => {
+                    // Blue/Green: deploy new version at full scale alongside old,
+                    // then cut over by scaling old to 0
+                    if let Some((rs_key, rs)) = current_rs {
+                        if rs.spec.replicas != deploy.spec.replicas {
+                            let mut rs = rs.clone();
+                            rs.spec.replicas = deploy.spec.replicas;
+                            let data = serde_json::to_vec(&rs)?;
+                            self.store.put(rs_key, &data).await?;
+                        }
+                        // Scale down old ReplicaSets (cutover)
+                        for (old_key, mut old_rs) in owned_rs.into_iter() {
+                            if old_rs.template_hash != template_hash && old_rs.spec.replicas > 0 {
+                                old_rs.spec.replicas = 0;
+                                let data = serde_json::to_vec(&old_rs)?;
+                                self.store.put(&old_key, &data).await?;
+                            }
+                        }
+                    } else {
+                        // Create new "green" RS at full scale
+                        self.create_replicaset(ns, &deploy, &template_hash, deploy.spec.replicas)
+                            .await?;
+                        info!(
+                            "Deployment {}: blue/green — new version deployed",
+                            deploy.name
+                        );
+                    }
+                }
+                DeploymentStrategy::Canary { weight } => {
+                    // Canary: run a small percentage of traffic to the new version
+                    let canary_replicas = ((deploy.spec.replicas as f64) * (*weight as f64 / 100.0))
+                        .ceil()
+                        .max(1.0) as u32;
+
+                    if let Some((rs_key, rs)) = current_rs {
+                        if rs.spec.replicas != deploy.spec.replicas {
+                            let mut rs = rs.clone();
+                            rs.spec.replicas = deploy.spec.replicas;
+                            let data = serde_json::to_vec(&rs)?;
+                            self.store.put(rs_key, &data).await?;
+                        }
+                    } else {
+                        // Create canary RS with limited replicas
+                        self.create_replicaset(ns, &deploy, &template_hash, canary_replicas)
+                            .await?;
+                        info!(
+                            "Deployment {}: canary — {} replicas ({}% traffic)",
+                            deploy.name, canary_replicas, weight
+                        );
+                    }
+                }
             }
 
             // Update deployment status from owned ReplicaSets

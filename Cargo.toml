@@ -7,6 +7,7 @@ members = [
     "pkg/api",
     "pkg/container",
     "pkg/controllers",
+    "pkg/metrics",
     "pkg/network",
     "pkg/pki",
     "pkg/proxy",
@@ -22,7 +23,7 @@ tokio = { version = "1.49.0", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
 pingora = { version = "0.7.0" }
 async-trait = "0.1.89"
 anyhow = "1.0.102"

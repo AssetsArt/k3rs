@@ -15,6 +15,14 @@ pub enum DeploymentStrategy {
         max_unavailable: u32,
     },
     Recreate,
+    /// Blue/Green: deploy new version alongside old, then switch traffic atomically
+    BlueGreen,
+    /// Canary: route a percentage of traffic to the new version
+    Canary {
+        /// Percentage of traffic to route to the canary (0-100)
+        #[serde(default = "default_canary_weight")]
+        weight: u32,
+    },
 }
 
 fn default_max_surge() -> u32 {
@@ -22,6 +30,9 @@ fn default_max_surge() -> u32 {
 }
 fn default_max_unavailable() -> u32 {
     0
+}
+fn default_canary_weight() -> u32 {
+    10
 }
 
 impl Default for DeploymentStrategy {

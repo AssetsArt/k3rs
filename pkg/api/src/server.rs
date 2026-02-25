@@ -11,6 +11,7 @@ use tracing::{info, warn};
 use crate::AppState;
 use crate::auth::{auth_middleware, rbac_middleware};
 use crate::handlers::{cluster, drain, endpoints, heartbeat, register, resources, watch};
+use crate::request_id::request_id_middleware;
 use pkg_controllers::cronjob::CronJobController;
 use pkg_controllers::daemonset::DaemonSetController;
 use pkg_controllers::deployment::DeploymentController;
@@ -19,6 +20,7 @@ use pkg_controllers::hpa::HPAController;
 use pkg_controllers::job::JobController;
 use pkg_controllers::node::NodeController;
 use pkg_controllers::replicaset::ReplicaSetController;
+use pkg_metrics::MetricsRegistry;
 use pkg_pki::ca::ClusterCA;
 use pkg_scheduler::Scheduler;
 use pkg_state::client::StateStore;
@@ -39,12 +41,27 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     let ca = ClusterCA::new()?;
     let scheduler = Arc::new(Scheduler::new());
 
+    // Initialize metrics registry
+    let metrics = Arc::new(MetricsRegistry::new());
+    metrics.register_counter("k3rs_api_requests_total", "Total API requests served");
+    metrics.register_counter(
+        "k3rs_controller_reconcile_total",
+        "Total controller reconciliation cycles",
+    );
+    metrics.register_gauge("k3rs_nodes_total", "Total registered nodes");
+    metrics.register_gauge("k3rs_pods_total", "Total pods in the cluster");
+    metrics.register_gauge(
+        "k3rs_leader_status",
+        "Whether this server is the leader (1=leader, 0=follower)",
+    );
+
     let state = AppState {
         store: store.clone(),
         ca: Arc::new(ca),
         join_token: config.join_token,
         listen_addr: config.addr.to_string(),
         scheduler: Some(scheduler.clone()),
+        metrics,
     };
 
     // Seed default namespaces
@@ -204,6 +221,11 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             "/api/v1/namespaces/{ns}/networkpolicies",
             post(resources::create_network_policy).get(resources::list_network_policies),
         )
+        // Phase 6: persistent volume claims (CSI stub)
+        .route(
+            "/api/v1/namespaces/{ns}/pvcs",
+            post(resources::create_pvc).get(resources::list_pvcs),
+        )
         // Phase 2: generic delete
         .route(
             "/api/v1/{resource_type}/{ns}/{id}",
@@ -223,7 +245,10 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         // Phase 1: registration + cluster info (unprotected)
         .route("/register", post(register::register_node))
         .route("/api/v1/cluster/info", get(cluster::cluster_info))
+        // Phase 6: Prometheus metrics endpoint (unprotected)
+        .route("/metrics", get(metrics_handler))
         .merge(api_routes)
+        .layer(middleware::from_fn(request_id_middleware))
         .with_state(state);
 
     info!("Starting API server on {}", config.addr);
@@ -286,4 +311,37 @@ async fn seed_master_node(store: &StateStore, name: &str) -> anyhow::Result<()> 
         info!("Seeded master node");
     }
     Ok(())
+}
+
+/// Handler for `GET /metrics` — renders Prometheus text exposition format.
+async fn metrics_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> impl axum::response::IntoResponse {
+    // Update gauge values from live state
+    let node_count = state
+        .store
+        .list_prefix("/registry/nodes/")
+        .await
+        .map(|e| e.len() as i64)
+        .unwrap_or(0);
+    let pod_count = state
+        .store
+        .list_prefix("/registry/pods/")
+        .await
+        .map(|e| e.len() as i64)
+        .unwrap_or(0);
+
+    state.metrics.gauge_set("k3rs_nodes_total", node_count);
+    state.metrics.gauge_set("k3rs_pods_total", pod_count);
+    state.metrics.counter_inc("k3rs_api_requests_total");
+
+    let body = state.metrics.render();
+    (
+        axum::http::StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
 }

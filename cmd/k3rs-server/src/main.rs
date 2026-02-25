@@ -34,12 +34,41 @@ struct Cli {
     /// Allow running alongside k3rs-agent on the same machine (dev only)
     #[arg(long, default_value_t = false)]
     allow_colocate: bool,
+
+    /// Log format: 'text' or 'json'
+    #[arg(long, default_value = "text")]
+    log_format: String,
+
+    /// Enable OpenTelemetry tracing (future — currently a no-op)
+    #[arg(long, default_value_t = false)]
+    enable_otel: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+
+    // Initialize logging based on format
+    match cli.log_format.as_str() {
+        "json" => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::from_default_env()
+                        .add_directive(tracing::level_filters::LevelFilter::INFO.into()),
+                )
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt::init();
+        }
+    }
+
+    if cli.enable_otel {
+        info!(
+            "OpenTelemetry tracing enabled (stub — collector integration coming in a future release)"
+        );
+    }
 
     // Colocation guard: prevent server + agent on the same machine
     if !cli.allow_colocate && is_process_alive(AGENT_LOCK) {

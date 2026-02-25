@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod handlers;
+pub mod request_id;
 pub mod server;
 
 use std::sync::Arc;
@@ -16,4 +17,5 @@ pub struct AppState {
     pub join_token: String,
     pub listen_addr: String,
     pub scheduler: Option<Arc<Scheduler>>,
+    pub metrics: Arc<pkg_metrics::MetricsRegistry>,
 }

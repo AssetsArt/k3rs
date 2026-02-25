@@ -48,12 +48,31 @@ struct Cli {
     /// Allow running alongside k3rs-server on the same machine (dev only)
     #[arg(long, default_value_t = false)]
     allow_colocate: bool,
+
+    /// Log format: 'text' or 'json'
+    #[arg(long, default_value = "text")]
+    log_format: String,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+
+    // Initialize logging based on format
+    match cli.log_format.as_str() {
+        "json" => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::from_default_env()
+                        .add_directive(tracing::level_filters::LevelFilter::INFO.into()),
+                )
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt::init();
+        }
+    }
 
     // Colocation guard: prevent agent + server on the same machine
     if !cli.allow_colocate && is_process_alive(SERVER_LOCK) {
