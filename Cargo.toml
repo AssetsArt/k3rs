@@ -1,6 +1,22 @@
-[package]
-name = "k3rs"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = [
+    "cmd/k3rs-server",
+    "cmd/k3rs-agent",
+    "cmd/k3rsctl",
+    "pkg/api",
+    "pkg/container",
+    "pkg/controllers",
+    "pkg/network",
+    "pkg/pki",
+    "pkg/proxy",
+    "pkg/scheduler",
+    "pkg/state",
+    "pkg/types"
+]
 
-[dependencies]
+[workspace.dependencies]
+# Dependencies will be managed here centrally as the project grows
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1"

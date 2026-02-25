@@ -3,5 +3,49 @@
 version = 4
 
 [[package]]
-name = "k3rs"
+name = "k3rs-agent"
+version = "0.1.0"
+
+[[package]]
+name = "k3rs-server"
+version = "0.1.0"
+
+[[package]]
+name = "k3rsctl"
+version = "0.1.0"
+
+[[package]]
+name = "pkg-api"
+version = "0.1.0"
+
+[[package]]
+name = "pkg-container"
+version = "0.1.0"
+
+[[package]]
+name = "pkg-controllers"
+version = "0.1.0"
+
+[[package]]
+name = "pkg-network"
+version = "0.1.0"
+
+[[package]]
+name = "pkg-pki"
+version = "0.1.0"
+
+[[package]]
+name = "pkg-proxy"
+version = "0.1.0"
+
+[[package]]
+name = "pkg-scheduler"
+version = "0.1.0"
+
+[[package]]
+name = "pkg-state"
+version = "0.1.0"
+
+[[package]]
+name = "pkg-types"
 version = "0.1.0"
