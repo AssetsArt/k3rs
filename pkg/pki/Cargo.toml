@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+rcgen = "0.13.1"
+rustls = "0.23.14"
+rustls-pemfile = "2.1.3"
+anyhow = { workspace = true }
+tracing = { workspace = true }

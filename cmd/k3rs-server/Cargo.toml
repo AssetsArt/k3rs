@@ -4,3 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+pkg-api = { path = "../../pkg/api" }
+pkg-types = { path = "../../pkg/types" }
+pkg-pki = { path = "../../pkg/pki" }
+pkg-state = { path = "../../pkg/state" }

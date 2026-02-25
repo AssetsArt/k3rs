@@ -1,14 +1,16 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+pub mod handlers;
+pub mod server;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+use std::sync::Arc;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+use pkg_pki::ca::ClusterCA;
+use pkg_state::client::StateStore;
+
+/// Shared application state injected into all Axum handlers.
+#[derive(Clone)]
+pub struct AppState {
+    pub store: StateStore,
+    pub ca: Arc<ClusterCA>,
+    pub join_token: String,
+    pub listen_addr: String,
 }
