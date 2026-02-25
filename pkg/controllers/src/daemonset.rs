@@ -169,6 +169,7 @@ impl DaemonSetController {
             labels: ds.spec.node_selector.clone(),
             owner_ref: Some(ds.id.clone()),
             restart_count: 0,
+            runtime_info: None,
             created_at: Utc::now(),
         };
         let key = format!("/registry/pods/{}/{}", ns, pod_id);

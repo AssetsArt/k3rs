@@ -7,6 +7,15 @@ use crate::backend::{OciBackend, RuntimeBackend, StubBackend};
 use crate::image::ImageManager;
 use crate::rootfs::RootfsManager;
 
+/// Runtime info for tracking which backend a pod is using.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeInfo {
+    pub backend: String,
+    pub version: String,
+    #[serde(default)]
+    pub path: String,
+}
+
 /// Container runtime — orchestrates image pull, rootfs extraction, and
 /// container lifecycle via a pluggable RuntimeBackend.
 pub struct ContainerRuntime {
@@ -16,21 +25,58 @@ pub struct ContainerRuntime {
 }
 
 impl ContainerRuntime {
-    /// Create a new container runtime with automatic OCI runtime detection.
-    /// Falls back to stub mode if no runtime (youki/crun/runc) is found.
+    /// Create a new container runtime with automatic backend detection.
+    ///
+    /// Detection priority:
+    /// - macOS: Docker → Stub
+    /// - Linux: OCI (youki/crun/runc in PATH) → auto-download → Stub
     pub async fn new(data_dir: Option<&str>) -> Result<Self> {
         let data_dir = PathBuf::from(data_dir.unwrap_or("/var/run/k3rs"));
         tokio::fs::create_dir_all(&data_dir).await?;
         tokio::fs::create_dir_all(data_dir.join("containers")).await?;
 
-        let backend: Arc<dyn RuntimeBackend> = match OciBackend::detect() {
-            Ok(oci) => {
-                info!("Using OCI runtime: {}", oci.name());
-                Arc::new(oci)
+        let backend: Arc<dyn RuntimeBackend> = if cfg!(target_os = "macos") {
+            // macOS: try Docker first
+            match crate::backend::DockerBackend::detect() {
+                Ok(docker) => {
+                    info!(
+                        "Using Docker runtime: {} ({})",
+                        docker.name(),
+                        docker.version()
+                    );
+                    Arc::new(docker)
+                }
+                Err(e) => {
+                    info!("Docker not available ({}), falling back to stub mode", e);
+                    Arc::new(StubBackend)
+                }
             }
-            Err(_) => {
-                info!("No OCI runtime found — falling back to stub mode");
-                Arc::new(StubBackend)
+        } else {
+            // Linux: try OCI runtimes
+            match OciBackend::detect() {
+                Ok(oci) => {
+                    info!("Using OCI runtime: {} ({})", oci.name(), oci.version());
+                    Arc::new(oci)
+                }
+                Err(_) => {
+                    // Try auto-download
+                    info!("No OCI runtime in PATH — attempting auto-download...");
+                    match crate::installer::RuntimeInstaller::ensure_runtime(None).await {
+                        Ok(path) => {
+                            let oci = OciBackend::new(&path.to_string_lossy());
+                            info!(
+                                "Using auto-downloaded runtime: {} ({})",
+                                oci.name(),
+                                oci.version()
+                            );
+                            Arc::new(oci)
+                        }
+                        Err(e) => {
+                            info!("Auto-download failed ({}), falling back to stub mode", e);
+                            Arc::new(StubBackend)
+                        }
+                    }
+                }
             }
         };
 
@@ -60,9 +106,26 @@ impl ContainerRuntime {
         self.backend.name()
     }
 
+    /// Get full runtime info for pod tracking.
+    pub fn runtime_info(&self) -> RuntimeInfo {
+        RuntimeInfo {
+            backend: self.backend.name().to_string(),
+            version: self.backend.version().to_string(),
+            path: String::new(),
+        }
+    }
+
     // ─── Image Operations ───────────────────────────────────────────
 
     pub async fn pull_image(&self, image: &str) -> Result<()> {
+        if self.backend.handles_images() {
+            // Docker handles images internally — skip OCI pull
+            info!(
+                "Skipping OCI image pull (handled by {} backend)",
+                self.backend.name()
+            );
+            return Ok(());
+        }
         self.image_manager.pull(image).await?;
         Ok(())
     }
@@ -70,26 +133,35 @@ impl ContainerRuntime {
     // ─── Container Lifecycle ────────────────────────────────────────
 
     pub async fn create_container(&self, id: &str, image: &str, command: &[String]) -> Result<()> {
-        info!("Creating container: id={}, image={}", id, image);
+        info!(
+            "Creating container: id={}, image={}, backend={}",
+            id,
+            image,
+            self.backend.name()
+        );
 
-        // 1. Ensure image is pulled
-        let image_dir = self.image_manager.pull(image).await?;
+        if self.backend.handles_images() {
+            // Docker backend: create directly from image
+            self.backend.create_from_image(id, image, command).await?;
+        } else {
+            // OCI backend: pull image → extract rootfs → create bundle
+            let image_dir = self.image_manager.pull(image).await?;
 
-        // 2. Create container directory
-        let container_dir = self.data_dir.join("containers").join(id);
-        tokio::fs::create_dir_all(&container_dir).await?;
+            let container_dir = self.data_dir.join("containers").join(id);
+            tokio::fs::create_dir_all(&container_dir).await?;
 
-        // 3. Extract rootfs from image layers
-        let rootfs_path = RootfsManager::extract(&image_dir, &container_dir).await?;
+            let rootfs_path = RootfsManager::extract(&image_dir, &container_dir).await?;
+            let config_json = RootfsManager::generate_config(id, &rootfs_path, command)?;
+            tokio::fs::write(container_dir.join("config.json"), &config_json).await?;
 
-        // 4. Generate OCI config.json
-        let config_json = RootfsManager::generate_config(id, &rootfs_path, command)?;
-        tokio::fs::write(container_dir.join("config.json"), &config_json).await?;
+            self.backend.create(id, &container_dir).await?;
+        }
 
-        // 5. Create the container via runtime backend
-        self.backend.create(id, &container_dir).await?;
-
-        info!("Container {} created successfully", id);
+        info!(
+            "Container {} created successfully via {}",
+            id,
+            self.backend.name()
+        );
         Ok(())
     }
 
@@ -109,6 +181,11 @@ impl ContainerRuntime {
 
     pub async fn container_logs(&self, id: &str, tail: usize) -> Result<Vec<String>> {
         self.backend.logs(id, tail).await
+    }
+
+    /// Execute a command inside a running container.
+    pub async fn exec_in_container(&self, id: &str, command: &[&str]) -> Result<String> {
+        self.backend.exec(id, command).await
     }
 
     // ─── Image Management ───────────────────────────────────────

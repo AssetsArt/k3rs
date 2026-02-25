@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use pkg_container::ImageInfo;
+use pkg_container::image::ImageInfo;
 use serde::Deserialize;
 use tracing::info;
 

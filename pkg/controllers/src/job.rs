@@ -166,6 +166,7 @@ impl JobController {
             labels: HashMap::new(),
             owner_ref: Some(job.id.clone()),
             restart_count: 0,
+            runtime_info: None,
             created_at: Utc::now(),
         };
 

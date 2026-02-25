@@ -27,7 +27,7 @@ The server binary encapsulates all control plane processes:
 The agent binary runs on worker nodes and executes workloads:
 - **Tunnel Proxy (powered by Pingora)**: Maintains a persistent, secure reverse tunnel back to the Server (similar to K3s). Pingora's connection pooling and multiplexing capabilities make it ideal for managing these reverse tunnels dynamically without dropping packets.
 - **Agent Node Supervisor (Kubelet equivalent)**: Communicates with the Server API, manages container lifecycles, and reports node resource utilization and health status.
-- **Container Runtime Integrator**: Pulls OCI images directly from registries via `oci-client`, extracts rootfs layers, and invokes OCI runtimes (`youki`/`crun`/`runc`) to start, stop, and monitor containers — no daemon required.
+- **Container Runtime Integrator**: Platform-aware container runtime with pluggable backends — Docker CLI on macOS, OCI runtimes (`youki`/`crun`) with auto-download from GitHub Releases on Linux. Pulls OCI images via `oci-client`, extracts rootfs layers, and manages full container lifecycle including exec.
 - **Service Proxy (powered by Pingora)**: Replaces `kube-proxy`. Uses Pingora to dynamically manage advanced L4/L7 load balancing for services running on the node, routing traffic seamlessly to the correct local or remote Pods.
 - **Overlay Networking (CNI)**: Manages pod-to-pod networking (similar to Flannel or Cilium).
 
@@ -258,9 +258,13 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - Integrated into `POST /api/v1/namespaces/:ns/pods` — auto-schedules on creation
     - 3 unit tests: round-robin, skip-not-ready, no-eligible-nodes
 - [x] Implement Direct OCI container runtime with pluggable `RuntimeBackend` trait.
-    - `ContainerRuntime` with stub mode for macOS development, OCI backend for Linux
-    - API: `pull_image`, `create_container`, `start_container`, `stop_container`, `list_containers`
-    - Image pulling via `oci-client`, rootfs extraction via `tar`+`flate2`, runtime via `youki`/`crun`/`runc`
+    - `ContainerRuntime` with platform-aware detection: Docker (macOS) → OCI (Linux) → Stub (fallback)
+    - Backends: `DockerBackend` (Docker CLI), `OciBackend` (youki/crun), `StubBackend` (dev/test)
+    - API: `pull_image`, `create_container`, `start_container`, `stop_container`, `exec_in_container`, `runtime_info`
+    - Image pulling via `oci-client`, rootfs extraction via `tar`+`flate2`, runtime via `youki`/`crun`
+    - Auto-download: `installer.rs` fetches youki/crun binaries from GitHub Releases on Linux
+    - `PodRuntimeInfo` on each Pod tracks which backend + version is running it
+    - Runtime Management API: `GET /api/v1/runtime`, `PUT /api/v1/runtime/upgrade`
 - [x] Implement RBAC engine and API authentication flow.
     - `Role`, `PolicyRule`, `RoleBinding`, `Subject` types defined
     - Built-in roles planned: `cluster-admin`, `namespace-admin`, `viewer`
@@ -350,8 +354,11 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
 - [x] Implement `k3rsctl apply`, `k3rsctl logs`, `k3rsctl exec`.
     - `k3rsctl get` extended: `replicasets`/`rs`, `daemonsets`/`ds`, `jobs`, `cronjobs`/`cj`, `hpa`
     - `k3rsctl apply` extended: `ReplicaSet`, `DaemonSet`, `Job`, `CronJob`, `HorizontalPodAutoscaler` kinds
-    - `k3rsctl logs <pod>` — fetches `GET /api/v1/namespaces/:ns/pods/:id/logs` (stub response)
-    - `k3rsctl exec <pod> -- <cmd>` — stub with informative message (requires container runtime)
+    - `k3rsctl logs <pod>` — fetches `GET /api/v1/namespaces/:ns/pods/:id/logs`
+    - `k3rsctl exec <pod> -- <cmd>` — WebSocket client connecting to real container runtime exec
+    - `k3rsctl exec <pod>` — interactive mode (stdin loop over WebSocket)
+    - `k3rsctl runtime info` — show current container runtime backend + version
+    - `k3rsctl runtime upgrade` — trigger auto-download of latest runtime (Linux)
     - API: `GET/PUT /deployments/:id`, `POST/GET` for replicasets/daemonsets/jobs/cronjobs/hpa
     - All 7 controllers (Node + 6 new) started at server boot
 
@@ -406,21 +413,31 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
 ### Phase 7: Implementation Complete
 
 #### Container Runtime (`pkg/container/`) — Direct OCI Integration 🏆
-Rust-native, daemonless container runtime with pluggable `RuntimeBackend` trait:
+Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` trait:
 
-**Architecture:** `oci-client` → `tar`+`flate2` → `youki`/`crun`/`runc` (Podman-style)
+**Architecture:** macOS = Docker CLI | Linux = `oci-client` → `tar`+`flate2` → `youki`/`crun`
 
 | Module | Crate | Purpose |
 |--------|-------|---------|
 | `image.rs` | `oci-client` | Pull images from OCI registries (Docker Hub, GHCR) |
 | `rootfs.rs` | `tar` + `flate2` | Extract image layers → rootfs + generate `config.json` |
-| `backend.rs` | `oci-spec` | `RuntimeBackend` trait + OCI/Stub/Firecracker backends |
-| `runtime.rs` | — | `ContainerRuntime` facade orchestrating the full lifecycle |
+| `backend.rs` | `oci-spec` | `RuntimeBackend` trait + Docker/OCI/Stub backends |
+| `runtime.rs` | — | `ContainerRuntime` facade with platform detection + `exec_in_container` |
+| `installer.rs` | `reqwest` | Auto-download youki/crun from GitHub Releases (Linux) |
 
 **Backends:**
-- [x] `StubBackend` — dev/test mode (log-only)
-- [x] `OciBackend` — invokes `youki`/`crun`/`runc` via `std::process::Command`
+- [x] `DockerBackend` — wraps Docker CLI (macOS) — create, start, stop, exec, logs
+- [x] `OciBackend` — invokes `youki`/`crun` via `std::process::Command` (Linux)
+- [x] `StubBackend` — dev/test mode (exec runs host commands)
 - [ ] `FirecrackerBackend` — microVM via REST API over Unix socket (roadmap)
+
+**Auto-download (Linux):**
+- youki v0.6.0 from `github.com/youki-dev/youki/releases`
+- crun 1.26 from `github.com/containers/crun/releases`
+- Configurable: `ensure_runtime(Some("crun"))` — default: youki
+
+**Pod Runtime Tracking:**
+- `PodRuntimeInfo { backend, version }` on each Pod
 
 #### Image & Registry Management (multi-node)
 - [x] `GET /api/v1/images` — aggregated image list across all nodes
@@ -442,7 +459,10 @@ Rust-native, daemonless container runtime with pluggable `RuntimeBackend` trait:
 
 #### CLI — Exec (`cmd/k3rsctl/src/main.rs`)
 - [x] WebSocket exec endpoint: `GET /api/v1/namespaces/{ns}/pods/{id}/exec`
-- [x] Handler in `pkg/api/src/handlers/exec.rs` (simulated shell in stub mode)
+- [x] Handler in `pkg/api/src/handlers/exec.rs` — wired to `runtime.exec_in_container()`
+- [x] `k3rsctl exec` — WebSocket client via `tokio-tungstenite` (interactive + non-interactive)
+- [x] Runtime management: `k3rsctl runtime info`, `k3rsctl runtime upgrade`
+- [x] API: `GET /api/v1/runtime`, `PUT /api/v1/runtime/upgrade`
 
 #### Deployment Strategies (`pkg/controllers/src/deployment.rs`)
 - [x] BlueGreen — full-scale new RS → scale old to 0 (cutover)
@@ -463,7 +483,7 @@ k3rs/
 │   └── k3rsctl/                # CLI tool binary
 ├── pkg/
 │   ├── api/                    # Axum HTTP API & handlers
-│   ├── container/              # Direct OCI container runtime (oci-client + youki/crun/runc)
+│   ├── container/              # Container runtime (Docker on macOS, youki/crun on Linux, auto-download)
 │   ├── controllers/            # Control loops (Deployment, ReplicaSet, DaemonSet, Job, CronJob, HPA)
 │   ├── metrics/                # Prometheus-format metrics registry
 │   ├── network/                # CNI (pod networking) & DNS (svc.cluster.local)
@@ -479,10 +499,12 @@ k3rs/
 - **Language**: Rust
 - **HTTP API**: `axum`
 - **Management UI**: `dioxus` 0.7 (Rust-native fullstack web framework, WASM SPA)
-- **Container Runtime**: Direct OCI Integration (daemonless, Podman-style)
+- **Container Runtime**: Platform-aware with pluggable `RuntimeBackend` trait
+  - **macOS**: Docker CLI backend (auto-detected)
+  - **Linux**: OCI runtimes (`youki` / `crun`) — auto-download from GitHub Releases
   - **Image Pull**: `oci-client` (OCI Distribution spec — Docker Hub, GHCR, etc.)
   - **Rootfs**: `tar` + `flate2` (extract image layers → filesystem)
-  - **OCI Runtime**: `youki` / `crun` / `runc` (auto-detected in `$PATH`)
+  - **WebSocket Exec**: `tokio-tungstenite` for interactive container sessions
   - **Future**: Firecracker microVM support via pluggable `RuntimeBackend` trait
 - **Storage**: `slatedb` (Embedded key-value database on object storage)
 - **Object Storage**: S3 / Cloudflare R2 / MinIO / Local filesystem

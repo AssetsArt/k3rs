@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use futures_util::{SinkExt, StreamExt};
 use pkg_types::configmap::ConfigMap;
 use pkg_types::daemonset::DaemonSet;
 use pkg_types::deployment::Deployment;
@@ -88,6 +89,11 @@ enum Commands {
         #[arg(short, long, default_value = "default")]
         namespace: String,
     },
+    /// Manage container runtime
+    Runtime {
+        #[command(subcommand)]
+        action: RuntimeAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -115,6 +121,14 @@ enum NodeAction {
         /// Node name
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum RuntimeAction {
+    /// Show current container runtime info
+    Info,
+    /// Upgrade/download the latest container runtime (Linux only)
+    Upgrade,
 }
 
 #[tokio::main]
@@ -623,16 +637,146 @@ async fn main() -> anyhow::Result<()> {
             command,
             namespace,
         } => {
-            eprintln!(
-                "exec into pod {}/{} is not yet implemented (stub runtime mode)",
-                namespace, pod_id
+            // Connect via WebSocket to the exec endpoint
+            let ws_url = cli
+                .server
+                .replace("http://", "ws://")
+                .replace("https://", "wss://");
+            let url = format!(
+                "{}/api/v1/namespaces/{}/pods/{}/exec",
+                ws_url, namespace, pod_id
             );
-            if !command.is_empty() {
-                eprintln!("  command: {}", command.join(" "));
+
+            let request = tokio_tungstenite::tungstenite::http::Request::builder()
+                .uri(&url)
+                .header("Authorization", format!("Bearer {}", cli.token))
+                .header("Host", "localhost")
+                .header("Connection", "Upgrade")
+                .header("Upgrade", "websocket")
+                .header("Sec-WebSocket-Version", "13")
+                .header(
+                    "Sec-WebSocket-Key",
+                    tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+                )
+                .body(())
+                .expect("Failed to build WebSocket request");
+
+            let (ws_stream, _) = match tokio_tungstenite::connect_async(request).await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    eprintln!("Failed to connect WebSocket: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            let (mut write, mut read) = ws_stream.split();
+
+            if command.is_empty() {
+                // Interactive mode
+                eprintln!("Entering interactive exec session. Type 'exit' to quit.");
+
+                // Read the welcome message
+                if let Some(Ok(msg)) = read.next().await {
+                    if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                        print!("{}", text);
+                    }
+                }
+
+                let stdin = tokio::io::stdin();
+                let reader = tokio::io::BufReader::new(stdin);
+                let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
+
+                loop {
+                    let line = match lines.next_line().await {
+                        Ok(Some(line)) => line,
+                        _ => break,
+                    };
+
+                    if line.trim() == "exit" {
+                        let _ = write
+                            .send(tokio_tungstenite::tungstenite::Message::Text("exit".into()))
+                            .await;
+                        break;
+                    }
+
+                    if write
+                        .send(tokio_tungstenite::tungstenite::Message::Text(line.into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+
+                    if let Some(Ok(msg)) = read.next().await {
+                        if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                            print!("{}", text);
+                        }
+                    }
+                }
+            } else {
+                // Non-interactive: send single command
+                let cmd = command.join(" ");
+
+                // Skip welcome message
+                let _ = read.next().await;
+
+                if write
+                    .send(tokio_tungstenite::tungstenite::Message::Text(cmd.into()))
+                    .await
+                    .is_err()
+                {
+                    eprintln!("Failed to send command");
+                    std::process::exit(1);
+                }
+
+                if let Some(Ok(msg)) = read.next().await {
+                    if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                        // Remove trailing prompt
+                        let output = text
+                            .trim_end()
+                            .trim_end_matches("$ ")
+                            .trim_end_matches("\r\n$ ");
+                        println!("{}", output);
+                    }
+                }
+
+                let _ = write
+                    .send(tokio_tungstenite::tungstenite::Message::Text("exit".into()))
+                    .await;
             }
-            eprintln!("  This will be available when connected to a real container runtime.");
-            std::process::exit(1);
         }
+        Commands::Runtime { action } => match action {
+            RuntimeAction::Info => {
+                let resp = client
+                    .get(format!("{}/api/v1/runtime", cli.server))
+                    .send()
+                    .await?;
+                let info: serde_json::Value = resp.json().await?;
+                println!("Container Runtime");
+                println!(
+                    "  Backend:  {}",
+                    info["backend"].as_str().unwrap_or("unknown")
+                );
+                println!(
+                    "  Version:  {}",
+                    info["version"].as_str().unwrap_or("unknown")
+                );
+                println!("  OS:       {}", info["os"].as_str().unwrap_or("unknown"));
+                println!("  Arch:     {}", info["arch"].as_str().unwrap_or("unknown"));
+            }
+            RuntimeAction::Upgrade => {
+                println!("Upgrading container runtime...");
+                let resp = client
+                    .put(format!("{}/api/v1/runtime/upgrade", cli.server))
+                    .send()
+                    .await?;
+                let result: serde_json::Value = resp.json().await?;
+                println!("Status: {}", result["status"].as_str().unwrap_or("unknown"));
+                if let Some(msg) = result["message"].as_str() {
+                    println!("Message: {}", msg);
+                }
+            }
+        },
     }
 
     Ok(())

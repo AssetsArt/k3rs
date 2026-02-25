@@ -188,6 +188,7 @@ impl ReplicaSetController {
             labels: rs.spec.selector.clone(),
             owner_ref: Some(rs.id.clone()),
             restart_count: 0,
+            runtime_info: None,
             created_at: Utc::now(),
         };
 

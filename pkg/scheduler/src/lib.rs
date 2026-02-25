@@ -174,6 +174,7 @@ mod tests {
             labels: HashMap::new(),
             owner_ref: None,
             restart_count: 0,
+            runtime_info: None,
             created_at: Utc::now(),
         }
     }

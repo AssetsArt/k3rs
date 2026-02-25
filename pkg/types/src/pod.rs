@@ -96,6 +96,17 @@ pub enum TaintEffect {
     NoExecute,
 }
 
+// --- Pod runtime info ---
+
+/// Tracks which container runtime backend is running this pod.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodRuntimeInfo {
+    /// Backend name: "docker", "youki", "crun", "runc", "stub"
+    pub backend: String,
+    /// Version of the runtime
+    pub version: String,
+}
+
 // --- Pod ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,5 +128,8 @@ pub struct Pod {
     /// Number of times this pod has been restarted
     #[serde(default)]
     pub restart_count: u32,
+    /// Container runtime used for this pod
+    #[serde(default)]
+    pub runtime_info: Option<PodRuntimeInfo>,
     pub created_at: DateTime<Utc>,
 }

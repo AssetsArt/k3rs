@@ -240,6 +240,15 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             "/api/v1/namespaces/{ns}/pods/{id}/exec",
             get(exec::exec_into_pod),
         )
+        // Runtime management
+        .route(
+            "/api/v1/runtime",
+            get(crate::handlers::runtime::get_runtime_info),
+        )
+        .route(
+            "/api/v1/runtime/upgrade",
+            put(crate::handlers::runtime::upgrade_runtime),
+        )
         // Image management
         .route("/api/v1/images", get(images::list_images))
         .route("/api/v1/images/pull", post(images::pull_image))
