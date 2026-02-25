@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::pod::PodSpec;
 
@@ -49,6 +50,9 @@ pub struct DeploymentSpec {
     pub template: PodSpec,
     #[serde(default)]
     pub strategy: DeploymentStrategy,
+    /// Label selector for matching pods
+    #[serde(default)]
+    pub selector: HashMap<String, String>,
 }
 
 // --- Deployment ---
@@ -61,5 +65,11 @@ pub struct Deployment {
     pub spec: DeploymentSpec,
     #[serde(default)]
     pub status: DeploymentStatus,
+    /// Monotonically increasing generation; bumped on spec changes
+    #[serde(default)]
+    pub generation: u64,
+    /// Last generation observed by the controller
+    #[serde(default)]
+    pub observed_generation: u64,
     pub created_at: DateTime<Utc>,
 }

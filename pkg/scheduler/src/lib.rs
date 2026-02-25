@@ -163,6 +163,9 @@ mod tests {
             },
             status: PodStatus::Pending,
             node_id: None,
+            labels: HashMap::new(),
+            owner_ref: None,
+            restart_count: 0,
             created_at: Utc::now(),
         }
     }

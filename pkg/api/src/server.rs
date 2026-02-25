@@ -11,7 +11,13 @@ use tracing::info;
 use crate::AppState;
 use crate::auth::{auth_middleware, rbac_middleware};
 use crate::handlers::{cluster, endpoints, heartbeat, register, resources, watch};
+use pkg_controllers::cronjob::CronJobController;
+use pkg_controllers::daemonset::DaemonSetController;
+use pkg_controllers::deployment::DeploymentController;
+use pkg_controllers::hpa::HPAController;
+use pkg_controllers::job::JobController;
 use pkg_controllers::node::NodeController;
+use pkg_controllers::replicaset::ReplicaSetController;
 use pkg_pki::ca::ClusterCA;
 use pkg_scheduler::Scheduler;
 use pkg_state::client::StateStore;
@@ -27,22 +33,27 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     // Initialize core subsystems
     let store = StateStore::new(&config.data_dir).await?;
     let ca = ClusterCA::new()?;
-    let scheduler = Scheduler::new();
+    let scheduler = Arc::new(Scheduler::new());
 
     let state = AppState {
         store: store.clone(),
         ca: Arc::new(ca),
         join_token: config.join_token,
         listen_addr: config.addr.to_string(),
-        scheduler: Some(Arc::new(scheduler)),
+        scheduler: Some(scheduler.clone()),
     };
 
     // Seed default namespaces
     seed_default_namespaces(&store).await?;
 
-    // Start the NodeController background task
-    let node_controller = NodeController::new(store.clone());
-    node_controller.start();
+    // Start controllers
+    NodeController::new(store.clone()).start();
+    DeploymentController::new(store.clone()).start();
+    ReplicaSetController::new(store.clone(), scheduler.clone()).start();
+    DaemonSetController::new(store.clone()).start();
+    JobController::new(store.clone(), scheduler.clone()).start();
+    CronJobController::new(store.clone()).start();
+    HPAController::new(store.clone()).start();
 
     // Protected API routes
     let api_routes = Router::new()
@@ -73,6 +84,11 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             "/api/v1/namespaces/{ns}/pods/{pod_id}/status",
             put(resources::update_pod_status),
         )
+        // Phase 4: pod logs
+        .route(
+            "/api/v1/namespaces/{ns}/pods/{pod_id}/logs",
+            get(resources::pod_logs),
+        )
         // Phase 2: services
         .route(
             "/api/v1/namespaces/{ns}/services",
@@ -82,6 +98,11 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         .route(
             "/api/v1/namespaces/{ns}/deployments",
             post(resources::create_deployment).get(resources::list_deployments),
+        )
+        // Phase 4: deployment CRUD
+        .route(
+            "/api/v1/namespaces/{ns}/deployments/{deploy_id}",
+            get(resources::get_deployment).put(resources::update_deployment),
         )
         // Phase 2: configmaps
         .route(
@@ -102,6 +123,31 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         .route(
             "/api/v1/namespaces/{ns}/ingresses",
             post(endpoints::create_ingress).get(endpoints::list_ingresses),
+        )
+        // Phase 4: replicasets
+        .route(
+            "/api/v1/namespaces/{ns}/replicasets",
+            post(resources::create_replicaset).get(resources::list_replicasets),
+        )
+        // Phase 4: daemonsets
+        .route(
+            "/api/v1/namespaces/{ns}/daemonsets",
+            post(resources::create_daemonset).get(resources::list_daemonsets),
+        )
+        // Phase 4: jobs
+        .route(
+            "/api/v1/namespaces/{ns}/jobs",
+            post(resources::create_job).get(resources::list_jobs),
+        )
+        // Phase 4: cronjobs
+        .route(
+            "/api/v1/namespaces/{ns}/cronjobs",
+            post(resources::create_cronjob).get(resources::list_cronjobs),
+        )
+        // Phase 4: hpa
+        .route(
+            "/api/v1/namespaces/{ns}/hpa",
+            post(resources::create_hpa).get(resources::list_hpas),
         )
         // Phase 2: generic delete
         .route(

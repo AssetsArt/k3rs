@@ -355,3 +355,288 @@ pub async fn delete_resource(
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
+
+// ============================================================
+// Deployments — GET single & PUT update
+// ============================================================
+
+pub async fn get_deployment(
+    State(state): State<AppState>,
+    AxumPath((ns, deploy_id)): AxumPath<(String, String)>,
+) -> impl IntoResponse {
+    let key = format!("/registry/deployments/{}/{}", ns, deploy_id);
+    match state.store.get(&key).await {
+        Ok(Some(data)) => {
+            if let Ok(deploy) = serde_json::from_slice::<pkg_types::deployment::Deployment>(&data) {
+                return (StatusCode::OK, Json(deploy)).into_response();
+            }
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+pub async fn update_deployment(
+    State(state): State<AppState>,
+    AxumPath((ns, deploy_id)): AxumPath<(String, String)>,
+    Json(mut deploy): Json<pkg_types::deployment::Deployment>,
+) -> impl IntoResponse {
+    let key = format!("/registry/deployments/{}/{}", ns, deploy_id);
+    match state.store.get(&key).await {
+        Ok(Some(existing_data)) => {
+            if let Ok(existing) =
+                serde_json::from_slice::<pkg_types::deployment::Deployment>(&existing_data)
+            {
+                deploy.id = existing.id;
+                deploy.namespace = ns.clone();
+                deploy.created_at = existing.created_at;
+                deploy.generation = existing.generation + 1;
+                if let Ok(data) = serde_json::to_vec(&deploy) {
+                    if let Err(e) = state.store.put(&key, &data).await {
+                        warn!("Failed to update deployment: {}", e);
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                    info!("Updated deployment {}/{}", ns, deploy_id);
+                    return (StatusCode::OK, Json(deploy)).into_response();
+                }
+            }
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+// ============================================================
+// ReplicaSets
+// ============================================================
+
+pub async fn create_replicaset(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+    Json(mut rs): Json<pkg_types::replicaset::ReplicaSet>,
+) -> impl IntoResponse {
+    rs.id = Uuid::new_v4().to_string();
+    rs.namespace = ns.clone();
+    rs.created_at = Utc::now();
+
+    let key = format!("/registry/replicasets/{}/{}", ns, rs.id);
+    match serde_json::to_vec(&rs) {
+        Ok(data) => {
+            if let Err(e) = state.store.put(&key, &data).await {
+                warn!("Failed to create replicaset: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed").into_response();
+            }
+            info!("Created replicaset {}/{}", ns, rs.name);
+            (StatusCode::CREATED, Json(rs)).into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Serialization failed").into_response(),
+    }
+}
+
+pub async fn list_replicasets(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+) -> impl IntoResponse {
+    let prefix = format!("/registry/replicasets/{}/", ns);
+    let entries = state.store.list_prefix(&prefix).await.unwrap_or_default();
+    let items: Vec<pkg_types::replicaset::ReplicaSet> = entries
+        .into_iter()
+        .filter_map(|(_, v)| serde_json::from_slice(&v).ok())
+        .collect();
+    (StatusCode::OK, Json(items)).into_response()
+}
+
+// ============================================================
+// DaemonSets
+// ============================================================
+
+pub async fn create_daemonset(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+    Json(mut ds): Json<pkg_types::daemonset::DaemonSet>,
+) -> impl IntoResponse {
+    ds.id = Uuid::new_v4().to_string();
+    ds.namespace = ns.clone();
+    ds.created_at = Utc::now();
+
+    let key = format!("/registry/daemonsets/{}/{}", ns, ds.id);
+    match serde_json::to_vec(&ds) {
+        Ok(data) => {
+            if let Err(e) = state.store.put(&key, &data).await {
+                warn!("Failed to create daemonset: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed").into_response();
+            }
+            info!("Created daemonset {}/{}", ns, ds.name);
+            (StatusCode::CREATED, Json(ds)).into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Serialization failed").into_response(),
+    }
+}
+
+pub async fn list_daemonsets(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+) -> impl IntoResponse {
+    let prefix = format!("/registry/daemonsets/{}/", ns);
+    let entries = state.store.list_prefix(&prefix).await.unwrap_or_default();
+    let items: Vec<pkg_types::daemonset::DaemonSet> = entries
+        .into_iter()
+        .filter_map(|(_, v)| serde_json::from_slice(&v).ok())
+        .collect();
+    (StatusCode::OK, Json(items)).into_response()
+}
+
+// ============================================================
+// Jobs
+// ============================================================
+
+pub async fn create_job(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+    Json(mut job): Json<pkg_types::job::Job>,
+) -> impl IntoResponse {
+    job.id = Uuid::new_v4().to_string();
+    job.namespace = ns.clone();
+    job.created_at = Utc::now();
+
+    let key = format!("/registry/jobs/{}/{}", ns, job.id);
+    match serde_json::to_vec(&job) {
+        Ok(data) => {
+            if let Err(e) = state.store.put(&key, &data).await {
+                warn!("Failed to create job: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed").into_response();
+            }
+            info!("Created job {}/{}", ns, job.name);
+            (StatusCode::CREATED, Json(job)).into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Serialization failed").into_response(),
+    }
+}
+
+pub async fn list_jobs(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+) -> impl IntoResponse {
+    let prefix = format!("/registry/jobs/{}/", ns);
+    let entries = state.store.list_prefix(&prefix).await.unwrap_or_default();
+    let items: Vec<pkg_types::job::Job> = entries
+        .into_iter()
+        .filter_map(|(_, v)| serde_json::from_slice(&v).ok())
+        .collect();
+    (StatusCode::OK, Json(items)).into_response()
+}
+
+// ============================================================
+// CronJobs
+// ============================================================
+
+pub async fn create_cronjob(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+    Json(mut cj): Json<pkg_types::job::CronJob>,
+) -> impl IntoResponse {
+    cj.id = Uuid::new_v4().to_string();
+    cj.namespace = ns.clone();
+    cj.created_at = Utc::now();
+
+    let key = format!("/registry/cronjobs/{}/{}", ns, cj.id);
+    match serde_json::to_vec(&cj) {
+        Ok(data) => {
+            if let Err(e) = state.store.put(&key, &data).await {
+                warn!("Failed to create cronjob: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed").into_response();
+            }
+            info!("Created cronjob {}/{}", ns, cj.name);
+            (StatusCode::CREATED, Json(cj)).into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Serialization failed").into_response(),
+    }
+}
+
+pub async fn list_cronjobs(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+) -> impl IntoResponse {
+    let prefix = format!("/registry/cronjobs/{}/", ns);
+    let entries = state.store.list_prefix(&prefix).await.unwrap_or_default();
+    let items: Vec<pkg_types::job::CronJob> = entries
+        .into_iter()
+        .filter_map(|(_, v)| serde_json::from_slice(&v).ok())
+        .collect();
+    (StatusCode::OK, Json(items)).into_response()
+}
+
+// ============================================================
+// Horizontal Pod Autoscalers
+// ============================================================
+
+pub async fn create_hpa(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+    Json(mut hpa): Json<pkg_types::hpa::HorizontalPodAutoscaler>,
+) -> impl IntoResponse {
+    hpa.id = Uuid::new_v4().to_string();
+    hpa.namespace = ns.clone();
+    hpa.created_at = Utc::now();
+
+    let key = format!("/registry/hpa/{}/{}", ns, hpa.id);
+    match serde_json::to_vec(&hpa) {
+        Ok(data) => {
+            if let Err(e) = state.store.put(&key, &data).await {
+                warn!("Failed to create HPA: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed").into_response();
+            }
+            info!("Created HPA {}/{}", ns, hpa.name);
+            (StatusCode::CREATED, Json(hpa)).into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Serialization failed").into_response(),
+    }
+}
+
+pub async fn list_hpas(
+    State(state): State<AppState>,
+    AxumPath(ns): AxumPath<String>,
+) -> impl IntoResponse {
+    let prefix = format!("/registry/hpa/{}/", ns);
+    let entries = state.store.list_prefix(&prefix).await.unwrap_or_default();
+    let items: Vec<pkg_types::hpa::HorizontalPodAutoscaler> = entries
+        .into_iter()
+        .filter_map(|(_, v)| serde_json::from_slice(&v).ok())
+        .collect();
+    (StatusCode::OK, Json(items)).into_response()
+}
+
+// ============================================================
+// Pod Logs (stub)
+// ============================================================
+
+#[derive(Debug, serde::Serialize)]
+pub struct PodLogResponse {
+    pub pod_id: String,
+    pub namespace: String,
+    pub logs: Vec<String>,
+}
+
+pub async fn pod_logs(
+    State(state): State<AppState>,
+    AxumPath((ns, pod_id)): AxumPath<(String, String)>,
+) -> impl IntoResponse {
+    let key = format!("/registry/pods/{}/{}", ns, pod_id);
+    match state.store.get(&key).await {
+        Ok(Some(_)) => {
+            let resp = PodLogResponse {
+                pod_id: pod_id.clone(),
+                namespace: ns,
+                logs: vec![format!(
+                    "[stub] Log streaming for pod {} not yet connected to container runtime",
+                    pod_id
+                )],
+            };
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}

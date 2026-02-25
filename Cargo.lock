@@ -5079,11 +5079,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "pkg-scheduler",
  "pkg-state",
  "pkg-types",
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

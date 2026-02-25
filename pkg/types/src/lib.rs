@@ -1,11 +1,15 @@
 pub mod config;
 pub mod configmap;
+pub mod daemonset;
 pub mod deployment;
 pub mod endpoint;
+pub mod hpa;
 pub mod ingress;
+pub mod job;
 pub mod namespace;
 pub mod node;
 pub mod pod;
 pub mod rbac;
+pub mod replicaset;
 pub mod secret;
 pub mod service;

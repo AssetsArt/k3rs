@@ -104,5 +104,14 @@ pub struct Pod {
     /// The node this pod is assigned to (set by scheduler)
     #[serde(default)]
     pub node_id: Option<String>,
+    /// Labels for selector-based matching
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+    /// Owner reference (e.g. ReplicaSet ID that created this pod)
+    #[serde(default)]
+    pub owner_ref: Option<String>,
+    /// Number of times this pod has been restarted
+    #[serde(default)]
+    pub restart_count: u32,
     pub created_at: DateTime<Utc>,
 }
