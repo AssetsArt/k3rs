@@ -9,6 +9,7 @@ This document outlines the design and architecture for a new Scheduling & Orches
 - **Advanced Networking**: Integration of Pingora for all Layer 4/Layer 7 routing and reverse tunneling, with [Axum](https://docs.rs/axum/0.8.8/axum/) powering the high-performance HTTP API.
 - **Edge Native**: Designed for resource-constrained environments, IoT, and Edge Computing scenarios.
 - **Zero-Ops Storage**: Leverage object storage (S3/R2/MinIO) via SlateDB to eliminate the need for managing a separate database cluster.
+- **Modern Ecosystem**: Always use the **latest versions** of Rust crates and libraries (e.g., Axum, Pingora, SlateDB) to benefit from the latest security, performance, and features.
 
 ## Architecture Structure
 
