@@ -198,3 +198,19 @@ pub async fn get_metrics() -> Result<String> {
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(text)
 }
+
+#[get("/api/ui/processes")]
+pub async fn get_processes() -> Result<Vec<ProcessInfo>> {
+    let url = format!("{}/api/v1/processes", K3RS_API);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", K3RS_TOKEN))
+        .send()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let procs: Vec<ProcessInfo> = resp
+        .json()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(procs)
+}

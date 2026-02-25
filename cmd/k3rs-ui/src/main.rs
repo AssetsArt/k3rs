@@ -39,6 +39,8 @@ enum Route {
         NetworkPolicies {},
         #[route("/volumes")]
         Volumes {},
+        #[route("/processes")]
+        ProcessList {},
 }
 
 // ============================================================
@@ -163,6 +165,10 @@ fn Layout() -> Element {
                     }
 
                     p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mt-4 mb-1.5", "Cluster" }
+                    Link { class: sub_link_cls(&Route::ProcessList {}), to: Route::ProcessList {},
+                        Icon { width: 14, height: 14, icon: LdCpu }
+                        span { "Processes" }
+                    }
                     Link { class: sub_link_cls(&Route::Events {}), to: Route::Events {},
                         Icon { width: 14, height: 14, icon: LdActivity }
                         span { "Events" }
@@ -346,4 +352,18 @@ pub struct PVC {
     pub requested_bytes: u64,
     #[serde(default)]
     pub phase: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ProcessInfo {
+    #[serde(default)]
+    pub node_name: String,
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub cpu_percent: f32,
+    #[serde(default)]
+    pub memory_bytes: u64,
 }

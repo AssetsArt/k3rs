@@ -35,3 +35,4 @@ uuid = { version = "1.16", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde_yaml = "0.9"
 tokio-stream = { version = "0.1", features = ["sync"] }
+sysinfo = "0.34"

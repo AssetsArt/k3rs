@@ -311,11 +311,14 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - **Networking**: Ingress, Network Policies
     - **Policies**: Resource Quotas
     - **Storage**: Volumes (PVCs)
-    - **Cluster**: Events
+    - **Cluster**: Processes, Events
 - [x] Implement Network Policies page — pod selectors, Ingress/Egress type badges.
 - [x] Implement Resource Quotas page — max pods, max CPU (cores), max memory per namespace.
 - [x] Implement Volumes (PVC) page — storage class, requested size (GB/MB), phase status badges.
-- [x] Add `get_quotas`, `get_network_policies`, `get_pvcs`, `get_metrics` server functions.
+- [x] Implement Process List page — real system processes via `sysinfo` (node name, process name, CPU%, memory, PID).
+    - Backend: `GET /api/v1/processes` handler using `sysinfo` crate, sorted by memory descending
+    - UI: color-coded CPU (>50% red, >10% amber, else green) and memory (>500MB red, >100MB amber, else cyan)
+- [x] Add `get_quotas`, `get_network_policies`, `get_pvcs`, `get_metrics`, `get_processes` server functions.
 - [x] Dark mode with Tailwind CSS v4.1.5 + `dioxus-free-icons` (Lucide).
 - [x] Dioxus server functions (`#[get]`) — reqwest proxies to k3rs API (server-side only).
 

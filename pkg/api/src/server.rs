@@ -10,7 +10,9 @@ use tracing::{info, warn};
 
 use crate::AppState;
 use crate::auth::{auth_middleware, rbac_middleware};
-use crate::handlers::{cluster, drain, endpoints, heartbeat, register, resources, watch};
+use crate::handlers::{
+    cluster, drain, endpoints, heartbeat, processes, register, resources, watch,
+};
 use crate::request_id::request_id_middleware;
 use pkg_controllers::cronjob::CronJobController;
 use pkg_controllers::daemonset::DaemonSetController;
@@ -226,6 +228,8 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             "/api/v1/namespaces/{ns}/pvcs",
             post(resources::create_pvc).get(resources::list_pvcs),
         )
+        // Cluster: process list
+        .route("/api/v1/processes", get(processes::list_processes))
         // Phase 2: generic delete
         .route(
             "/api/v1/{resource_type}/{ns}/{id}",
