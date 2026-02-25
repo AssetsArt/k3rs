@@ -314,11 +314,37 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
 - [x] Dioxus server functions (`#[get]`) — reqwest proxies to k3rs API (server-side only).
 
 ### Phase 4: Deployments & Controllers
-- [ ] Implement Deployment and ReplicaSet controllers with rolling update strategy.
-- [ ] Implement DaemonSet controller.
-- [ ] Implement Job / CronJob controller.
-- [ ] Implement Horizontal Pod Autoscaler (HPA).
-- [ ] Implement `k3rsctl apply`, `k3rsctl logs`, `k3rsctl exec`.
+- [x] Implement Deployment and ReplicaSet controllers with rolling update strategy.
+    - `DeploymentController` (10s interval): reconciles Deployments → ReplicaSets with `RollingUpdate` and `Recreate` strategies
+    - Template hashing for change detection; creates new RS on spec change, scales down old RS
+    - `ReplicaSetController` (10s interval): reconciles ReplicaSets → Pods, creates/deletes to match desired count
+    - Integrates with `Scheduler` for pod placement; aggregates ready/available status
+    - `Pod` extended with `labels`, `owner_ref`, `restart_count` for ownership tracking
+    - `Deployment` extended with `selector` (label matching), `generation`/`observed_generation` (rollout tracking)
+    - `ReplicaSet` type: `spec.replicas`, `spec.selector`, `spec.template`, `owner_ref`, `template_hash`
+- [x] Implement DaemonSet controller.
+    - `DaemonSetController` (15s interval): ensures one Pod per eligible node
+    - `node_selector` label matching for targeted scheduling
+    - Auto-creates pods on new Ready nodes, removes orphan pods when nodes become ineligible
+    - `DaemonSet` type: `spec.template`, `spec.node_selector`, `status.desired/current/ready`
+- [x] Implement Job / CronJob controller.
+    - `JobController` (10s interval): run-to-completion workloads with `completions`, `parallelism`, `backoff_limit`
+    - Tracks `active`, `succeeded`, `failed` pod counts; transitions to `Complete` or `Failed`
+    - `CronJobController` (30s interval): spawns Jobs on cron schedule (minute-field MVP parser)
+    - Supports `*/N` (every N minutes), `M` (at minute M), `*` (every minute); `suspend` flag
+    - `CronJob` type: `spec.schedule`, `spec.job_template`, `spec.suspend`, `status.active_jobs`
+- [x] Implement Horizontal Pod Autoscaler (HPA).
+    - `HPAController` (30s interval): scales Deployment replicas based on CPU/memory utilization thresholds
+    - 10% hysteresis to prevent flapping; respects `min_replicas`/`max_replicas` bounds
+    - `HPA` type: `spec.target_deployment`, `spec.min/max_replicas`, `spec.metrics.cpu/memory_utilization_percent`
+    - Simulated metrics baseline (70% CPU, 60% memory) — real agent metrics in Phase 6
+- [x] Implement `k3rsctl apply`, `k3rsctl logs`, `k3rsctl exec`.
+    - `k3rsctl get` extended: `replicasets`/`rs`, `daemonsets`/`ds`, `jobs`, `cronjobs`/`cj`, `hpa`
+    - `k3rsctl apply` extended: `ReplicaSet`, `DaemonSet`, `Job`, `CronJob`, `HorizontalPodAutoscaler` kinds
+    - `k3rsctl logs <pod>` — fetches `GET /api/v1/namespaces/:ns/pods/:id/logs` (stub response)
+    - `k3rsctl exec <pod> -- <cmd>` — stub with informative message (requires container runtime)
+    - API: `GET/PUT /deployments/:id`, `POST/GET` for replicasets/daemonsets/jobs/cronjobs/hpa
+    - All 7 controllers (Node + 6 new) started at server boot
 
 ### Phase 5: Reliability & High Availability
 - [ ] Implement multi-server mode with leader election via SlateDB leases.
