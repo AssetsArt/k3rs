@@ -106,7 +106,7 @@ impl HPAController {
                 .into_iter()
                 .filter_map(|(_, v)| {
                     let pod: Pod = serde_json::from_slice(&v).ok()?;
-                    if pod.owner_ref.as_ref().map_or(false, |r| rs_ids.contains(r))
+                    if pod.owner_ref.as_ref().is_some_and(|r| rs_ids.contains(r))
                         && matches!(pod.status, PodStatus::Running | PodStatus::Scheduled)
                     {
                         Some(pod)
@@ -121,51 +121,42 @@ impl HPAController {
             let mut desired_replicas = current_replicas;
 
             // Compute average CPU utilization
-            if let Some(target_cpu) = hpa.spec.metrics.cpu_utilization_percent {
-                if pod_count > 0 {
-                    let total_cpu_requested: u64 = running_pods
-                        .iter()
-                        .flat_map(|p| p.spec.containers.iter())
-                        .map(|c| c.resources.cpu_millis)
-                        .sum();
-                    let capacity_cpu = total_cpu_requested;
+            if let Some(target_cpu) = hpa.spec.metrics.cpu_utilization_percent
+                && pod_count > 0
+            {
+                let total_cpu_requested: u64 = running_pods
+                    .iter()
+                    .flat_map(|p| p.spec.containers.iter())
+                    .map(|c| c.resources.cpu_millis)
+                    .sum();
 
-                    // Simulate current utilization (in production, agents report real metrics)
-                    // For now, estimate based on replica count vs requested
-                    let avg_util = if capacity_cpu > 0 {
-                        // Assume 70% utilization as a baseline simulation
-                        70u32
-                    } else {
-                        0
-                    };
+                // Simulate current utilization (in production, agents report real metrics)
+                let avg_util = if total_cpu_requested > 0 { 70u32 } else { 0 };
 
-                    hpa.status.current_cpu_utilization_percent = Some(avg_util);
+                hpa.status.current_cpu_utilization_percent = Some(avg_util);
 
-                    if avg_util > target_cpu && current_replicas < hpa.spec.max_replicas {
-                        // Scale up
-                        desired_replicas = (current_replicas + 1).min(hpa.spec.max_replicas);
-                    } else if avg_util < target_cpu.saturating_sub(10)
-                        && current_replicas > hpa.spec.min_replicas
-                    {
-                        // Scale down (with 10% hysteresis)
-                        desired_replicas = (current_replicas - 1).max(hpa.spec.min_replicas);
-                    }
+                if avg_util > target_cpu && current_replicas < hpa.spec.max_replicas {
+                    desired_replicas = (current_replicas + 1).min(hpa.spec.max_replicas);
+                } else if avg_util < target_cpu.saturating_sub(10)
+                    && current_replicas > hpa.spec.min_replicas
+                {
+                    desired_replicas = (current_replicas - 1).max(hpa.spec.min_replicas);
                 }
             }
 
             // Compute average memory utilization
-            if let Some(target_mem) = hpa.spec.metrics.memory_utilization_percent {
-                if pod_count > 0 {
-                    let avg_mem_util = 60u32; // Simulated baseline
-                    hpa.status.current_memory_utilization_percent = Some(avg_mem_util);
+            if let Some(target_mem) = hpa.spec.metrics.memory_utilization_percent
+                && pod_count > 0
+            {
+                let avg_mem_util = 60u32; // Simulated baseline
+                hpa.status.current_memory_utilization_percent = Some(avg_mem_util);
 
-                    if avg_mem_util > target_mem && desired_replicas < hpa.spec.max_replicas {
-                        desired_replicas = (desired_replicas + 1).min(hpa.spec.max_replicas);
-                    } else if avg_mem_util < target_mem.saturating_sub(10)
-                        && desired_replicas > hpa.spec.min_replicas
-                    {
-                        desired_replicas = (desired_replicas - 1).max(hpa.spec.min_replicas);
-                    }
+                if avg_mem_util > target_mem && desired_replicas < hpa.spec.max_replicas {
+                    desired_replicas = (desired_replicas + 1).min(hpa.spec.max_replicas);
+                } else if avg_mem_util < target_mem.saturating_sub(10)
+                    && desired_replicas > hpa.spec.min_replicas
+                {
+                    desired_replicas = (desired_replicas - 1).max(hpa.spec.min_replicas);
                 }
             }
 

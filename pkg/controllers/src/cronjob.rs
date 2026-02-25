@@ -107,12 +107,18 @@ impl CronJobController {
             let mut still_active = Vec::new();
             for job_id in &cj.status.active_jobs {
                 let job_key = format!("/registry/jobs/{}/{}", ns, job_id);
-                if let Ok(Some(data)) = self.store.get(&job_key).await {
-                    if let Ok(job) = serde_json::from_slice::<Job>(&data) {
-                        if job.status.condition == pkg_types::job::JobCondition::Running {
-                            still_active.push(job_id.clone());
-                        }
-                    }
+                let is_running = self
+                    .store
+                    .get(&job_key)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|data| serde_json::from_slice::<Job>(&data).ok())
+                    .is_some_and(|job| {
+                        job.status.condition == pkg_types::job::JobCondition::Running
+                    });
+                if is_running {
+                    still_active.push(job_id.clone());
                 }
             }
             if still_active.len() != cj.status.active_jobs.len() {

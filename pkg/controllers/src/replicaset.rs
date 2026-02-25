@@ -122,18 +122,19 @@ impl ReplicaSetController {
             let mut available = 0u32;
             for (_, v) in pod_entries {
                 if let Ok(pod) = serde_json::from_slice::<Pod>(&v) {
-                    if pod.owner_ref.as_deref() == Some(&rs.id) {
-                        replicas += 1;
-                        match pod.status {
-                            PodStatus::Running => {
-                                ready += 1;
-                                available += 1;
-                            }
-                            PodStatus::Scheduled => {
-                                ready += 1;
-                            }
-                            _ => {}
+                    if pod.owner_ref.as_deref() != Some(&rs.id) {
+                        continue;
+                    }
+                    replicas += 1;
+                    match pod.status {
+                        PodStatus::Running => {
+                            ready += 1;
+                            available += 1;
                         }
+                        PodStatus::Scheduled => {
+                            ready += 1;
+                        }
+                        _ => {}
                     }
                 }
             }

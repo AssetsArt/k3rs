@@ -93,7 +93,28 @@ impl DeploymentController {
                 } => {
                     let max_surge = *max_surge;
 
-                    if current_rs.is_none() {
+                    if let Some((rs_key, rs)) = current_rs {
+                        // Current RS exists — make sure it has the right replica count
+                        if rs.spec.replicas != deploy.spec.replicas {
+                            let mut rs = rs.clone();
+                            rs.spec.replicas = deploy.spec.replicas;
+                            let data = serde_json::to_vec(&rs)?;
+                            self.store.put(rs_key, &data).await?;
+                            info!(
+                                "Deployment {}: scaled RS {} to {}",
+                                deploy.name, rs.name, deploy.spec.replicas
+                            );
+                        }
+
+                        // Scale down any old RS to 0
+                        for (old_key, mut old_rs) in owned_rs.into_iter() {
+                            if old_rs.template_hash != template_hash && old_rs.spec.replicas > 0 {
+                                old_rs.spec.replicas = 0;
+                                let data = serde_json::to_vec(&old_rs)?;
+                                self.store.put(&old_key, &data).await?;
+                            }
+                        }
+                    } else {
                         // Create new ReplicaSet
                         let rs = self
                             .create_replicaset(
@@ -121,34 +142,19 @@ impl DeploymentController {
                                 );
                             }
                         }
-                    } else {
-                        // Current RS exists — make sure it has the right replica count
-                        let (rs_key, rs) = current_rs.unwrap();
+                    }
+                }
+                DeploymentStrategy::Recreate => {
+                    if let Some((rs_key, rs)) = current_rs {
                         if rs.spec.replicas != deploy.spec.replicas {
                             let mut rs = rs.clone();
                             rs.spec.replicas = deploy.spec.replicas;
                             let data = serde_json::to_vec(&rs)?;
                             self.store.put(rs_key, &data).await?;
-                            info!(
-                                "Deployment {}: scaled RS {} to {}",
-                                deploy.name, rs.name, deploy.spec.replicas
-                            );
                         }
-
-                        // Scale down any old RS to 0
-                        for (old_key, mut old_rs) in owned_rs.into_iter() {
-                            if old_rs.template_hash != template_hash && old_rs.spec.replicas > 0 {
-                                old_rs.spec.replicas = 0;
-                                let data = serde_json::to_vec(&old_rs)?;
-                                self.store.put(&old_key, &data).await?;
-                            }
-                        }
-                    }
-                }
-                DeploymentStrategy::Recreate => {
-                    if current_rs.is_none() {
+                    } else {
                         // Scale all old RS to 0 first
-                        for (old_key, mut old_rs) in &mut owned_rs.into_iter() {
+                        for (old_key, mut old_rs) in owned_rs.into_iter() {
                             if old_rs.spec.replicas > 0 {
                                 old_rs.spec.replicas = 0;
                                 let data = serde_json::to_vec(&old_rs)?;
@@ -159,14 +165,6 @@ impl DeploymentController {
                         self.create_replicaset(ns, &deploy, &template_hash, deploy.spec.replicas)
                             .await?;
                         info!("Deployment {}: recreated with new RS", deploy.name);
-                    } else {
-                        let (rs_key, rs) = current_rs.unwrap();
-                        if rs.spec.replicas != deploy.spec.replicas {
-                            let mut rs = rs.clone();
-                            rs.spec.replicas = deploy.spec.replicas;
-                            let data = serde_json::to_vec(&rs)?;
-                            self.store.put(rs_key, &data).await?;
-                        }
                     }
                 }
             }
@@ -179,12 +177,13 @@ impl DeploymentController {
             let mut updated = 0u32;
             for (_, v) in rs_entries {
                 if let Ok(rs) = serde_json::from_slice::<ReplicaSet>(&v) {
-                    if rs.owner_ref.as_deref() == Some(&deploy.id) {
-                        ready += rs.status.ready_replicas;
-                        available += rs.status.available_replicas;
-                        if rs.template_hash == template_hash {
-                            updated += rs.status.ready_replicas;
-                        }
+                    if rs.owner_ref.as_deref() != Some(&deploy.id) {
+                        continue;
+                    }
+                    ready += rs.status.ready_replicas;
+                    available += rs.status.available_replicas;
+                    if rs.template_hash == template_hash {
+                        updated += rs.status.ready_replicas;
                     }
                 }
             }

@@ -82,7 +82,7 @@ impl DaemonSetController {
                     ds.spec
                         .node_selector
                         .iter()
-                        .all(|(k, v)| n.labels.get(k).map_or(false, |nv| nv == v))
+                        .all(|(k, v)| n.labels.get(k).is_some_and(|nv| nv == v))
                 })
                 .collect();
 
@@ -121,14 +121,14 @@ impl DaemonSetController {
             let eligible_ids: std::collections::HashSet<&str> =
                 eligible_nodes.iter().map(|n| n.id.as_str()).collect();
             for (pod_key, pod) in &owned_pods {
-                if let Some(nid) = &pod.node_id {
-                    if !eligible_ids.contains(nid.as_str()) {
-                        self.store.delete(pod_key).await?;
-                        info!(
-                            "DaemonSet {}: removed orphan pod {} from node {}",
-                            ds.name, pod.name, nid
-                        );
-                    }
+                if let Some(nid) = &pod.node_id
+                    && !eligible_ids.contains(nid.as_str())
+                {
+                    self.store.delete(pod_key).await?;
+                    info!(
+                        "DaemonSet {}: removed orphan pod {} from node {}",
+                        ds.name, pod.name, nid
+                    );
                 }
             }
 
@@ -141,7 +141,7 @@ impl DaemonSetController {
                     matches!(p.status, PodStatus::Running | PodStatus::Scheduled)
                         && p.node_id
                             .as_ref()
-                            .map_or(false, |nid| eligible_ids.contains(nid.as_str()))
+                            .is_some_and(|nid| eligible_ids.contains(nid.as_str()))
                 })
                 .count() as u32
                 + created;
