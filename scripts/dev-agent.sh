@@ -30,5 +30,5 @@ fi
 cargo watch \
     -x "run --bin k3rs-agent -- --server $SERVER --token $TOKEN --node-name $NODE_NAME --proxy-port $PROXY_PORT --service-proxy-port $SERVICE_PROXY_PORT --dns-port $DNS_PORT" \
     -w pkg/ \
-    -w cmd/ \
+    -w cmd/k3rs-agent \
     -i "target/*"

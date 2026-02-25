@@ -59,5 +59,5 @@ fi
 cargo watch \
     -x "run --bin k3rs-server -- --port $PORT --token $TOKEN --data-dir $DATA_DIR" \
     -w pkg/ \
-    -w cmd/ \
+    -w cmd/k3rs-server \
     -i "target/*"
