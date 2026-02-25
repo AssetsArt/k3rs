@@ -6,7 +6,7 @@ This document outlines the design and architecture for a new Scheduling & Orches
 ## Goals
 - **Minimal Footprint**: Single binary execution for both Server and Agent, similar to the K3s model.
 - **High Performance & Safety**: Built natively in Rust for memory safety and extreme performance.
-- **Advanced Networking**: Deep integration of Pingora for all Layer 4/Layer 7 routing, reverse tunneling, and API gateway features.
+- **Advanced Networking**: Integration of Pingora for all Layer 4/Layer 7 routing and reverse tunneling, with [Axum](https://docs.rs/axum/0.8.8/axum/) powering the high-performance HTTP API.
 - **Edge Native**: Designed for resource-constrained environments, IoT, and Edge Computing scenarios.
 - **Zero-Ops Storage**: Leverage object storage (S3/R2/MinIO) via SlateDB to eliminate the need for managing a separate database cluster.
 
@@ -17,7 +17,7 @@ The system follows a classical Control Plane (Server) and Data Plane (Agent) arc
 ### 1. Server Components (Control Plane)
 The server binary encapsulates all control plane processes:
 - **Supervisor**: The init process managing the lifecycle of all internal processes and threads.
-- **API Server (powered by Pingora)**: The central entry point for all control plane communications. Instead of a traditional HTTP server, Pingora acts as a high-performance, programmable REST/gRPC API gateway layer.
+- **API Server (powered by Axum)**: The central entry point for all control plane communications. Handles Agent registration, workload definitions, and API requests using the ergonomic, high-performance Axum web framework.
 - **Scheduler**: Determines which node (Agent) a workload should run on, based on resource availability, node labeling, affinity/anti-affinity rules, taints, and tolerations.
 - **Controller Manager**: Runs background control loops to maintain the desired state of the cluster (e.g., node liveness, workload deployments, replica count, auto-scaling).
 - **Data Store (SlateDB)**: Embedded key-value database built on object storage using [SlateDB](https://slatedb.io/) for robust, cost-effective, and highly available state persistence. Eliminates the need for etcd or an external database.
@@ -160,7 +160,7 @@ SlateDB is used as the sole state store, replacing etcd. All cluster state is st
 ## Why Cloudflare Pingora?
 Using Cloudflare Pingora as the backbone for this orchestrator provides several architectural advantages:
 - **Memory-Safe Concurrency**: Pingora handles millions of concurrent connections efficiently, avoiding memory leaks typical in C-based proxies.
-- **Unified Proxying Ecosystem**: It replaces multiple discrete components (API Gateway, Ingress Controller, Service Proxy, Tunnel Proxy) with a single unified, programmable Rust framework embedded directly into the binary.
+- **Unified Proxying Ecosystem**: It replaces multiple discrete components (Ingress Controller, Service Proxy, Tunnel Proxy) with a single unified, programmable Rust framework embedded directly into the binary, working alongside Axum for API endpoints.
 - **Dynamic Configuration**: Pingora allows hot-reloading of routing logic and proxy rules without dropping existing connections, which is crucial for a fast-churning orchestration environment where services are constantly scaling.
 - **Protocol Flexibility**: Native support for HTTP/1.1, HTTP/2, TLS, and Raw TCP/UDP streams, making it perfect for both cluster internal communications and exposing external workloads.
 
@@ -176,7 +176,7 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
 
 ### Phase 1: Core Foundation & Communication
 - [ ] Initialize Rust workspace and configure `pingora` and `slatedb` dependencies.
-- [ ] Implement Pingora-based API Server stub to accept registration requests.
+- [ ] Implement Axum-based API Server stub to accept registration requests.
 - [ ] Implement Pingora-based Tunnel Proxy to establish bi-directional communication between Agent and Server.
 - [ ] Implement state store using SlateDB over S3-compatible object storage.
 - [ ] Implement join token generation and node registration with mTLS certificate issuance.
@@ -227,7 +227,7 @@ k3rs/
 │   ├── k3rs-agent/             # Data plane binary
 │   └── k3rsctl/                # CLI tool binary
 ├── pkg/
-│   ├── api/                    # Pingora API Gateway & gRPC definitions
+│   ├── api/                    # Axum HTTP API & gRPC definitions
 │   ├── container/              # containerd integration logic
 │   ├── controllers/            # Control loops (Deployment, Node, etc.)
 │   ├── network/                # CNI & DNS (hickory-dns) integration
@@ -241,7 +241,7 @@ k3rs/
 
 ## Tech Stack
 - **Language**: Rust
-- **Networking/Proxy/Ingress**: `pingora` (Cloudflare)
+- **HTTP API**: `axum`
 - **Container Runtime**: `containerd` (communicating over `tonic` gRPC)
 - **Storage**: `slatedb` (Embedded key-value database on object storage)
 - **Object Storage**: S3 / Cloudflare R2 / MinIO / Local filesystem
