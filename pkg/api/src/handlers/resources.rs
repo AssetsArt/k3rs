@@ -147,6 +147,32 @@ pub async fn delete_pod(
     }
 }
 
+pub async fn update_pod_status(
+    State(state): State<AppState>,
+    AxumPath((ns, pod_id)): AxumPath<(String, String)>,
+    Json(status): Json<pkg_types::pod::PodStatus>,
+) -> impl IntoResponse {
+    let key = format!("/registry/pods/{}/{}", ns, pod_id);
+    match state.store.get(&key).await {
+        Ok(Some(data)) => {
+            if let Ok(mut pod) = serde_json::from_slice::<pkg_types::pod::Pod>(&data) {
+                pod.status = status;
+                if let Ok(new_data) = serde_json::to_vec(&pod) {
+                    if let Err(e) = state.store.put(&key, &new_data).await {
+                        warn!("Failed to update pod status: {}", e);
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                    info!("Updated pod status {}/{} to {:?}", ns, pod_id, pod.status);
+                    return (StatusCode::OK, Json(pod)).into_response();
+                }
+            }
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 // ============================================================
 // Services
 // ============================================================

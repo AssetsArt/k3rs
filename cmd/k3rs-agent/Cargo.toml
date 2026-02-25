@@ -13,3 +13,4 @@ clap = { workspace = true }
 serde_json = { workspace = true }
 pkg-types = { path = "../../pkg/types" }
 pkg-proxy = { path = "../../pkg/proxy" }
+pkg-container = { path = "../../pkg/container" }

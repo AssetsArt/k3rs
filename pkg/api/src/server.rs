@@ -1,5 +1,5 @@
 use axum::{
-    Router,
+    Router, middleware,
     routing::{delete, get, post, put},
 };
 use chrono::Utc;
@@ -9,6 +9,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::AppState;
+use crate::auth::{auth_middleware, rbac_middleware};
 use crate::handlers::{cluster, heartbeat, register, resources, watch};
 use pkg_controllers::node::NodeController;
 use pkg_pki::ca::ClusterCA;
@@ -43,10 +44,9 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     let node_controller = NodeController::new(store.clone());
     node_controller.start();
 
-    let app = Router::new()
-        // Phase 1: registration + cluster info
-        .route("/register", post(register::register_node))
-        .route("/api/v1/cluster/info", get(cluster::cluster_info))
+    // Protected API routes
+    let api_routes = Router::new()
+        // Phase 1: nodes
         .route("/api/v1/nodes", get(cluster::list_nodes))
         // Phase 2: heartbeat
         .route(
@@ -68,6 +68,10 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         .route(
             "/api/v1/namespaces/{ns}/pods/{pod_id}",
             get(resources::get_pod).delete(resources::delete_pod),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/pods/{pod_id}/status",
+            put(resources::update_pod_status),
         )
         // Phase 2: services
         .route(
@@ -94,6 +98,21 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             "/api/v1/{resource_type}/{ns}/{id}",
             delete(resources::delete_resource),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rbac_middleware,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
+
+    // Public routes + merged
+    let app = Router::new()
+        // Phase 1: registration + cluster info (unprotected)
+        .route("/register", post(register::register_node))
+        .route("/api/v1/cluster/info", get(cluster::cluster_info))
+        .merge(api_routes)
         .with_state(state);
 
     info!("Starting API server on {}", config.addr);
