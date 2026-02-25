@@ -176,12 +176,37 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
 ## Implementation Phases
 
 ### Phase 1: Core Foundation & Communication
-- [ ] Initialize Rust workspace and configure `pingora` and `slatedb` dependencies.
-- [ ] Implement Axum-based API Server stub to accept registration requests.
-- [ ] Implement Pingora-based Tunnel Proxy to establish bi-directional communication between Agent and Server.
-- [ ] Implement state store using SlateDB over S3-compatible object storage.
-- [ ] Implement join token generation and node registration with mTLS certificate issuance.
-- [ ] Implement basic `k3rsctl` CLI with `cluster info` and `node list`.
+- [x] Initialize Rust workspace and configure `pingora` and `slatedb` dependencies.
+    - 12-crate workspace: 3 binaries (`k3rs-server`, `k3rs-agent`, `k3rsctl`) + 9 libraries
+    - Centralized workspace deps: `tokio`, `axum`, `pingora`, `slatedb`, `serde`, `clap`, `rcgen`, `uuid`, `chrono`
+    - All crates use `edition = "2024"`
+- [x] Implement Axum-based API Server stub to accept registration requests.
+    - `POST /register` — token-verified node registration, persists `Node` to SlateDB
+    - `GET /api/v1/cluster/info` — returns live cluster metadata (endpoint, version, state store, node count)
+    - `GET /api/v1/nodes` — scans `/registry/nodes/` prefix from SlateDB, returns all nodes as JSON
+    - Shared `AppState` injected via Axum `State` (holds `StateStore`, `ClusterCA`, join token)
+    - `ServerConfig` struct with CLI args: `--port`, `--data-dir`, `--token`
+- [x] Implement Pingora-based Tunnel Proxy to establish bi-directional communication between Agent and Server.
+    - `TunnelProxy` struct wrapping a Pingora `Server` with `ProxyHttp` trait implementation
+    - `upstream_peer` resolves to configurable server address
+    - Runs in background via `tokio::task::spawn_blocking`
+    - Configurable listen port (`--proxy-port` on agent)
+- [x] Implement state store using SlateDB over S3-compatible object storage.
+    - `StateStore` backed by real `slatedb::Db` on `object_store::local::LocalFileSystem`
+    - API: `put(key, value)`, `get(key)`, `delete(key)`, `list_prefix(prefix)`, `close()`
+    - `list_prefix` uses `DbRead::scan_prefix` + `DbIterator::next()` for efficient key scanning
+    - Auto-creates data directory on startup
+- [x] Implement join token generation and node registration with mTLS certificate issuance.
+    - `ClusterCA` generates self-signed root CA via `rcgen::CertificateParams` (IsCa::Ca)
+    - `issue_node_cert(node_name)` creates X.509 cert signed by CA with node SAN
+    - Returns PEM-encoded cert + key + CA cert to agent
+    - Agent stores certs to `/tmp/k3rs-agent-<node>/` (node.crt, node.key, ca.crt)
+    - Token validation on server side (rejects empty or mismatched tokens)
+- [x] Implement basic `k3rsctl` CLI with `cluster info` and `node list`.
+    - `k3rsctl cluster info` — `GET /api/v1/cluster/info`, displays endpoint, version, state store, node count
+    - `k3rsctl node list` — `GET /api/v1/nodes`, displays formatted table (ID, NAME, STATUS, REGISTERED)
+    - `--server` flag for configurable API endpoint
+    - Agent: heartbeat loop (10s interval), registration with real certs, tunnel proxy startup
 
 ### Phase 2: Orchestration Logic
 - [ ] Implement Node Registration and health-check ping mechanisms.
