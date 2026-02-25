@@ -308,8 +308,14 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
 - [x] Grouped sidebar navigation:
     - **Menu**: Dashboard, Nodes
     - **Workloads**: Deployments, Services, Pods, ConfigMaps, Secrets
-    - **Networking**: Ingress
+    - **Networking**: Ingress, Network Policies
+    - **Policies**: Resource Quotas
+    - **Storage**: Volumes (PVCs)
     - **Cluster**: Events
+- [x] Implement Network Policies page — pod selectors, Ingress/Egress type badges.
+- [x] Implement Resource Quotas page — max pods, max CPU (cores), max memory per namespace.
+- [x] Implement Volumes (PVC) page — storage class, requested size (GB/MB), phase status badges.
+- [x] Add `get_quotas`, `get_network_policies`, `get_pvcs`, `get_metrics` server functions.
 - [x] Dark mode with Tailwind CSS v4.1.5 + `dioxus-free-icons` (Lucide).
 - [x] Dioxus server functions (`#[get]`) — reqwest proxies to k3rs API (server-side only).
 

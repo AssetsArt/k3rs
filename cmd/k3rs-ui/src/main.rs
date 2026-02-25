@@ -33,6 +33,12 @@ enum Route {
         Ingress {},
         #[route("/events")]
         Events {},
+        #[route("/quotas")]
+        Quotas {},
+        #[route("/network-policies")]
+        NetworkPolicies {},
+        #[route("/volumes")]
+        Volumes {},
 }
 
 // ============================================================
@@ -134,11 +140,26 @@ fn Layout() -> Element {
                         span { "Secrets" }
                     }
 
-                    // Other
                     p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mt-4 mb-1.5", "Networking" }
                     Link { class: sub_link_cls(&Route::Ingress {}), to: Route::Ingress {},
                         Icon { width: 14, height: 14, icon: LdGlobe }
                         span { "Ingress" }
+                    }
+                    Link { class: sub_link_cls(&Route::NetworkPolicies {}), to: Route::NetworkPolicies {},
+                        Icon { width: 14, height: 14, icon: LdShield }
+                        span { "Network Policies" }
+                    }
+
+                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mt-4 mb-1.5", "Policies" }
+                    Link { class: sub_link_cls(&Route::Quotas {}), to: Route::Quotas {},
+                        Icon { width: 14, height: 14, icon: LdGauge }
+                        span { "Resource Quotas" }
+                    }
+
+                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mt-4 mb-1.5", "Storage" }
+                    Link { class: sub_link_cls(&Route::Volumes {}), to: Route::Volumes {},
+                        Icon { width: 14, height: 14, icon: LdHardDrive }
+                        span { "Volumes" }
                     }
 
                     p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mt-4 mb-1.5", "Cluster" }
@@ -168,6 +189,8 @@ pub struct Node {
     #[serde(default)]
     pub labels: std::collections::HashMap<String, String>,
     pub registered_at: String,
+    #[serde(default)]
+    pub unschedulable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -288,4 +311,39 @@ pub struct ClusterInfo {
     pub version: String,
     pub state_store: String,
     pub node_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ResourceQuota {
+    pub name: String,
+    pub namespace: String,
+    #[serde(default)]
+    pub max_pods: Option<u32>,
+    #[serde(default)]
+    pub max_cpu_millis: Option<u64>,
+    #[serde(default)]
+    pub max_memory_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct NetworkPolicyObj {
+    pub name: String,
+    pub namespace: String,
+    #[serde(default)]
+    pub pod_selector: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub policy_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct PVC {
+    pub id: String,
+    pub name: String,
+    pub namespace: String,
+    #[serde(default)]
+    pub storage_class: Option<String>,
+    #[serde(default)]
+    pub requested_bytes: u64,
+    #[serde(default)]
+    pub phase: String,
 }

@@ -135,3 +135,66 @@ pub async fn get_ingresses(ns: String) -> Result<Vec<IngressObj>> {
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(ings)
 }
+
+#[get("/api/ui/quotas?ns")]
+pub async fn get_quotas(ns: String) -> Result<Vec<ResourceQuota>> {
+    let url = format!("{}/api/v1/namespaces/{}/resourcequotas", K3RS_API, ns);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", K3RS_TOKEN))
+        .send()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let items: Vec<ResourceQuota> = resp
+        .json()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(items)
+}
+
+#[get("/api/ui/network-policies?ns")]
+pub async fn get_network_policies(ns: String) -> Result<Vec<NetworkPolicyObj>> {
+    let url = format!("{}/api/v1/namespaces/{}/networkpolicies", K3RS_API, ns);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", K3RS_TOKEN))
+        .send()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let items: Vec<NetworkPolicyObj> = resp
+        .json()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(items)
+}
+
+#[get("/api/ui/pvcs?ns")]
+pub async fn get_pvcs(ns: String) -> Result<Vec<PVC>> {
+    let url = format!("{}/api/v1/namespaces/{}/pvcs", K3RS_API, ns);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", K3RS_TOKEN))
+        .send()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let items: Vec<PVC> = resp
+        .json()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(items)
+}
+
+#[get("/api/ui/metrics")]
+pub async fn get_metrics() -> Result<String> {
+    let url = format!("{}/metrics", K3RS_API);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(text)
+}
