@@ -27,7 +27,7 @@ The server binary encapsulates all control plane processes:
 The agent binary runs on worker nodes and executes workloads:
 - **Tunnel Proxy (powered by Pingora)**: Maintains a persistent, secure reverse tunnel back to the Server (similar to K3s). Pingora's connection pooling and multiplexing capabilities make it ideal for managing these reverse tunnels dynamically without dropping packets.
 - **Agent Node Supervisor (Kubelet equivalent)**: Communicates with the Server API, manages container lifecycles, and reports node resource utilization and health status.
-- **Container Runtime Integrator**: Platform-aware container runtime with pluggable backends — Docker CLI on macOS, OCI runtimes (`youki`/`crun`) with auto-download from GitHub Releases on Linux. Pulls OCI images via `oci-client`, extracts rootfs layers, and manages full container lifecycle including exec.
+- **Container Runtime Integrator**: Platform-aware container runtime with pluggable backends — Virtualization.framework microVM on macOS (Firecracker-like lightweight Linux VMs), OCI runtimes (`youki`/`crun`) with auto-download from GitHub Releases on Linux. Pulls OCI images via `oci-client`, extracts rootfs layers, boots minimal Linux VMs or OCI containers, and manages full container lifecycle including exec.
 - **Service Proxy (powered by Pingora)**: Replaces `kube-proxy`. Uses Pingora to dynamically manage advanced L4/L7 load balancing for services running on the node, routing traffic seamlessly to the correct local or remote Pods.
 - **Overlay Networking (CNI)**: Manages pod-to-pod networking (similar to Flannel or Cilium).
 
@@ -258,11 +258,12 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - Integrated into `POST /api/v1/namespaces/:ns/pods` — auto-schedules on creation
     - 3 unit tests: round-robin, skip-not-ready, no-eligible-nodes
 - [x] Implement Direct OCI container runtime with pluggable `RuntimeBackend` trait.
-    - `ContainerRuntime` with platform-aware detection: Docker (macOS) → OCI (Linux) → Stub (fallback)
-    - Backends: `DockerBackend` (Docker CLI), `OciBackend` (youki/crun), `StubBackend` (dev/test)
+    - `ContainerRuntime` with platform-aware detection: Virtualization.framework (macOS) → OCI (Linux)
+    - Backends: `VirtualizationBackend` (Apple Virtualization.framework microVM), `OciBackend` (youki/crun)
     - API: `pull_image`, `create_container`, `start_container`, `stop_container`, `exec_in_container`, `runtime_info`
-    - Image pulling via `oci-client`, rootfs extraction via `tar`+`flate2`, runtime via `youki`/`crun`
-    - Auto-download: `installer.rs` fetches youki/crun binaries from GitHub Releases on Linux
+    - Image pulling via `oci-client`, rootfs extraction via `tar`+`flate2`
+    - macOS: boots lightweight Linux microVM per pod via Virtualization.framework (sub-second boot, virtio devices)
+    - Linux: runtime via `youki`/`crun`, auto-download from GitHub Releases via `installer.rs`
     - `PodRuntimeInfo` on each Pod tracks which backend + version is running it
     - Runtime Management API: `GET /api/v1/runtime`, `PUT /api/v1/runtime/upgrade`
 - [x] Implement RBAC engine and API authentication flow.
@@ -412,24 +413,35 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
 
 ### Phase 7: Implementation Complete
 
-#### Container Runtime (`pkg/container/`) — Direct OCI Integration 🏆
+#### Container Runtime (`pkg/container/`) — Virtualization + OCI 🏆
 Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` trait:
 
-**Architecture:** macOS = Docker CLI | Linux = `oci-client` → `tar`+`flate2` → `youki`/`crun`
+**Architecture:** macOS = Virtualization.framework microVM | Linux = `oci-client` → `tar`+`flate2` → `youki`/`crun`
 
 | Module | Crate | Purpose |
 |--------|-------|---------|
 | `image.rs` | `oci-client` | Pull images from OCI registries (Docker Hub, GHCR) |
 | `rootfs.rs` | `tar` + `flate2` | Extract image layers → rootfs + generate `config.json` |
-| `backend.rs` | `oci-spec` | `RuntimeBackend` trait + Docker/OCI/Stub backends |
+| `backend.rs` | — | `RuntimeBackend` trait + Virtualization/OCI backends |
+| `virt.rs` | `virtualization-rs` | macOS Virtualization.framework microVM backend |
 | `runtime.rs` | — | `ContainerRuntime` facade with platform detection + `exec_in_container` |
 | `installer.rs` | `reqwest` | Auto-download youki/crun from GitHub Releases (Linux) |
 
 **Backends:**
-- [x] `DockerBackend` — wraps Docker CLI (macOS) — create, start, stop, exec, logs
+- [x] `VirtualizationBackend` — Firecracker-like lightweight Linux microVM via Apple Virtualization.framework (macOS)
 - [x] `OciBackend` — invokes `youki`/`crun` via `std::process::Command` (Linux)
-- [x] `StubBackend` — dev/test mode (exec runs host commands)
-- [ ] `FirecrackerBackend` — microVM via REST API over Unix socket (roadmap)
+
+**VirtualizationBackend Details (macOS):**
+- Uses Apple Virtualization.framework via `virtualization-rs` Rust crate
+- Boots a minimal Linux kernel with virtio devices (virtio-net, virtio-blk, virtio-console)
+- Sub-second boot time (~1s on Apple Silicon)
+- Each pod runs in an isolated lightweight VM (microVM model, like Firecracker)
+- OCI image rootfs mounted as the VM's root disk via virtio-blk
+- VM networking via virtio-net with NAT or bridged mode
+- Exec via virtio-vsock channel (host ↔ guest communication)
+- Container logs streamed from virtio-console
+- Requires macOS 12+ (Monterey) and Apple Hypervisor.framework entitlement
+- Supports both Apple Silicon (ARM64) and Intel (x86_64) Macs
 
 **Auto-download (Linux):**
 - youki v0.6.0 from `github.com/youki-dev/youki/releases`
@@ -500,12 +512,12 @@ k3rs/
 - **HTTP API**: `axum`
 - **Management UI**: `dioxus` 0.7 (Rust-native fullstack web framework, WASM SPA)
 - **Container Runtime**: Platform-aware with pluggable `RuntimeBackend` trait
-  - **macOS**: Docker CLI backend (auto-detected)
+  - **macOS**: Virtualization.framework microVM backend via `virtualization-rs` (Firecracker-like lightweight Linux VMs)
   - **Linux**: OCI runtimes (`youki` / `crun`) — auto-download from GitHub Releases
   - **Image Pull**: `oci-client` (OCI Distribution spec — Docker Hub, GHCR, etc.)
   - **Rootfs**: `tar` + `flate2` (extract image layers → filesystem)
   - **WebSocket Exec**: `tokio-tungstenite` for interactive container sessions
-  - **Future**: Firecracker microVM support via pluggable `RuntimeBackend` trait
+  - **VM Comms**: `virtio-vsock` for host ↔ guest exec, `virtio-console` for log streaming
 - **Storage**: `slatedb` (Embedded key-value database on object storage)
 - **Object Storage**: S3 / Cloudflare R2 / MinIO / Local filesystem
 - **DNS**: `hickory-dns` (Embedded DNS resolver)
