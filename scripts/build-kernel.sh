@@ -21,7 +21,7 @@ KERNEL_VERSION="${KERNEL_VERSION:-6.12}"
 KERNEL_MAJOR="v6.x"
 KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/${KERNEL_MAJOR}/linux-${KERNEL_VERSION}.tar.xz"
 
-OUTPUT_DIR="/tmp/k3rs-runtime/kernel"
+OUTPUT_DIR="build/kernel"
 TARGET_ARCH=""
 
 # ─── Parse arguments ─────────────────────────────────────────────────
