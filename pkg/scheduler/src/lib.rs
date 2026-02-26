@@ -170,7 +170,7 @@ mod tests {
                 volumes: vec![],
             },
             status: PodStatus::Pending,
-            node_id: None,
+            node_name: None,
             labels: HashMap::new(),
             owner_ref: None,
             restart_count: 0,

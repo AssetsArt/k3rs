@@ -46,7 +46,7 @@ impl EvictionController {
         let node_entries = self.store.list_prefix("/registry/nodes/").await?;
         let now = chrono::Utc::now();
 
-        let mut failed_node_ids: Vec<String> = Vec::new();
+        let mut failed_node_names: Vec<String> = Vec::new();
 
         for (_key, value) in &node_entries {
             let node: Node = match serde_json::from_slice(value) {
@@ -76,12 +76,12 @@ impl EvictionController {
                         age.as_secs(),
                         self.grace_period.as_secs()
                     );
-                    failed_node_ids.push(node.name.clone());
+                    failed_node_names.push(node.name.clone());
                 }
             }
         }
 
-        if failed_node_ids.is_empty() {
+        if failed_node_names.is_empty() {
             return Ok(());
         }
 
@@ -93,14 +93,17 @@ impl EvictionController {
                 Err(_) => continue,
             };
 
-            if let Some(ref node_id) = pod.node_id
-                && failed_node_ids.contains(node_id)
+            if let Some(ref node_name) = pod.node_name
+                && failed_node_names.contains(node_name)
                 && pod.status != PodStatus::Pending
                 && pod.status != PodStatus::Succeeded
                 && pod.status != PodStatus::Failed
             {
-                info!("Evicting pod {} (was on failed node {})", pod.name, node_id);
-                pod.node_id = None;
+                info!(
+                    "Evicting pod {} (was on failed node {})",
+                    pod.name, node_name
+                );
+                pod.node_name = None;
                 pod.status = PodStatus::Pending;
                 let data = serde_json::to_vec(&pod)?;
                 self.store.put(&key, &data).await?;

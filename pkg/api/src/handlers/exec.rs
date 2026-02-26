@@ -14,13 +14,13 @@ use crate::AppState;
 /// Pipes stdin/stdout over WebSocket to the container runtime.
 pub async fn exec_into_pod(
     State(state): State<AppState>,
-    AxumPath((ns, pod_id)): AxumPath<(String, String)>,
+    AxumPath((ns, pod_name)): AxumPath<(String, String)>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    info!("Exec request for pod {}/{}", ns, pod_id);
+    info!("Exec request for pod {}/{}", ns, pod_name);
 
     // Verify pod exists
-    let key = format!("/registry/pods/{}/{}", ns, pod_id);
+    let key = format!("/registry/pods/{}/{}", ns, pod_name);
     let pod_exists = state.store.get(&key).await.ok().flatten().is_some();
 
     if !pod_exists {
@@ -28,9 +28,9 @@ pub async fn exec_into_pod(
     }
 
     let runtime = state.container_runtime.clone();
-    let pod_id_clone = pod_id.clone();
+    let pod_name_clone = pod_name.clone();
 
-    ws.on_upgrade(move |socket| handle_exec_session(socket, runtime, ns, pod_id_clone))
+    ws.on_upgrade(move |socket| handle_exec_session(socket, runtime, ns, pod_name_clone))
         .into_response()
 }
 
@@ -40,15 +40,15 @@ async fn handle_exec_session(
     mut socket: WebSocket,
     runtime: Arc<pkg_container::ContainerRuntime>,
     ns: String,
-    pod_id: String,
+    pod_name: String,
 ) {
-    info!("Exec session started for {}/{}", ns, pod_id);
+    info!("Exec session started for {}/{}", ns, pod_name);
 
     // Send welcome message
     let backend = runtime.backend_name();
     let welcome = format!(
         "Connected to pod {}/{} (runtime: {})\r\n$ ",
-        ns, pod_id, backend
+        ns, pod_name, backend
     );
     if socket.send(Message::Text(welcome.into())).await.is_err() {
         return;
@@ -79,7 +79,7 @@ async fn handle_exec_session(
                 }
 
                 // Execute command via runtime backend
-                let output = match runtime.exec_in_container(&pod_id, &parts).await {
+                let output = match runtime.exec_in_container(&pod_name, &parts).await {
                     Ok(out) => out,
                     Err(e) => format!("exec error: {}\r\n", e),
                 };
@@ -94,5 +94,5 @@ async fn handle_exec_session(
         }
     }
 
-    info!("Exec session ended for {}/{}", ns, pod_id);
+    info!("Exec session ended for {}/{}", ns, pod_name);
 }

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct EndpointAddress {
     pub ip: String,
     #[serde(default)]
-    pub node_id: Option<String>,
+    pub node_name: Option<String>,
     #[serde(default)]
     pub pod_id: Option<String>,
 }

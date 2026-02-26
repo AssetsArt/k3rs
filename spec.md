@@ -68,22 +68,31 @@ A web-based management dashboard built with [Dioxus](https://dioxuslabs.com/lear
 SlateDB is used as the sole state store, replacing etcd. All cluster state is stored as key-value pairs with a structured key prefix scheme.
 
 ### Key Prefix Design
+
+All resource keys use **name** as the primary identifier (K8s-style), not UUID.
+Names must be `[a-z0-9-]`, max 63 characters, no leading/trailing hyphens (RFC 1123).
+UUIDs are stored as `.id` fields for internal reference only.
+
 ```
-/registry/nodes/<node-id>                          → Node metadata & status
+/registry/nodes/<node-name>                        → Node metadata & status (id = UUID)
 /registry/namespaces/<ns>                          → Namespace definition
-/registry/workloads/<ns>/<workload-id>             → Workload spec & status
-/registry/pods/<ns>/<pod-id>                       → Pod spec & status
-/registry/services/<ns>/<service-id>               → Service definition
-/registry/endpoints/<ns>/<service-id>              → Endpoint slice
-/registry/deployments/<ns>/<deployment-id>         → Deployment spec & status
-/registry/replicasets/<ns>/<rs-id>                 → ReplicaSet spec & status
-/registry/configmaps/<ns>/<cm-id>                  → ConfigMap data
-/registry/secrets/<ns>/<secret-id>                 → Secret data (encrypted at rest)
-/registry/rbac/roles/<ns>/<role-id>                → Role definitions
-/registry/rbac/bindings/<ns>/<binding-id>          → RoleBinding definitions
+/registry/pods/<ns>/<pod-name>                     → Pod spec & status
+/registry/services/<ns>/<service-name>             → Service definition
+/registry/endpoints/<ns>/<endpoint-name>           → Endpoint slice
+/registry/deployments/<ns>/<deployment-name>       → Deployment spec & status
+/registry/replicasets/<ns>/<rs-name>               → ReplicaSet spec & status
+/registry/configmaps/<ns>/<cm-name>                → ConfigMap data
+/registry/secrets/<ns>/<secret-name>               → Secret data (encrypted at rest)
+/registry/rbac/roles/<ns>/<role-name>              → Role definitions
+/registry/rbac/bindings/<ns>/<binding-name>        → RoleBinding definitions
 /registry/leases/<lease-id>                        → Leader election leases
 /events/<ns>/<timestamp>-<event-id>                → Cluster events (TTL-based)
 ```
+
+#### Name Validation (`pkg/types/src/validate.rs`)
+- [x] `validate_name(name) -> Result<()>` — `[a-z0-9-]`, max 63 chars, no leading/trailing `-`
+- [x] Resource uniqueness: `(namespace, name)` pair must be unique
+- [x] Unit tests: valid names + invalid names (uppercase, underscore, leading hyphen, too long)
 
 ### Object Storage Backends
 - **Amazon S3** / **S3-compatible** (MinIO, Ceph RGW)
@@ -246,7 +255,7 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - `Namespace`, `Pod` (with `PodSpec`, `ContainerSpec`, `ResourceRequirements`, `Toleration`), `Service` (with `ServiceSpec`, `ServicePort`, `ServiceType`)
     - `Deployment` (with `DeploymentSpec`, `DeploymentStrategy`, `DeploymentStatus`), `ConfigMap`, `Secret`
     - `RBAC` types: `Role`, `PolicyRule`, `RoleBinding`, `Subject`, `SubjectKind`
-    - All types stored in SlateDB using spec key prefix schema: `/registry/<type>/<ns>/<id>`
+    - All types stored in SlateDB using name-based key schema: `/registry/<type>/<ns>/<name>` (not UUID)
 - [x] Implement SlateDB key prefix schema and watch/event stream mechanism.
     - `EventLog`: in-memory ring buffer (10K events) with monotonic sequence numbers
     - `tokio::sync::broadcast` channel for live event distribution
@@ -381,7 +390,7 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
 - [x] Implement workload rescheduling on node failure.
     - `EvictionController` (30s interval) watches for nodes in `Unknown` state
     - After 5-minute grace period, evicts all pods from failed nodes
-    - Evicted pods reset to `Pending` with `node_id = None` for automatic rescheduling
+    - Evicted pods reset to `Pending` with `node_name = None` for automatic rescheduling
     - Skips master/control-plane nodes and already-terminal pods
 - [x] Implement namespace resource quotas and network policies.
     - `ResourceQuota` type: `max_pods`, `max_cpu_millis`, `max_memory_bytes` per namespace

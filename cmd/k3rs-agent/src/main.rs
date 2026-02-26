@@ -278,7 +278,7 @@ async fn main() -> anyhow::Result<()> {
             if let Ok(pods) = resp.json::<Vec<pkg_types::pod::Pod>>().await {
                 for pod in pods {
                     // Only process pods assigned to this node and not yet running
-                    if pod.node_id.as_deref() == Some(my_node_id.as_str())
+                    if pod.node_name.as_deref() == Some(my_node_id.as_str())
                         && pod.status == pkg_types::pod::PodStatus::Scheduled
                     {
                         info!("Found new scheduled pod: {}", pod.name);

@@ -83,13 +83,13 @@ pub async fn create_pod(
             .into_iter()
             .filter_map(|(_, v)| serde_json::from_slice(&v).ok())
             .collect();
-        if let Some(node_id) = scheduler.schedule(&pod, &nodes) {
-            pod.node_id = Some(node_id);
+        if let Some(node_name) = scheduler.schedule(&pod, &nodes) {
+            pod.node_name = Some(node_name);
             pod.status = pkg_types::pod::PodStatus::Scheduled;
         }
     }
 
-    let key = format!("/registry/pods/{}/{}", ns, pod.id);
+    let key = format!("/registry/pods/{}/{}", ns, pod.name);
     match serde_json::to_vec(&pod) {
         Ok(data) => {
             if let Err(e) = state.store.put(&key, &data).await {
@@ -118,9 +118,9 @@ pub async fn list_pods(
 
 pub async fn get_pod(
     State(state): State<AppState>,
-    AxumPath((ns, pod_id)): AxumPath<(String, String)>,
+    AxumPath((ns, pod_name)): AxumPath<(String, String)>,
 ) -> impl IntoResponse {
-    let key = format!("/registry/pods/{}/{}", ns, pod_id);
+    let key = format!("/registry/pods/{}/{}", ns, pod_name);
     match state.store.get(&key).await {
         Ok(Some(data)) => {
             if let Ok(pod) = serde_json::from_slice::<pkg_types::pod::Pod>(&data) {
@@ -135,12 +135,12 @@ pub async fn get_pod(
 
 pub async fn delete_pod(
     State(state): State<AppState>,
-    AxumPath((ns, pod_id)): AxumPath<(String, String)>,
+    AxumPath((ns, pod_name)): AxumPath<(String, String)>,
 ) -> impl IntoResponse {
-    let key = format!("/registry/pods/{}/{}", ns, pod_id);
+    let key = format!("/registry/pods/{}/{}", ns, pod_name);
     match state.store.delete(&key).await {
         Ok(_) => {
-            info!("Deleted pod {}/{}", ns, pod_id);
+            info!("Deleted pod {}/{}", ns, pod_name);
             StatusCode::NO_CONTENT.into_response()
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -149,10 +149,10 @@ pub async fn delete_pod(
 
 pub async fn update_pod_status(
     State(state): State<AppState>,
-    AxumPath((ns, pod_id)): AxumPath<(String, String)>,
+    AxumPath((ns, pod_name)): AxumPath<(String, String)>,
     Json(status): Json<pkg_types::pod::PodStatus>,
 ) -> impl IntoResponse {
-    let key = format!("/registry/pods/{}/{}", ns, pod_id);
+    let key = format!("/registry/pods/{}/{}", ns, pod_name);
     match state.store.get(&key).await {
         Ok(Some(data)) => {
             if let Ok(mut pod) = serde_json::from_slice::<pkg_types::pod::Pod>(&data) {
@@ -162,7 +162,7 @@ pub async fn update_pod_status(
                         warn!("Failed to update pod status: {}", e);
                         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                     }
-                    info!("Updated pod status {}/{} to {:?}", ns, pod_id, pod.status);
+                    info!("Updated pod status {}/{} to {:?}", ns, pod_name, pod.status);
                     return (StatusCode::OK, Json(pod)).into_response();
                 }
             }
@@ -193,7 +193,7 @@ pub async fn create_service(
         ));
     }
 
-    let key = format!("/registry/services/{}/{}", ns, svc.id);
+    let key = format!("/registry/services/{}/{}", ns, svc.name);
     match serde_json::to_vec(&svc) {
         Ok(data) => {
             if let Err(e) = state.store.put(&key, &data).await {
@@ -233,7 +233,7 @@ pub async fn create_deployment(
     deploy.namespace = ns.clone();
     deploy.created_at = Utc::now();
 
-    let key = format!("/registry/deployments/{}/{}", ns, deploy.id);
+    let key = format!("/registry/deployments/{}/{}", ns, deploy.name);
     match serde_json::to_vec(&deploy) {
         Ok(data) => {
             if let Err(e) = state.store.put(&key, &data).await {
@@ -273,7 +273,7 @@ pub async fn create_configmap(
     cm.namespace = ns.clone();
     cm.created_at = Utc::now();
 
-    let key = format!("/registry/configmaps/{}/{}", ns, cm.id);
+    let key = format!("/registry/configmaps/{}/{}", ns, cm.name);
     match serde_json::to_vec(&cm) {
         Ok(data) => {
             if let Err(_e) = state.store.put(&key, &data).await {
@@ -312,7 +312,7 @@ pub async fn create_secret(
     secret.namespace = ns.clone();
     secret.created_at = Utc::now();
 
-    let key = format!("/registry/secrets/{}/{}", ns, secret.id);
+    let key = format!("/registry/secrets/{}/{}", ns, secret.name);
     match serde_json::to_vec(&secret) {
         Ok(data) => {
             if let Err(_e) = state.store.put(&key, &data).await {
@@ -344,12 +344,12 @@ pub async fn list_secrets(
 
 pub async fn delete_resource(
     State(state): State<AppState>,
-    AxumPath((resource_type, ns, id)): AxumPath<(String, String, String)>,
+    AxumPath((resource_type, ns, name)): AxumPath<(String, String, String)>,
 ) -> impl IntoResponse {
-    let key = format!("/registry/{}/{}/{}", resource_type, ns, id);
+    let key = format!("/registry/{}/{}/{}", resource_type, ns, name);
     match state.store.delete(&key).await {
         Ok(_) => {
-            info!("Deleted {}/{}/{}", resource_type, ns, id);
+            info!("Deleted {}/{}/{}", resource_type, ns, name);
             StatusCode::NO_CONTENT.into_response()
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -362,9 +362,9 @@ pub async fn delete_resource(
 
 pub async fn get_deployment(
     State(state): State<AppState>,
-    AxumPath((ns, deploy_id)): AxumPath<(String, String)>,
+    AxumPath((ns, deploy_name)): AxumPath<(String, String)>,
 ) -> impl IntoResponse {
-    let key = format!("/registry/deployments/{}/{}", ns, deploy_id);
+    let key = format!("/registry/deployments/{}/{}", ns, deploy_name);
     match state.store.get(&key).await {
         Ok(Some(data)) => {
             if let Ok(deploy) = serde_json::from_slice::<pkg_types::deployment::Deployment>(&data) {
@@ -379,10 +379,10 @@ pub async fn get_deployment(
 
 pub async fn update_deployment(
     State(state): State<AppState>,
-    AxumPath((ns, deploy_id)): AxumPath<(String, String)>,
+    AxumPath((ns, deploy_name)): AxumPath<(String, String)>,
     Json(mut deploy): Json<pkg_types::deployment::Deployment>,
 ) -> impl IntoResponse {
-    let key = format!("/registry/deployments/{}/{}", ns, deploy_id);
+    let key = format!("/registry/deployments/{}/{}", ns, deploy_name);
     match state.store.get(&key).await {
         Ok(Some(existing_data)) => {
             if let Ok(existing) =
@@ -397,7 +397,7 @@ pub async fn update_deployment(
                         warn!("Failed to update deployment: {}", e);
                         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                     }
-                    info!("Updated deployment {}/{}", ns, deploy_id);
+                    info!("Updated deployment {}/{}", ns, deploy_name);
                     return (StatusCode::OK, Json(deploy)).into_response();
                 }
             }
@@ -421,7 +421,7 @@ pub async fn create_replicaset(
     rs.namespace = ns.clone();
     rs.created_at = Utc::now();
 
-    let key = format!("/registry/replicasets/{}/{}", ns, rs.id);
+    let key = format!("/registry/replicasets/{}/{}", ns, rs.name);
     match serde_json::to_vec(&rs) {
         Ok(data) => {
             if let Err(e) = state.store.put(&key, &data).await {
@@ -461,7 +461,7 @@ pub async fn create_daemonset(
     ds.namespace = ns.clone();
     ds.created_at = Utc::now();
 
-    let key = format!("/registry/daemonsets/{}/{}", ns, ds.id);
+    let key = format!("/registry/daemonsets/{}/{}", ns, ds.name);
     match serde_json::to_vec(&ds) {
         Ok(data) => {
             if let Err(e) = state.store.put(&key, &data).await {
@@ -501,7 +501,7 @@ pub async fn create_job(
     job.namespace = ns.clone();
     job.created_at = Utc::now();
 
-    let key = format!("/registry/jobs/{}/{}", ns, job.id);
+    let key = format!("/registry/jobs/{}/{}", ns, job.name);
     match serde_json::to_vec(&job) {
         Ok(data) => {
             if let Err(e) = state.store.put(&key, &data).await {
@@ -541,7 +541,7 @@ pub async fn create_cronjob(
     cj.namespace = ns.clone();
     cj.created_at = Utc::now();
 
-    let key = format!("/registry/cronjobs/{}/{}", ns, cj.id);
+    let key = format!("/registry/cronjobs/{}/{}", ns, cj.name);
     match serde_json::to_vec(&cj) {
         Ok(data) => {
             if let Err(e) = state.store.put(&key, &data).await {
@@ -581,7 +581,7 @@ pub async fn create_hpa(
     hpa.namespace = ns.clone();
     hpa.created_at = Utc::now();
 
-    let key = format!("/registry/hpa/{}/{}", ns, hpa.id);
+    let key = format!("/registry/hpa/{}/{}", ns, hpa.name);
     match serde_json::to_vec(&hpa) {
         Ok(data) => {
             if let Err(e) = state.store.put(&key, &data).await {
@@ -614,25 +614,25 @@ pub async fn list_hpas(
 
 #[derive(Debug, serde::Serialize)]
 pub struct PodLogResponse {
-    pub pod_id: String,
+    pub pod_name: String,
     pub namespace: String,
     pub logs: Vec<String>,
 }
 
 pub async fn pod_logs(
     State(state): State<AppState>,
-    AxumPath((ns, pod_id)): AxumPath<(String, String)>,
+    AxumPath((ns, pod_name)): AxumPath<(String, String)>,
 ) -> impl IntoResponse {
-    let key = format!("/registry/pods/{}/{}", ns, pod_id);
+    let key = format!("/registry/pods/{}/{}", ns, pod_name);
     match state.store.get(&key).await {
         Ok(Some(_)) => {
             // Use the container runtime to fetch real logs
-            let logs = match state.container_runtime.container_logs(&pod_id, 100).await {
+            let logs = match state.container_runtime.container_logs(&pod_name, 100).await {
                 Ok(lines) => lines,
                 Err(e) => vec![format!("[error] Failed to get logs: {}", e)],
             };
             let resp = PodLogResponse {
-                pod_id: pod_id.clone(),
+                pod_name: pod_name.clone(),
                 namespace: ns,
                 logs,
             };
@@ -735,7 +735,7 @@ pub async fn create_pvc(
     pvc.phase = pkg_types::volume::PVCPhase::Pending; // Start as Pending — reconciler will bind
     pvc.created_at = Utc::now();
 
-    let key = format!("/registry/pvcs/{}/{}", ns, pvc.id);
+    let key = format!("/registry/pvcs/{}/{}", ns, pvc.name);
     match serde_json::to_vec(&pvc) {
         Ok(data) => {
             if let Err(e) = state.store.put(&key, &data).await {

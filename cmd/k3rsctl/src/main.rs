@@ -245,7 +245,7 @@ async fn main() -> anyhow::Result<()> {
                         pod.name,
                         pod.namespace,
                         pod.status,
-                        pod.node_id.as_deref().unwrap_or("-")
+                        pod.node_name.as_deref().unwrap_or("-")
                     );
                 }
                 if pods.is_empty() {

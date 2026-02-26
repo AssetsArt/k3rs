@@ -118,7 +118,7 @@ pub struct Pod {
     pub status: PodStatus,
     /// The node this pod is assigned to (set by scheduler)
     #[serde(default)]
-    pub node_id: Option<String>,
+    pub node_name: Option<String>,
     /// Labels for selector-based matching
     #[serde(default)]
     pub labels: HashMap<String, String>,

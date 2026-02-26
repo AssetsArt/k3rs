@@ -162,7 +162,7 @@ impl JobController {
             namespace: ns.to_string(),
             spec: job.spec.template.clone(),
             status: PodStatus::Pending,
-            node_id: None,
+            node_name: None,
             labels: HashMap::new(),
             owner_ref: Some(job.id.clone()),
             restart_count: 0,
@@ -170,8 +170,8 @@ impl JobController {
             created_at: Utc::now(),
         };
 
-        if let Some(node_id) = self.scheduler.schedule(&pod, nodes) {
-            pod.node_id = Some(node_id);
+        if let Some(node_name) = self.scheduler.schedule(&pod, nodes) {
+            pod.node_name = Some(node_name);
             pod.status = PodStatus::Scheduled;
         }
 

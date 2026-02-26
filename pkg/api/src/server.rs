@@ -148,16 +148,16 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             post(resources::create_pod).get(resources::list_pods),
         )
         .route(
-            "/api/v1/namespaces/{ns}/pods/{pod_id}",
+            "/api/v1/namespaces/{ns}/pods/{pod_name}",
             get(resources::get_pod).delete(resources::delete_pod),
         )
         .route(
-            "/api/v1/namespaces/{ns}/pods/{pod_id}/status",
+            "/api/v1/namespaces/{ns}/pods/{pod_name}/status",
             put(resources::update_pod_status),
         )
         // Phase 4: pod logs
         .route(
-            "/api/v1/namespaces/{ns}/pods/{pod_id}/logs",
+            "/api/v1/namespaces/{ns}/pods/{pod_name}/logs",
             get(resources::pod_logs),
         )
         // Phase 2: services
@@ -172,7 +172,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         )
         // Phase 4: deployment CRUD
         .route(
-            "/api/v1/namespaces/{ns}/deployments/{deploy_id}",
+            "/api/v1/namespaces/{ns}/deployments/{deploy_name}",
             get(resources::get_deployment).put(resources::update_deployment),
         )
         // Phase 2: configmaps
@@ -243,7 +243,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         .route("/api/v1/processes", get(processes::list_processes))
         // Phase 7: exec into pod
         .route(
-            "/api/v1/namespaces/{ns}/pods/{id}/exec",
+            "/api/v1/namespaces/{ns}/pods/{pod_name}/exec",
             get(exec::exec_into_pod),
         )
         // Runtime management
@@ -258,14 +258,14 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         // Image management
         .route("/api/v1/images", get(images::list_images))
         .route("/api/v1/images/pull", post(images::pull_image))
-        .route("/api/v1/images/{id}", delete(images::delete_image))
+        .route("/api/v1/images/{image_id}", delete(images::delete_image))
         .route(
             "/api/v1/nodes/{name}/images",
             put(images::report_node_images),
         )
         // Phase 2: generic delete
         .route(
-            "/api/v1/{resource_type}/{ns}/{id}",
+            "/api/v1/{resource_type}/{ns}/{name}",
             delete(resources::delete_resource),
         )
         .route_layer(middleware::from_fn_with_state(
@@ -319,7 +319,7 @@ async fn seed_master_node(store: &StateStore, name: &str) -> anyhow::Result<()> 
     let key = format!("/registry/nodes/{}", name);
     if store.get(&key).await?.is_none() {
         let node = pkg_types::node::Node {
-            id: name.to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             status: pkg_types::node::NodeStatus::Ready,
             registered_at: Utc::now(),

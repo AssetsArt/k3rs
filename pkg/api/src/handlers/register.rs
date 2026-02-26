@@ -50,10 +50,14 @@ pub async fn register_node(
     };
 
     let now = Utc::now();
-    let node_id = payload.node_name.clone();
+    let node_id = if let Some(ref existing) = existing_node {
+        existing.id.clone()
+    } else {
+        uuid::Uuid::new_v4().to_string()
+    };
 
     let node = if let Some(mut existing) = existing_node {
-        info!("Updating existing node: {}", node_id);
+        info!("Updating existing node: {}", payload.node_name);
         existing.status = NodeStatus::Ready;
         existing.last_heartbeat = now;
         existing.labels.extend(payload.labels.clone());

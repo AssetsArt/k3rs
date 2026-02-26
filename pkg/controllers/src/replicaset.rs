@@ -229,7 +229,7 @@ impl ReplicaSetController {
             namespace: ns.to_string(),
             spec: rs.spec.template.clone(),
             status: PodStatus::Pending,
-            node_id: None,
+            node_name: None,
             labels: rs.spec.selector.clone(),
             owner_ref: Some(rs.id.clone()),
             restart_count: 0,
@@ -238,8 +238,8 @@ impl ReplicaSetController {
         };
 
         // Schedule the pod
-        if let Some(node_id) = self.scheduler.schedule(&pod, nodes) {
-            pod.node_id = Some(node_id);
+        if let Some(node_name) = self.scheduler.schedule(&pod, nodes) {
+            pod.node_name = Some(node_name);
             pod.status = PodStatus::Scheduled;
         }
 

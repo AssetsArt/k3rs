@@ -104,7 +104,9 @@ impl DaemonSetController {
             // Build set of node IDs that already have a pod
             let nodes_with_pods: HashMap<String, String> = owned_pods
                 .iter()
-                .filter_map(|(key, pod)| pod.node_id.as_ref().map(|nid| (nid.clone(), key.clone())))
+                .filter_map(|(key, pod)| {
+                    pod.node_name.as_ref().map(|nid| (nid.clone(), key.clone()))
+                })
                 .collect();
 
             // Create pods on nodes that don't have one
@@ -121,7 +123,7 @@ impl DaemonSetController {
             let eligible_ids: std::collections::HashSet<&str> =
                 eligible_nodes.iter().map(|n| n.id.as_str()).collect();
             for (pod_key, pod) in &owned_pods {
-                if let Some(nid) = &pod.node_id
+                if let Some(nid) = &pod.node_name
                     && !eligible_ids.contains(nid.as_str())
                 {
                     self.store.delete(pod_key).await?;
@@ -139,7 +141,7 @@ impl DaemonSetController {
                 .iter()
                 .filter(|(_, p)| {
                     matches!(p.status, PodStatus::Running | PodStatus::Scheduled)
-                        && p.node_id
+                        && p.node_name
                             .as_ref()
                             .is_some_and(|nid| eligible_ids.contains(nid.as_str()))
                 })
@@ -165,7 +167,7 @@ impl DaemonSetController {
             namespace: ns.to_string(),
             spec: ds.spec.template.clone(),
             status: PodStatus::Scheduled,
-            node_id: Some(node.id.clone()),
+            node_name: Some(node.name.clone()),
             labels: ds.spec.node_selector.clone(),
             owner_ref: Some(ds.id.clone()),
             restart_count: 0,

@@ -16,6 +16,7 @@ pub struct NodeRegistrationRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeRegistrationResponse {
+    /// UUID assigned to this node
     pub node_id: String,
     pub certificate: String,
     pub private_key: String,

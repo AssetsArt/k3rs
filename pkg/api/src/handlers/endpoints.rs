@@ -71,7 +71,7 @@ pub async fn create_ingress(
     ingress.namespace = ns.clone();
     ingress.created_at = Utc::now();
 
-    let key = format!("/registry/ingresses/{}/{}", ns, ingress.id);
+    let key = format!("/registry/ingresses/{}/{}", ns, ingress.name);
     match serde_json::to_vec(&ingress) {
         Ok(data) => {
             if let Err(e) = state.store.put(&key, &data).await {

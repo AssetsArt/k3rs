@@ -115,10 +115,10 @@ pub async fn drain_node(
 
     for (key, value) in entries {
         if let Ok(mut pod) = serde_json::from_slice::<Pod>(&value)
-            && pod.node_id.as_deref() == Some(&node_name)
+            && pod.node_name.as_deref() == Some(&node_name)
         {
             info!("Evicting pod {} from node {}", pod.name, node_name);
-            pod.node_id = None;
+            pod.node_name = None;
             pod.status = PodStatus::Pending;
             if let Ok(data) = serde_json::to_vec(&pod) {
                 let _ = state.store.put(&key, &data).await;

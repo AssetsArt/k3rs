@@ -16,4 +16,5 @@ pub mod rbac;
 pub mod replicaset;
 pub mod secret;
 pub mod service;
+pub mod validate;
 pub mod volume;
