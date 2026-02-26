@@ -93,7 +93,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
     fi
 
     # Build everything inside a Debian container
-    docker build -t k3rs-kernel-builder -f - "$PROJECT_ROOT" <<'DOCKERFILE'
+    docker build --load -t k3rs-kernel-builder -f - "$PROJECT_ROOT" <<'DOCKERFILE'
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
