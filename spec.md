@@ -257,7 +257,7 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - Filtering: node status (Ready only), node affinity labels, taint/toleration matching, resource availability
     - Integrated into `POST /api/v1/namespaces/:ns/pods` — auto-schedules on creation
     - 3 unit tests: round-robin, skip-not-ready, no-eligible-nodes
-- [ ] Implement container runtime with pluggable `RuntimeBackend` trait.
+- [x] Implement container runtime with pluggable `RuntimeBackend` trait.
     - `ContainerRuntime` with platform-aware detection: Virtualization.framework (macOS) → OCI (Linux)
     - Backends: `VirtualizationBackend` (Apple Virtualization.framework microVM), `OciBackend` (youki/crun)
     - API: `pull_image`, `create_container`, `start_container`, `stop_container`, `exec_in_container`, `runtime_info`
@@ -428,7 +428,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 | `installer.rs` | `reqwest` | Auto-download youki/crun from GitHub Releases (Linux) |
 
 **Backends:**
-- [ ] `VirtualizationBackend` — Firecracker-like lightweight Linux microVM via Apple Virtualization.framework (macOS)
+- [x] `VirtualizationBackend` — Firecracker-like lightweight Linux microVM via Apple Virtualization.framework (macOS)
 - [x] `OciBackend` — invokes `youki`/`crun` via `std::process::Command` (Linux)
 
 **VirtualizationBackend Details (macOS):**
