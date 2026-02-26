@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 /// Pluggable runtime backend trait.
-/// Implementations: Docker (macOS), OCI (youki/crun on Linux), Stub (dev).
+/// Implementations: Virtualization (macOS), OCI (youki/crun on Linux).
 #[async_trait]
 pub trait RuntimeBackend: Send + Sync {
     /// Human-readable name of this runtime backend.
@@ -230,11 +230,7 @@ impl RuntimeBackend for OciBackend {
         if output.status.success() {
             Ok(stdout)
         } else {
-            if stderr.contains("does not support exec") {
-                // Some runtimes (older crun) may not support exec
-                anyhow::bail!("{} does not support exec", self.runtime_name);
-            }
-            Ok(format!("{}{}", stdout, stderr))
+            anyhow::bail!("{} exec failed: {}{}", self.runtime_name, stdout, stderr)
         }
     }
 }

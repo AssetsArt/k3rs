@@ -243,24 +243,11 @@ impl VirtualizationBackend {
                 Ok(Some(pid))
             }
             None => {
-                // No VMM helper — create the log file and track as "created"
-                tokio::fs::write(
-                    &log_path,
-                    format!(
-                        "[virt] VM {} created (awaiting k3rs-vmm helper)\n\
-                         [virt] rootfs={}\n\
-                         [virt] Install k3rs-vmm: cd cmd/k3rs-vmm && swift build -c release\n",
-                        id,
-                        rootfs_dir.display()
-                    ),
-                )
-                .await?;
-                tracing::warn!(
-                    "[virt] k3rs-vmm helper not found — VM {} created but not booted. \
-                     Build it: ./scripts/build-vmm.sh",
-                    id,
+                anyhow::bail!(
+                    "k3rs-vmm helper not found — cannot boot VM {}. \
+                     Build it: cd cmd/k3rs-vmm && swift build -c release",
+                    id
                 );
-                Ok(None)
             }
         }
     }
@@ -338,7 +325,7 @@ impl VirtualizationBackend {
         if output.status.success() {
             Ok(stdout)
         } else {
-            Ok(format!("{}{}", stdout, stderr))
+            anyhow::bail!("k3rs-vmm exec failed: {}{}", stdout.trim(), stderr.trim())
         }
     }
 
@@ -579,39 +566,8 @@ impl RuntimeBackend for VirtualizationBackend {
         }
         drop(instances);
 
-        // Try exec via k3rs-vmm vsock
-        match self.exec_via_vmm(id, command).await {
-            Ok(output) => Ok(output),
-            Err(e) => {
-                tracing::warn!(
-                    "[virt] vsock exec failed ({}), falling back to host exec (dev mode)",
-                    e
-                );
-                // Fallback: run command on host (dev mode)
-                let cmd_str = command.first().unwrap_or(&"echo");
-                let args = if command.len() > 1 {
-                    &command[1..]
-                } else {
-                    &[]
-                };
-                match tokio::process::Command::new(cmd_str)
-                    .args(args)
-                    .output()
-                    .await
-                {
-                    Ok(output) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                        if output.status.success() {
-                            Ok(stdout)
-                        } else {
-                            Ok(format!("{}{}", stdout, stderr))
-                        }
-                    }
-                    Err(e) => Ok(format!("exec error: {}", e)),
-                }
-            }
-        }
+        // Exec via k3rs-vmm IPC → vsock → guest
+        self.exec_via_vmm(id, command).await
     }
 }
 

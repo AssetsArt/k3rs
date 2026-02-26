@@ -58,7 +58,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         "Whether this server is the leader (1=leader, 0=follower)",
     );
 
-    // Initialize container runtime (stub mode for now — use socket path for real containerd)
+    // Initialize container runtime
     let container_runtime = Arc::new(ContainerRuntime::new(None::<&str>).await?);
 
     let state = AppState {
@@ -234,7 +234,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             "/api/v1/namespaces/{ns}/networkpolicies",
             post(resources::create_network_policy).get(resources::list_network_policies),
         )
-        // Phase 6: persistent volume claims (CSI stub)
+        // Phase 6: persistent volume claims
         .route(
             "/api/v1/namespaces/{ns}/pvcs",
             post(resources::create_pvc).get(resources::list_pvcs),

@@ -103,7 +103,7 @@ pub enum TaintEffect {
 /// Tracks which container runtime backend is running this pod.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PodRuntimeInfo {
-    /// Backend name: "docker", "youki", "crun", "stub"
+    /// Backend name: "virtualization", "youki", "crun"
     pub backend: String,
     /// Version of the runtime
     pub version: String,
