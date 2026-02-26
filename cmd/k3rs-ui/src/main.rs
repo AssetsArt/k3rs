@@ -212,7 +212,7 @@ pub struct Pod {
     pub namespace: String,
     pub status: String,
     #[serde(default)]
-    pub node_id: Option<String>,
+    pub node_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

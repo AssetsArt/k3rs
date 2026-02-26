@@ -37,7 +37,7 @@ pub fn Pods() -> Element {
                                 tr { class: "border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors",
                                     td { class: "px-5 py-3 text-sm text-slate-300 font-medium", "{pod.name}" }
                                     td { class: "px-5 py-3", StatusBadge { status: pod.status.clone() } }
-                                    td { class: "px-5 py-3 text-xs text-slate-500", "{pod.node_id.as_deref().unwrap_or(\"—\")}" }
+                                    td { class: "px-5 py-3 text-xs text-slate-500", "{pod.node_name.as_deref().unwrap_or(\"—\")}" }
                                     td { class: "px-5 py-3 text-xs font-mono text-slate-600", "{pod.id}" }
                                 }
                             }
