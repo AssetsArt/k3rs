@@ -31,7 +31,7 @@ impl ContainerRuntime {
     /// - macOS: Docker → Stub
     /// - Linux: OCI (youki/crun/runc in PATH) → auto-download → Stub
     pub async fn new(data_dir: Option<&str>) -> Result<Self> {
-        let data_dir = PathBuf::from(data_dir.unwrap_or("/var/run/k3rs"));
+        let data_dir = PathBuf::from(data_dir.unwrap_or("/tmp/k3rs-runtime"));
         tokio::fs::create_dir_all(&data_dir).await?;
         tokio::fs::create_dir_all(data_dir.join("containers")).await?;
 
