@@ -105,7 +105,10 @@ impl JobController {
                 .filter(|(_, p)| {
                     matches!(
                         p.status,
-                        PodStatus::Pending | PodStatus::Scheduled | PodStatus::Running
+                        PodStatus::Pending
+                            | PodStatus::Scheduled
+                            | PodStatus::ContainerCreating
+                            | PodStatus::Running
                     )
                 })
                 .count() as u32;

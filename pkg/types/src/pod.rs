@@ -38,6 +38,7 @@ pub struct ContainerSpec {
 pub enum PodStatus {
     Pending,
     Scheduled,
+    ContainerCreating,
     Running,
     Succeeded,
     Failed,
@@ -49,6 +50,7 @@ impl std::fmt::Display for PodStatus {
         match self {
             PodStatus::Pending => write!(f, "Pending"),
             PodStatus::Scheduled => write!(f, "Scheduled"),
+            PodStatus::ContainerCreating => write!(f, "ContainerCreating"),
             PodStatus::Running => write!(f, "Running"),
             PodStatus::Succeeded => write!(f, "Succeeded"),
             PodStatus::Failed => write!(f, "Failed"),

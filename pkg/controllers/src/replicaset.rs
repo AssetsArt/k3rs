@@ -129,9 +129,9 @@ impl ReplicaSetController {
             for (pod_key, pod_value) in current_pods {
                 if let Ok(pod) = serde_json::from_slice::<Pod>(&pod_value)
                     && pod.owner_ref.as_deref() == Some(&rs.id)
-                    && pod.status == PodStatus::Scheduled
+                    && (pod.status == PodStatus::Scheduled
+                        || pod.status == PodStatus::ContainerCreating)
                 {
-                    let mut updated = pod.clone();
                     let container_id = &pod.id;
 
                     // Get image from first container spec
@@ -149,7 +149,17 @@ impl ReplicaSetController {
                         .map(|c| c.command.clone())
                         .unwrap_or_default();
 
-                    // Actually create and start the container
+                    // Immediately transition to ContainerCreating so the UI
+                    // reflects the real state while we pull images / create the VM.
+                    if pod.status == PodStatus::Scheduled {
+                        let mut creating = pod.clone();
+                        creating.status = PodStatus::ContainerCreating;
+                        let data = serde_json::to_vec(&creating)?;
+                        self.store.put(&pod_key, &data).await?;
+                    }
+
+                    // Actually create and start the container (may take minutes)
+                    let mut updated = pod.clone();
                     match self
                         .create_real_container(container_id, &image, &command)
                         .await

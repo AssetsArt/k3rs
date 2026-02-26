@@ -347,13 +347,97 @@ pub async fn delete_resource(
     AxumPath((resource_type, ns, name)): AxumPath<(String, String, String)>,
 ) -> impl IntoResponse {
     let key = format!("/registry/{}/{}/{}", resource_type, ns, name);
+
+    // Before deleting, read the resource to get its ID for cascading
+    let resource_id = match state.store.get(&key).await {
+        Ok(Some(data)) => {
+            // Try to extract the "id" field from the JSON
+            serde_json::from_slice::<serde_json::Value>(&data)
+                .ok()
+                .and_then(|v| {
+                    v.get("id")
+                        .and_then(|id| id.as_str().map(|s| s.to_string()))
+                })
+        }
+        _ => None,
+    };
+
+    // Cascade delete owned resources
+    let mut cascade_count = 0u32;
+    if let Some(ref id) = resource_id {
+        match resource_type.as_str() {
+            "deployments" => {
+                // Deployment → owns ReplicaSets → owns Pods
+                cascade_count += cascade_delete_owned_replicasets(&state, &ns, id).await;
+            }
+            "replicasets" => {
+                // ReplicaSet → owns Pods
+                cascade_count += cascade_delete_owned_pods(&state, &ns, id).await;
+            }
+            "daemonsets" | "jobs" => {
+                // DaemonSet/Job → owns Pods
+                cascade_count += cascade_delete_owned_pods(&state, &ns, id).await;
+            }
+            _ => {}
+        }
+    }
+
+    // Delete the resource itself
     match state.store.delete(&key).await {
         Ok(_) => {
-            info!("Deleted {}/{}/{}", resource_type, ns, name);
+            if cascade_count > 0 {
+                info!(
+                    "Deleted {}/{}/{} (cascade: {} resources)",
+                    resource_type, ns, name, cascade_count
+                );
+            } else {
+                info!("Deleted {}/{}/{}", resource_type, ns, name);
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// Delete all ReplicaSets owned by a deployment, and their owned Pods.
+async fn cascade_delete_owned_replicasets(state: &AppState, ns: &str, deploy_id: &str) -> u32 {
+    let mut count = 0u32;
+    let rs_prefix = format!("/registry/replicasets/{}/", ns);
+    if let Ok(entries) = state.store.list_prefix(&rs_prefix).await {
+        for (rs_key, rs_value) in entries {
+            if let Ok(rs) = serde_json::from_slice::<pkg_types::replicaset::ReplicaSet>(&rs_value) {
+                if rs.owner_ref.as_deref() == Some(deploy_id) {
+                    // First cascade-delete pods owned by this RS
+                    count += cascade_delete_owned_pods(state, ns, &rs.id).await;
+                    // Then delete the RS itself
+                    if state.store.delete(&rs_key).await.is_ok() {
+                        info!("Cascade-deleted replicaset {}/{}", ns, rs.name);
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Delete all Pods owned by a resource (ReplicaSet, DaemonSet, Job, etc.)
+async fn cascade_delete_owned_pods(state: &AppState, ns: &str, owner_id: &str) -> u32 {
+    let mut count = 0u32;
+    let pod_prefix = format!("/registry/pods/{}/", ns);
+    if let Ok(entries) = state.store.list_prefix(&pod_prefix).await {
+        for (pod_key, pod_value) in entries {
+            if let Ok(pod) = serde_json::from_slice::<pkg_types::pod::Pod>(&pod_value) {
+                if pod.owner_ref.as_deref() == Some(owner_id) {
+                    if state.store.delete(&pod_key).await.is_ok() {
+                        info!("Cascade-deleted pod {}/{}", ns, pod.name);
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    count
 }
 
 // ============================================================

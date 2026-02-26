@@ -279,7 +279,8 @@ async fn main() -> anyhow::Result<()> {
                 for pod in pods {
                     // Only process pods assigned to this node and not yet running
                     if pod.node_name.as_deref() == Some(my_node_id.as_str())
-                        && pod.status == pkg_types::pod::PodStatus::Scheduled
+                        && (pod.status == pkg_types::pod::PodStatus::Scheduled
+                            || pod.status == pkg_types::pod::PodStatus::ContainerCreating)
                     {
                         info!("Found new scheduled pod: {}", pod.name);
 
