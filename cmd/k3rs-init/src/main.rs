@@ -75,9 +75,20 @@ macro_rules! log_error {
 // ============================================================
 
 /// Paths where the host may mount the OCI config via virtio-fs or 9p.
-const CONFIG_PATHS: &[&str] = &["/run/config.json", "/mnt/config.json", "/config.json"];
+const CONFIG_PATHS: &[&str] = &[
+    "/run/config.json",
+    "/mnt/config.json",
+    "/config.json",
+    "/mnt/rootfs/config.json", // virtio-fs mounted rootfs
+];
 
 const DEFAULT_HOSTNAME: &str = "k3rs-guest";
+
+/// virtio-fs tag used by k3rs-vmm for rootfs sharing.
+const VIRTIOFS_TAG: &str = "rootfs";
+
+/// vsock port for exec commands from host (k3rs-vmm).
+const VSOCK_EXEC_PORT: u32 = 5555;
 
 // ============================================================
 // Main
@@ -104,6 +115,9 @@ fn linux_main() {
         log_error!("failed to mount filesystems: {}", e);
     }
 
+    // 1b. Mount virtio-fs shared rootfs from host
+    mount_virtiofs();
+
     // 2. Set hostname
     if let Err(e) = nix::unistd::sethostname(DEFAULT_HOSTNAME) {
         log_error!("failed to set hostname: {}", e);
@@ -118,6 +132,9 @@ fn linux_main() {
 
     // 4. Install signal handlers
     install_signal_handlers();
+
+    // 4b. Start vsock exec listener (background thread)
+    start_vsock_listener();
 
     // 5. Parse OCI config and execute entrypoint
     match load_oci_config() {
@@ -141,6 +158,190 @@ fn linux_main() {
             reaper_loop();
         }
     }
+}
+
+// ============================================================
+// 1b. Mount virtio-fs shared rootfs from host (Linux only)
+// ============================================================
+
+/// Mount the virtio-fs shared directory from the host.
+///
+/// k3rs-vmm shares the container rootfs directory via virtio-fs with tag "rootfs".
+/// We mount it at /mnt/rootfs so the container filesystem from the host is accessible.
+#[cfg(target_os = "linux")]
+fn mount_virtiofs() {
+    use std::ffi::CString;
+    use std::fs;
+
+    let mount_point = "/mnt/rootfs";
+    if let Err(e) = fs::create_dir_all(mount_point) {
+        log_error!("failed to create virtio-fs mount point: {}", e);
+        return;
+    }
+
+    let c_source = match CString::new(VIRTIOFS_TAG) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let c_target = match CString::new(mount_point) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let c_fstype = match CString::new("virtiofs") {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let ret = unsafe {
+        libc::mount(
+            c_source.as_ptr(),
+            c_target.as_ptr(),
+            c_fstype.as_ptr(),
+            0,
+            std::ptr::null(),
+        )
+    };
+
+    if ret == 0 {
+        log_info!("virtio-fs '{}' mounted at {}", VIRTIOFS_TAG, mount_point);
+    } else {
+        let err = std::io::Error::last_os_error();
+        // Not a hard failure — VM might not have virtio-fs configured
+        log_info!(
+            "virtio-fs mount skipped ({}), not available in this VM",
+            err
+        );
+    }
+}
+
+// ============================================================
+// 4b. vsock exec listener (Linux only)
+// ============================================================
+
+/// Start a vsock listener for exec commands from the host (k3rs-vmm).
+///
+/// Listens on VSOCK_EXEC_PORT (5555) and for each connection:
+/// 1. Reads a NUL-delimited command string
+/// 2. Executes the command
+/// 3. Sends stdout+stderr back to the host
+/// 4. Closes the connection
+#[cfg(target_os = "linux")]
+fn start_vsock_listener() {
+    std::thread::spawn(|| {
+        if let Err(e) = vsock_listener_loop() {
+            log_error!("vsock listener failed: {}", e);
+        }
+    });
+    log_info!("vsock exec listener started on port {}", VSOCK_EXEC_PORT);
+}
+
+/// Main vsock listener loop.
+#[cfg(target_os = "linux")]
+fn vsock_listener_loop() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+
+    // Create vsock socket
+    // AF_VSOCK = 40, SOCK_STREAM = 1
+    let sock = unsafe { libc::socket(40, libc::SOCK_STREAM, 0) };
+    if sock < 0 {
+        return Err("failed to create vsock socket".into());
+    }
+
+    // Bind to VMADDR_CID_ANY (u32::MAX = -1) on our exec port
+    // struct sockaddr_vm { sa_family, reserved, port, cid }
+    let mut addr: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
+    addr.svm_family = 40; // AF_VSOCK
+    addr.svm_port = VSOCK_EXEC_PORT;
+    addr.svm_cid = libc::VMADDR_CID_ANY;
+
+    let ret = unsafe {
+        libc::bind(
+            sock,
+            &addr as *const libc::sockaddr_vm as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_vm>() as u32,
+        )
+    };
+    if ret < 0 {
+        unsafe { libc::close(sock) };
+        let err = std::io::Error::last_os_error();
+        return Err(format!("vsock bind failed: {}", err).into());
+    }
+
+    // Listen
+    if unsafe { libc::listen(sock, 5) } < 0 {
+        unsafe { libc::close(sock) };
+        return Err("vsock listen failed".into());
+    }
+
+    log_info!("vsock listening on port {}", VSOCK_EXEC_PORT);
+
+    loop {
+        let mut client_addr: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
+        let mut addr_len = std::mem::size_of::<libc::sockaddr_vm>() as u32;
+
+        let client_fd = unsafe {
+            libc::accept(
+                sock,
+                &mut client_addr as *mut libc::sockaddr_vm as *mut libc::sockaddr,
+                &mut addr_len,
+            )
+        };
+        if client_fd < 0 {
+            continue;
+        }
+
+        // Handle exec in a new thread to not block the listener
+        std::thread::spawn(move || {
+            handle_vsock_exec(client_fd);
+        });
+    }
+}
+
+/// Handle a single vsock exec request.
+#[cfg(target_os = "linux")]
+fn handle_vsock_exec(fd: i32) {
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+
+    // Wrap fd in a safe File handle
+    let mut stream = unsafe { std::fs::File::from_raw_fd(fd) };
+
+    // Read command (NUL-delimited args terminated by newline)
+    let mut buf = vec![0u8; 65536];
+    let n = match stream.read(&mut buf) {
+        Ok(n) => n,
+        Err(e) => {
+            log_error!("vsock read error: {}", e);
+            return;
+        }
+    };
+
+    let input = String::from_utf8_lossy(&buf[..n]).to_string();
+    let input = input.trim_end_matches('\n');
+    let args: Vec<&str> = input.split('\0').collect();
+
+    if args.is_empty() || args[0].is_empty() {
+        let _ = stream.write_all(b"error: empty command\n");
+        return;
+    }
+
+    log_info!("vsock exec: {:?}", args);
+
+    // Execute the command
+    let output = Command::new(args[0]).args(&args[1..]).output();
+
+    match output {
+        Ok(output) => {
+            let _ = stream.write_all(&output.stdout);
+            let _ = stream.write_all(&output.stderr);
+        }
+        Err(e) => {
+            let msg = format!("exec error: {}\n", e);
+            let _ = stream.write_all(msg.as_bytes());
+        }
+    }
+
+    // Stream is dropped here, closing the fd
 }
 
 // ============================================================

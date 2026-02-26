@@ -1,0 +1,19 @@
+{
+  "": {
+    "dependencies": "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/.build/arm64-apple-macosx/release/k3rs_vmm.build/k3rs_vmm.d",
+    "object": "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/.build/arm64-apple-macosx/release/k3rs_vmm.build/k3rs_vmm.o",
+    "swift-dependencies": "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/.build/arm64-apple-macosx/release/k3rs_vmm.build/master.swiftdeps"
+  },
+  "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/Sources/VMManager.swift": {
+    "object": "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/.build/arm64-apple-macosx/release/k3rs_vmm.build/VMManager.swift.o",
+    "swiftmodule": "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/.build/arm64-apple-macosx/release/k3rs_vmm.build/VMManager~partial.swiftmodule",
+    "swift-dependencies": "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/.build/arm64-apple-macosx/release/k3rs_vmm.build/VMManager.swiftdeps",
+    "diagnostics": "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/.build/arm64-apple-macosx/release/k3rs_vmm.build/VMManager.dia"
+  },
+  "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/Sources/main.swift": {
+    "object": "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/.build/arm64-apple-macosx/release/k3rs_vmm.build/main.swift.o",
+    "swiftmodule": "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/.build/arm64-apple-macosx/release/k3rs_vmm.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/.build/arm64-apple-macosx/release/k3rs_vmm.build/main.swiftdeps",
+    "diagnostics": "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/.build/arm64-apple-macosx/release/k3rs_vmm.build/main.dia"
+  }
+}

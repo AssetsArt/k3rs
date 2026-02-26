@@ -1,0 +1,3 @@
+module ArgumentParser {
+    header "/Users/detoro/Code/k3rs/cmd/k3rs-vmm/.build/arm64-apple-macosx/release/ArgumentParser-tool.build/include/ArgumentParser-Swift.h"
+}

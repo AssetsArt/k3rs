@@ -458,10 +458,10 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 - [x] Exec fallback on host when VMM helper unavailable
 - [x] Platform detection: macOS → VirtualizationBackend → OCI fallback
 - [x] `linux_platform_resolver` for cross-platform multi-arch OCI image pulling
-- [ ] **virtio-fs**: mount host rootfs folder directly as guest `/` (no disk image creation — replaces `hdiutil`/`dd`)
+- [x] **virtio-fs**: mount host rootfs folder directly as guest `/` (no disk image creation — replaces `hdiutil`/`dd`)
   - `VZVirtioFileSystemDeviceConfiguration` + `VZSharedDirectory` → guest mounts via `mount -t virtiofs`
-  - ลดเวลา: ไม่ต้องจองพื้นที่ล่วงหน้า, ไม่ต้องแปลง rootfs → block device
-- [ ] `k3rs-vmm` helper binary — wraps Virtualization.framework Obj-C API
+  - Zero overhead: no pre-allocation, no rootfs → block device conversion
+- [x] `k3rs-vmm` helper binary — wraps Virtualization.framework via Swift/ArgumentParser CLI
 - [x] `k3rs-init` — minimal Rust PID 1 for guest VM (`cmd/k3rs-init/`):
   - Mount `/proc`, `/sys`, `/dev`, `/dev/pts`, `/dev/shm`, `/tmp`, `/run` via `libc::mount()`
   - Set hostname via `nix::unistd::sethostname`, bring up `lo`/`eth0` via raw `ioctl(SIOCSIFFLAGS)`
@@ -470,9 +470,9 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
   - Graceful shutdown: `SIGTERM → SIGKILL → umount2 → sync → reboot(POWER_OFF)`
   - **522KB** static musl binary, `panic="abort"`, `opt-level="z"`, `lto=true`, `strip=true`
   - Cross-compile from macOS: `cargo zigbuild --release --target aarch64-unknown-linux-musl -p k3rs-init`
-- [ ] virtio-net: NAT networking via `VZNATNetworkDeviceAttachment`
-- [ ] virtio-console: stream stdout/stderr to host log file
-- [ ] virtio-vsock: host ↔ guest exec channel
+- [x] virtio-net: NAT networking via `VZNATNetworkDeviceAttachment`
+- [x] virtio-console: stream stdout/stderr to host log file via `VZVirtioConsoleDeviceSerialPortConfiguration`
+- [x] virtio-vsock: host ↔ guest exec channel via `VZVirtioSocketDeviceConfiguration` (port 5555)
 - [ ] Bundle minimal Linux kernel (`vmlinux`) + initrd containing `k3rs-init`
 - [ ] Sub-second boot time on Apple Silicon
 
