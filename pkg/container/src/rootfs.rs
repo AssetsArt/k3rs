@@ -2,6 +2,26 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
+/// Current user's UID for rootless container user namespace mappings.
+fn host_uid() -> u32 {
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+        .unwrap_or(1000)
+}
+
+/// Current user's GID for rootless container user namespace mappings.
+fn host_gid() -> u32 {
+    std::process::Command::new("id")
+        .arg("-g")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+        .unwrap_or(1000)
+}
+
 /// Manages rootfs extraction from OCI image layers.
 pub struct RootfsManager;
 
@@ -64,7 +84,7 @@ impl RootfsManager {
     /// Generate an OCI runtime config.json for the container.
     pub fn generate_config(
         container_id: &str,
-        rootfs_path: &Path,
+        _rootfs_path: &Path,
         command: &[String],
     ) -> Result<String> {
         let cmd = if command.is_empty() {
@@ -86,10 +106,13 @@ impl RootfsManager {
                 "cwd": "/"
             },
             "root": {
-                "path": rootfs_path.to_string_lossy(),
+                "path": "rootfs",
                 "readonly": false
             },
             "hostname": container_id,
+            "annotations": {
+                "run.oci.keep_original_groups": "1"
+            },
             "mounts": [
                 { "destination": "/proc", "type": "proc", "source": "proc" },
                 { "destination": "/dev",  "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "strictatime", "mode=755", "size=65536k"] },
@@ -101,6 +124,13 @@ impl RootfsManager {
                     { "type": "ipc" },
                     { "type": "uts" },
                     { "type": "mount" },
+                    { "type": "user" },
+                ],
+                "uidMappings": [
+                    { "containerID": 0, "hostID": host_uid(), "size": 65536 }
+                ],
+                "gidMappings": [
+                    { "containerID": 0, "hostID": host_gid(), "size": 65536 }
                 ]
             }
         });
