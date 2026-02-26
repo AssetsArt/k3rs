@@ -117,9 +117,10 @@ RUN cargo install cargo-zigbuild \
 WORKDIR /build
 DOCKERFILE
 
+    mkdir -p "${PROJECT_ROOT}/${OUTPUT_DIR}"
     docker run --rm \
         -v "${PROJECT_ROOT}:/src:ro" \
-        -v "${OUTPUT_DIR}:/output" \
+        -v "${PROJECT_ROOT}/${OUTPUT_DIR}:/output" \
         -e KERNEL_VERSION="${KERNEL_VERSION}" \
         -e TARGET_ARCH="${TARGET_ARCH}" \
         k3rs-kernel-builder \
