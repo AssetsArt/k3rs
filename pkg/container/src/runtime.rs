@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::backend::{OciBackend, RuntimeBackend, StubBackend};
+use crate::backend::{OciBackend, RuntimeBackend};
 use crate::image::ImageManager;
 use crate::rootfs::RootfsManager;
 
@@ -28,27 +28,52 @@ impl ContainerRuntime {
     /// Create a new container runtime with automatic backend detection.
     ///
     /// Detection priority:
-    /// - macOS: Docker → Stub
-    /// - Linux: OCI (youki/crun/runc in PATH) → auto-download → Stub
+    /// - macOS: VirtualizationBackend (Apple Virtualization.framework microVM)
+    /// - Linux: OCI (youki/crun in PATH) → auto-download
     pub async fn new(data_dir: Option<&str>) -> Result<Self> {
         let data_dir = PathBuf::from(data_dir.unwrap_or("/tmp/k3rs-runtime"));
-        tokio::fs::create_dir_all(&data_dir).await?;
-        tokio::fs::create_dir_all(data_dir.join("containers")).await?;
+        tokio::fs::create_dir_all(&data_dir).await.map_err(|e| {
+            tracing::error!("[runtime] create_dir_all error: {}", e);
+            e
+        })?;
+        tokio::fs::create_dir_all(data_dir.join("containers"))
+            .await
+            .map_err(|e| {
+                tracing::error!("[runtime] create_dir_all error: {}", e);
+                e
+            })?;
 
         let backend: Arc<dyn RuntimeBackend> = if cfg!(target_os = "macos") {
-            // macOS: try Docker first
-            match crate::backend::DockerBackend::detect() {
-                Ok(docker) => {
+            // macOS: use Virtualization.framework microVM backend
+            match crate::virt::VirtualizationBackend::new(&data_dir).await {
+                Ok(virt) => {
                     info!(
-                        "Using Docker runtime: {} ({})",
-                        docker.name(),
-                        docker.version()
+                        "Using Virtualization.framework runtime: {} ({})",
+                        virt.name(),
+                        virt.version()
                     );
-                    Arc::new(docker)
+                    Arc::new(virt)
                 }
                 Err(e) => {
-                    info!("Docker not available ({}), falling back to stub mode", e);
-                    Arc::new(StubBackend)
+                    info!(
+                        "Virtualization.framework not available ({}), trying OCI fallback",
+                        e
+                    );
+                    // Fallback to OCI if available
+                    match OciBackend::detect() {
+                        Ok(oci) => {
+                            info!("Using OCI runtime: {} ({})", oci.name(), oci.version());
+                            Arc::new(oci)
+                        }
+                        Err(e2) => {
+                            anyhow::bail!(
+                                "No container runtime available. \
+                                 Virtualization.framework: {}. OCI: {}",
+                                e,
+                                e2
+                            );
+                        }
+                    }
                 }
             }
         } else {
@@ -72,8 +97,11 @@ impl ContainerRuntime {
                             Arc::new(oci)
                         }
                         Err(e) => {
-                            info!("Auto-download failed ({}), falling back to stub mode", e);
-                            Arc::new(StubBackend)
+                            anyhow::bail!(
+                                "No container runtime available. \
+                                 OCI auto-download failed: {}",
+                                e
+                            );
                         }
                     }
                 }
@@ -87,18 +115,6 @@ impl ContainerRuntime {
             image_manager,
             data_dir,
         })
-    }
-
-    /// Create a stub-mode runtime (for backwards compatibility).
-    pub fn new_stub() -> Self {
-        let data_dir = PathBuf::from("/tmp/k3rs-stub");
-        let _ = std::fs::create_dir_all(&data_dir);
-        let _ = std::fs::create_dir_all(data_dir.join("containers"));
-        Self {
-            backend: Arc::new(StubBackend),
-            image_manager: ImageManager::new(&data_dir),
-            data_dir,
-        }
     }
 
     /// The name of the active runtime backend.
@@ -119,7 +135,6 @@ impl ContainerRuntime {
 
     pub async fn pull_image(&self, image: &str) -> Result<()> {
         if self.backend.handles_images() {
-            // Docker handles images internally — skip OCI pull
             info!(
                 "Skipping OCI image pull (handled by {} backend)",
                 self.backend.name()
@@ -141,10 +156,10 @@ impl ContainerRuntime {
         );
 
         if self.backend.handles_images() {
-            // Docker backend: create directly from image
+            // Backend handles images internally
             self.backend.create_from_image(id, image, command).await?;
         } else {
-            // OCI backend: pull image → extract rootfs → create bundle
+            // Pull image → extract rootfs → create bundle → create via backend
             let image_dir = self.image_manager.pull(image).await?;
 
             let container_dir = self.data_dir.join("containers").join(id);

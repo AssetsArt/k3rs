@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 /// Pluggable runtime backend trait.
-/// Implementations: Docker (macOS), OCI (youki/crun/runc on Linux), Stub (dev).
+/// Implementations: Docker (macOS), OCI (youki/crun on Linux), Stub (dev).
 #[async_trait]
 pub trait RuntimeBackend: Send + Sync {
     /// Human-readable name of this runtime backend.
@@ -48,306 +48,9 @@ pub trait RuntimeBackend: Send + Sync {
     }
 }
 
-// ─── Stub Backend ───────────────────────────────────────────────
-
-/// Dev/test backend that only logs operations. No real containers.
-pub struct StubBackend;
-
-#[async_trait]
-impl RuntimeBackend for StubBackend {
-    fn name(&self) -> &str {
-        "stub"
-    }
-
-    fn version(&self) -> &str {
-        "dev"
-    }
-
-    async fn create(&self, id: &str, bundle: &Path) -> Result<()> {
-        tracing::info!(
-            "[stub] create container: id={}, bundle={}",
-            id,
-            bundle.display()
-        );
-        Ok(())
-    }
-
-    async fn create_from_image(&self, id: &str, image: &str, command: &[String]) -> Result<()> {
-        tracing::info!(
-            "[stub] create container from image: id={}, image={}, cmd={:?}",
-            id,
-            image,
-            command
-        );
-        Ok(())
-    }
-
-    fn handles_images(&self) -> bool {
-        true // Stub skips real image pulling
-    }
-
-    async fn start(&self, id: &str) -> Result<()> {
-        tracing::info!("[stub] start container: {}", id);
-        Ok(())
-    }
-
-    async fn stop(&self, id: &str) -> Result<()> {
-        tracing::info!("[stub] stop container: {}", id);
-        Ok(())
-    }
-
-    async fn delete(&self, id: &str) -> Result<()> {
-        tracing::info!("[stub] delete container: {}", id);
-        Ok(())
-    }
-
-    async fn list(&self) -> Result<Vec<String>> {
-        tracing::info!("[stub] list containers");
-        Ok(vec![])
-    }
-
-    async fn logs(&self, id: &str, tail: usize) -> Result<Vec<String>> {
-        tracing::info!("[stub] logs for container: {} (tail={})", id, tail);
-        let now = chrono::Utc::now();
-        let logs: Vec<String> = (0..tail.min(20))
-            .map(|i| {
-                let ts = now - chrono::Duration::seconds((tail - i) as i64);
-                format!(
-                    "{} [container/{}] simulated log line {}",
-                    ts.format("%Y-%m-%dT%H:%M:%SZ"),
-                    id,
-                    i + 1
-                )
-            })
-            .collect();
-        Ok(logs)
-    }
-
-    async fn exec(&self, id: &str, command: &[&str]) -> Result<String> {
-        tracing::info!("[stub] exec in container {}: {:?}", id, command);
-        // Run the command on the host as a simulation
-        let cmd_str = command.first().unwrap_or(&"echo");
-        let args = if command.len() > 1 {
-            &command[1..]
-        } else {
-            &[]
-        };
-        match tokio::process::Command::new(cmd_str)
-            .args(args)
-            .output()
-            .await
-        {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                if output.status.success() {
-                    Ok(stdout)
-                } else {
-                    Ok(format!("{}{}", stdout, stderr))
-                }
-            }
-            Err(e) => Ok(format!("exec error: {}", e)),
-        }
-    }
-}
-
-// ─── Docker Backend ─────────────────────────────────────────────
-
-/// Docker CLI backend — wraps `docker` commands for macOS development.
-pub struct DockerBackend {
-    docker_path: String,
-    docker_version: String,
-}
-
-impl DockerBackend {
-    /// Detect Docker by running `docker info`.
-    pub fn detect() -> Result<Self> {
-        // Find docker binary
-        let which_output = std::process::Command::new("which").arg("docker").output()?;
-        if !which_output.status.success() {
-            anyhow::bail!("docker not found in PATH");
-        }
-        let docker_path = String::from_utf8_lossy(&which_output.stdout)
-            .trim()
-            .to_string();
-
-        // Check Docker daemon is running
-        let info_output = std::process::Command::new(&docker_path)
-            .args(["info", "--format", "{{.ServerVersion}}"])
-            .output()?;
-        if !info_output.status.success() {
-            let stderr = String::from_utf8_lossy(&info_output.stderr);
-            anyhow::bail!("Docker daemon not running: {}", stderr.trim());
-        }
-
-        let docker_version = String::from_utf8_lossy(&info_output.stdout)
-            .trim()
-            .to_string();
-        tracing::info!(
-            "Detected Docker: {} (version {})",
-            docker_path,
-            docker_version
-        );
-
-        Ok(Self {
-            docker_path,
-            docker_version,
-        })
-    }
-
-    fn cmd(&self) -> std::process::Command {
-        std::process::Command::new(&self.docker_path)
-    }
-
-    fn container_name(id: &str) -> String {
-        format!("k3rs-{}", &id[..12.min(id.len())])
-    }
-}
-
-#[async_trait]
-impl RuntimeBackend for DockerBackend {
-    fn name(&self) -> &str {
-        "docker"
-    }
-
-    fn version(&self) -> &str {
-        &self.docker_version
-    }
-
-    async fn create(&self, id: &str, _bundle: &Path) -> Result<()> {
-        // Docker doesn't use OCI bundles — use create_from_image instead
-        tracing::warn!(
-            "[docker] create() called with bundle — use create_from_image() instead. id={}",
-            id
-        );
-        Ok(())
-    }
-
-    async fn create_from_image(&self, id: &str, image: &str, command: &[String]) -> Result<()> {
-        let name = Self::container_name(id);
-        tracing::info!("[docker] creating container {} from image {}", name, image);
-
-        let mut args = vec![
-            "create".to_string(),
-            "--name".to_string(),
-            name.clone(),
-            "--label".to_string(),
-            "k3rs.managed=true".to_string(),
-            "--label".to_string(),
-            format!("k3rs.pod-id={}", id),
-        ];
-
-        args.push(image.to_string());
-
-        // Add command if specified
-        for c in command {
-            args.push(c.clone());
-        }
-
-        let output = self.cmd().args(&args).output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // If container already exists, that's OK
-            if stderr.contains("is already in use") {
-                tracing::warn!("[docker] container {} already exists", name);
-                return Ok(());
-            }
-            anyhow::bail!("[docker] create failed: {}", stderr.trim());
-        }
-
-        tracing::info!("[docker] container {} created", name);
-        Ok(())
-    }
-
-    async fn start(&self, id: &str) -> Result<()> {
-        let name = Self::container_name(id);
-        tracing::info!("[docker] starting container {}", name);
-
-        let output = self.cmd().args(["start", &name]).output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("[docker] start failed: {}", stderr.trim());
-        }
-        Ok(())
-    }
-
-    async fn stop(&self, id: &str) -> Result<()> {
-        let name = Self::container_name(id);
-        tracing::info!("[docker] stopping container {}", name);
-
-        let _ = self.cmd().args(["stop", "-t", "5", &name]).output();
-        let _ = self.cmd().args(["rm", "-f", &name]).output();
-        Ok(())
-    }
-
-    async fn delete(&self, id: &str) -> Result<()> {
-        let name = Self::container_name(id);
-        let _ = self.cmd().args(["rm", "-f", &name]).output();
-        Ok(())
-    }
-
-    async fn list(&self) -> Result<Vec<String>> {
-        let output = self
-            .cmd()
-            .args([
-                "ps",
-                "-q",
-                "--filter",
-                "label=k3rs.managed=true",
-                "--format",
-                "{{.Label \"k3rs.pod-id\"}}",
-            ])
-            .output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let ids: Vec<String> = stdout
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.trim().to_string())
-            .collect();
-        Ok(ids)
-    }
-
-    async fn logs(&self, id: &str, tail: usize) -> Result<Vec<String>> {
-        let name = Self::container_name(id);
-        let output = self
-            .cmd()
-            .args(["logs", "--tail", &tail.to_string(), &name])
-            .output()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let combined = format!("{}{}", stdout, stderr);
-        let lines: Vec<String> = combined.lines().map(|l| l.to_string()).collect();
-        Ok(lines)
-    }
-
-    async fn exec(&self, id: &str, command: &[&str]) -> Result<String> {
-        let name = Self::container_name(id);
-        tracing::info!("[docker] exec in container {}: {:?}", name, command);
-
-        let mut args = vec!["exec", &name];
-        args.extend_from_slice(command);
-
-        let output = self.cmd().args(&args).output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if output.status.success() {
-            Ok(stdout)
-        } else {
-            Ok(format!("{}{}", stdout, stderr))
-        }
-    }
-
-    fn handles_images(&self) -> bool {
-        true // Docker pulls images internally
-    }
-}
-
 // ─── OCI Backend ────────────────────────────────────────────────
 
-/// OCI-compliant runtime backend — invokes youki, crun, or runc.
+/// OCI-compliant runtime backend — invokes youki or crun.
 pub struct OciBackend {
     /// Path to the OCI runtime binary (e.g. /usr/bin/youki)
     runtime_path: String,
@@ -359,9 +62,9 @@ pub struct OciBackend {
 
 impl OciBackend {
     /// Auto-detect an OCI runtime in $PATH.
-    /// Priority: youki → crun → runc
+    /// Priority: youki or crun
     pub fn detect() -> Result<Self> {
-        for name in &["youki", "crun", "runc"] {
+        for name in &["youki", "crun"] {
             if let Ok(output) = std::process::Command::new("which").arg(name).output() {
                 if output.status.success() {
                     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -376,7 +79,7 @@ impl OciBackend {
             }
         }
         Err(anyhow::anyhow!(
-            "No OCI runtime found in PATH. Install youki, crun, or runc."
+            "No OCI runtime found in PATH. Install youki or crun."
         ))
     }
 

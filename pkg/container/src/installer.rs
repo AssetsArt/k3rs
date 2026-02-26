@@ -64,7 +64,7 @@ impl RuntimeInstaller {
             }
         }
 
-        // 3. Auto-download preferred runtime (runc has no prebuilt binary)
+        // 3. Auto-download preferred runtime has no prebuilt binary
         info!("No OCI runtime found — auto-downloading {}...", preferred);
         Self::download_runtime(&install_dir, preferred).await
     }
@@ -122,7 +122,7 @@ impl RuntimeInstaller {
         }
 
         Err(anyhow::anyhow!(
-            "Failed to auto-download any OCI runtime. Install youki, crun, or runc manually."
+            "Failed to auto-download any OCI runtime. Install youki or crun manually."
         ))
     }
 
