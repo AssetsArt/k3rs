@@ -1,0 +1,23 @@
+[package]
+name = "k3rs-init"
+version = "0.1.0"
+edition = "2021"
+description = "Guest PID 1 init for k3rs microVMs — mounts pseudo-fs, reaps zombies, exec's container entrypoint"
+
+# Static musl linking for minimal guest binary
+# Build: cargo build --release --target x86_64-unknown-linux-musl
+# Build: cargo build --release --target aarch64-unknown-linux-musl
+
+[dependencies]
+# Minimal deps — no tokio, no async, no networking libraries
+nix = { version = "0.30", features = ["fs", "mount", "hostname", "signal", "net", "process"] }
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "z"      # Optimize for size
+lto = true           # Link-time optimization
+codegen-units = 1    # Single codegen unit for better optimization
+strip = true         # Strip debug symbols
+panic = "abort"      # Abort on panic (no unwinding overhead)

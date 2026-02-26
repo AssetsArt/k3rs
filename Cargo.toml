@@ -14,7 +14,26 @@ members = [
     "pkg/scheduler",
     "pkg/state",
     "pkg/types",
-    "cmd/k3rs-ui"
+    "cmd/k3rs-ui",
+    "cmd/k3rs-init",
+]
+# k3rs-init is Linux-only (guest PID 1) — excluded from default builds on macOS.
+# Build it explicitly: cargo build -p k3rs-init --target x86_64-unknown-linux-musl --release
+default-members = [
+    "cmd/k3rs-server",
+    "cmd/k3rs-agent",
+    "cmd/k3rsctl",
+    "pkg/api",
+    "pkg/container",
+    "pkg/controllers",
+    "pkg/metrics",
+    "pkg/network",
+    "pkg/pki",
+    "pkg/proxy",
+    "pkg/scheduler",
+    "pkg/state",
+    "pkg/types",
+    "cmd/k3rs-ui",
 ]
 
 [workspace.dependencies]

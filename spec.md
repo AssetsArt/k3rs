@@ -443,7 +443,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 | Binary | Purpose |
 |--------|---------|
 | `k3rs-vmm` | Host-side VMM helper — wraps Virtualization.framework Obj-C API (macOS) |
-| `k3rs-init` | Guest-side PID 1 — mounts `/proc`, `/sys`, `/dev`, reaps zombies, `exec()` container entrypoint |
+| `k3rs-init` | Guest-side PID 1 — mounts pseudo-fs, brings up networking via raw `ioctl`, reaps zombies, parses OCI `config.json`, spawns entrypoint, graceful VM shutdown. **522KB** statically-linked musl binary |
 
 **Backends:**
 - [x] `VirtualizationBackend` — lightweight Linux microVM via Apple Virtualization.framework (macOS)
@@ -462,12 +462,14 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
   - `VZVirtioFileSystemDeviceConfiguration` + `VZSharedDirectory` → guest mounts via `mount -t virtiofs`
   - ลดเวลา: ไม่ต้องจองพื้นที่ล่วงหน้า, ไม่ต้องแปลง rootfs → block device
 - [ ] `k3rs-vmm` helper binary — wraps Virtualization.framework Obj-C API
-- [ ] `k3rs-init` — minimal Rust PID 1 for guest VM:
-  - Mount `/proc`, `/sys`, `/dev`, `/tmp`
-  - Set hostname, configure networking
-  - Reap zombie processes (waitpid loop)
-  - `exec()` container entrypoint from OCI config
-  - Static-linked, ~100KB binary (musl target)
+- [x] `k3rs-init` — minimal Rust PID 1 for guest VM (`cmd/k3rs-init/`):
+  - Mount `/proc`, `/sys`, `/dev`, `/dev/pts`, `/dev/shm`, `/tmp`, `/run` via `libc::mount()`
+  - Set hostname via `nix::unistd::sethostname`, bring up `lo`/`eth0` via raw `ioctl(SIOCSIFFLAGS)`
+  - Reap zombies via `waitpid(-1, WNOHANG)` + `SIGCHLD → SigIgn` auto-reap
+  - Parse OCI `config.json` (`process.args/env/cwd`, `hostname`) → spawn entrypoint as child
+  - Graceful shutdown: `SIGTERM → SIGKILL → umount2 → sync → reboot(POWER_OFF)`
+  - **522KB** static musl binary, `panic="abort"`, `opt-level="z"`, `lto=true`, `strip=true`
+  - Cross-compile from macOS: `cargo zigbuild --release --target aarch64-unknown-linux-musl -p k3rs-init`
 - [ ] virtio-net: NAT networking via `VZNATNetworkDeviceAttachment`
 - [ ] virtio-console: stream stdout/stderr to host log file
 - [ ] virtio-vsock: host ↔ guest exec channel
@@ -498,7 +500,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 - [ ] `virtio-net` via `virtio-queue`: TAP-based networking with iptables NAT
 - [ ] Serial console via `vm-superio`: stdout/stderr log streaming
 - [ ] `vsock` via `virtio-vsock`: exec channel (host CID 2 ↔ guest)
-- [ ] `k3rs-init` as PID 1 inside guest (same binary as macOS, cross-compiled)
+- [x] `k3rs-init` as PID 1 inside guest (same binary as macOS backend, cross-compiled via `cargo-zigbuild`)
 - [ ] Jailer via `seccompiler`: production hardening (chroot + seccomp + cgroups)
 - [ ] Platform detection: Linux + `/dev/kvm` → FirecrackerBackend → OCI fallback
 - [ ] Sub-125ms boot time, ~5MB memory overhead per microVM
