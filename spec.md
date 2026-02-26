@@ -421,7 +421,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 
 | Module | Crate | Purpose |
 |--------|-------|---------|
-| `image.rs` | `oci-client` | Pull images from OCI registries (Docker Hub, GHCR) |
+| `image.rs` | `oci-client` | Pull images from OCI registries (Docker Hub, GHCR) with `linux_platform_resolver` for cross-platform multi-arch resolution |
 | `rootfs.rs` | `tar` + `flate2` | Extract image layers → rootfs + generate `config.json` |
 | `backend.rs` | — | `RuntimeBackend` trait + Virtualization/Firecracker/OCI backends |
 | `virt.rs` | `virtualization-rs` | macOS Virtualization.framework microVM backend |
@@ -434,39 +434,44 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 - [ ] `FirecrackerBackend` — Firecracker microVM via KVM (Linux) — sub-125ms boot, virtio devices
 - [x] `OciBackend` — invokes `youki`/`crun` via `std::process::Command` (Linux fallback)
 
-**VirtualizationBackend Details (macOS):**
-- Uses Apple Virtualization.framework via `virtualization-rs` Rust crate
-- Boots a minimal Linux kernel with virtio devices (virtio-net, virtio-blk, virtio-console)
-- Sub-second boot time (~1s on Apple Silicon)
-- Each pod runs in an isolated lightweight VM (microVM model, like Firecracker)
-- OCI image rootfs mounted as the VM's root disk via virtio-blk
-- VM networking via virtio-net with NAT or bridged mode
-- Exec via virtio-vsock channel (host ↔ guest communication)
-- Container logs streamed from virtio-console
-- Requires macOS 12+ (Monterey) and Apple Hypervisor.framework entitlement
-- Supports both Apple Silicon (ARM64) and Intel (x86_64) Macs
+**VirtualizationBackend (macOS):**
+- [x] Apple Virtualization.framework via `virtualization-rs` Rust crate
+- [x] Each pod runs in an isolated lightweight microVM
+- [x] OCI image rootfs → disk image via `hdiutil` / raw `dd` fallback
+- [x] VM lifecycle: create → disk image → boot → stop → delete
+- [x] Container logs via log file (virtio-console ready)
+- [x] Exec fallback on host when VMM helper unavailable
+- [x] Platform detection: macOS → VirtualizationBackend → OCI fallback
+- [x] `linux_platform_resolver` for cross-platform multi-arch OCI image pulling
+- [ ] `k3rs-vmm` helper binary — wraps Virtualization.framework Obj-C API
+- [ ] virtio-blk: mount rootfs as VM root disk
+- [ ] virtio-net: NAT networking for pod connectivity
+- [ ] virtio-console: stream stdout/stderr to host log file
+- [ ] virtio-vsock: host ↔ guest exec channel
+- [ ] Bundle minimal Linux kernel (`vmlinux`) + initrd
+- [ ] Sub-second boot time on Apple Silicon
 
-**FirecrackerBackend Details (Linux):**
-- Uses [Firecracker](https://github.com/firecracker-microvm/firecracker) microVM monitor (KVM-based)
-- Sub-125ms boot time, minimal memory footprint (~5MB overhead per microVM)
-- Each pod runs in an isolated microVM with virtio devices:
-  - `virtio-blk`: OCI rootfs mounted as root disk (ext4/squashfs)
-  - `virtio-net`: TAP-based networking with iptables NAT
-  - Serial console for stdout/stderr log streaming
-  - `vsock` for exec channel (host CID 2 ↔ guest)
-- Jailer support for production hardening (chroot + seccomp + cgroups)
-- Requires Linux 4.14+ with KVM enabled (`/dev/kvm`)
-- Supports x86_64 and aarch64
-- Detection priority: `FirecrackerBackend` (if `/dev/kvm` available) → `OciBackend` (fallback)
+**FirecrackerBackend (Linux):**
+- [ ] `firecracker.rs` — implement `RuntimeBackend` trait
+- [ ] Firecracker binary auto-download via `installer.rs`
+- [ ] KVM detection (`/dev/kvm` availability check)
+- [ ] `virtio-blk`: OCI rootfs mounted as root disk (ext4/squashfs)
+- [ ] `virtio-net`: TAP-based networking with iptables NAT
+- [ ] Serial console for stdout/stderr log streaming
+- [ ] `vsock` for exec channel (host CID 2 ↔ guest)
+- [ ] Jailer support for production hardening (chroot + seccomp + cgroups)
+- [ ] Platform detection: Linux + `/dev/kvm` → FirecrackerBackend → OCI fallback
+- [ ] Sub-125ms boot time, ~5MB memory overhead per microVM
+- [ ] Support x86_64 and aarch64
 
 **Auto-download (Linux):**
-- firecracker latest from `github.com/firecracker-microvm/firecracker/releases`
-- youki v0.6.0 from `github.com/youki-dev/youki/releases`
-- crun 1.26 from `github.com/containers/crun/releases`
-- Configurable: `ensure_runtime(Some("crun"))` — default: youki
+- [ ] firecracker latest from `github.com/firecracker-microvm/firecracker/releases`
+- [x] youki v0.6.0 from `github.com/youki-dev/youki/releases`
+- [x] crun 1.26 from `github.com/containers/crun/releases`
+- [x] Configurable: `ensure_runtime(Some("crun"))` — default: youki
 
 **Pod Runtime Tracking:**
-- `PodRuntimeInfo { backend, version }` on each Pod
+- [x] `PodRuntimeInfo { backend, version }` on each Pod
 
 #### Image & Registry Management (multi-node)
 - [x] `GET /api/v1/images` — aggregated image list across all nodes
