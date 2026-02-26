@@ -25,7 +25,7 @@ if [ -z "${TMUX:-}" ] && [ "${1:-}" != "--server-only" ]; then
     # tmux split-window -h "./scripts/dev-agent.sh"
     
     # Split the right pane vertically for the UI
-    tmux split-window -v "./scripts/dev-ui.sh"
+    tmux split-window -h "./scripts/dev-ui.sh"
     
     # Select the first pane (server)
     tmux select-pane -t 0

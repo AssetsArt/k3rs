@@ -12,6 +12,11 @@ const AGENT_LOCK: &str = "/tmp/k3rs-agent.lock";
 #[command(name = "k3rs-server", about = "k3rs control plane server")]
 struct Cli {
     /// Path to YAML config file
+    #[cfg(debug_assertions)]
+    #[arg(long, short, default_value = "example/config.yaml")]
+    config: String,
+
+    #[cfg(not(debug_assertions))]
     #[arg(long, short, default_value = "/etc/k3rs/config.yaml")]
     config: String,
 
