@@ -146,10 +146,10 @@ esac
 KERNEL_MAJOR="v6.x"
 KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/${KERNEL_MAJOR}/linux-${KERNEL_VERSION}.tar.xz"
 
-echo "[build-kernel] Step 1/4: Downloading linux-${KERNEL_VERSION}..."
+echo "[build-kernel] Step 1/4: Downloading linux-${KERNEL_VERSION} (~200MB)..."
 cd /tmp
 if [ ! -d "linux-${KERNEL_VERSION}" ]; then
-    curl -sSL "$KERNEL_URL" | tar xJ
+    curl -fL# "$KERNEL_URL" | tar xJ
 fi
 
 cd "linux-${KERNEL_VERSION}"
