@@ -70,23 +70,36 @@ pub fn start_listener(id: &str, exec_handler: impl Fn(&[String]) -> String + Sen
                     let mut buf = Vec::new();
                     if let Err(e) = stream.read_to_end(&mut buf) {
                         error!("IPC read error: {}", e);
+                        let _ = stream.write_all(b"exec error: IPC read failed\n");
                         continue;
                     }
 
                     let cmd_string = match String::from_utf8(buf) {
                         Ok(s) => s,
-                        Err(_) => continue,
+                        Err(_) => {
+                            let _ = stream.write_all(b"exec error: invalid UTF-8 command\n");
+                            continue;
+                        }
                     };
 
                     let cmd_line = cmd_string.trim();
                     if cmd_line.is_empty() {
+                        let _ = stream.write_all(b"exec error: empty command\n");
                         continue;
                     }
 
                     let parts: Vec<String> = cmd_line.split('\0').map(|s| s.to_string()).collect();
                     info!("IPC exec request for VM {}: {:?}", id, parts);
 
-                    let output = exec_handler(&parts);
+                    let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        exec_handler(&parts)
+                    })) {
+                        Ok(out) => out,
+                        Err(_) => {
+                            error!("IPC exec handler panicked for VM {}", id);
+                            "exec error: handler panicked\n".to_string()
+                        }
+                    };
                     let _ = stream.write_all(output.as_bytes());
                 }
                 Err(e) => {
