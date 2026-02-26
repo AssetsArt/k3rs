@@ -16,8 +16,15 @@ struct K3rsVMM: ParsableCommand {
     /// Track current VM ID for signal handler
     static var currentVMId: String?
 
-    /// Global VM manager (process-lifetime singleton).
-    static let vmManager = VMManager()
+    /// Lazy-loaded VM manager — only created when Boot/Stop actually need it.
+    /// This avoids loading Virtualization.framework for ls/rm/exec commands.
+    private static var _vmManager: VMManager?
+    static var vmManager: VMManager {
+        if _vmManager == nil {
+            _vmManager = VMManager()
+        }
+        return _vmManager!
+    }
 
     static func log(_ message: String) {
         let ts = ISO8601DateFormatter().string(from: Date())
@@ -156,9 +163,7 @@ struct State: ParsableCommand {
             print("state=running")
             return
         }
-        // Check in-process
-        let vmState = K3rsVMM.vmManager.state(id: id)
-        print("state=\(vmState)")
+        print("state=not_found")
     }
 }
 
@@ -188,7 +193,7 @@ struct List: ParsableCommand {
             return
         }
 
-        print(String(format: "%-38s  %-8s  %s", "VM ID", "PID", "STATE"))
+        print("\("VM ID".padding(toLength: 38, withPad: " ", startingAt: 0))  \("PID".padding(toLength: 8, withPad: " ", startingAt: 0))  STATE")
         print(String(repeating: "-", count: 60))
 
         for sockFile in sockets {
@@ -221,7 +226,7 @@ struct List: ParsableCommand {
                 try? fm.removeItem(atPath: "/tmp/\(sockFile)")
             }
 
-            print(String(format: "%-38s  %-8s  %s", id, pid, state))
+            print("\(id.padding(toLength: 38, withPad: " ", startingAt: 0))  \(pid.padding(toLength: 8, withPad: " ", startingAt: 0))  \(state)")
         }
     }
 }

@@ -53,4 +53,4 @@ echo "[build-vmm] Size: $(du -h "$TARGET_DIR/k3rs-vmm" | cut -f1)"
 "$TARGET_DIR/k3rs-vmm" --help 2>/dev/null || true
 
 # Copy to Cargo target directory for k3rs-agent to find
-cp cmd/k3rs-vmm/.build/debug/k3rs-vmm ./target/debug/k3rs-vmm
+cp $VMM_DIR/.build/$SWIFT_CONFIG/k3rs-vmm $PROJECT_ROOT/target/$SWIFT_CONFIG/k3rs-vmm

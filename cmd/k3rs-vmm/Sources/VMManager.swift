@@ -105,7 +105,7 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
 
     /// Socket path for a given VM ID
     static func socketPath(for id: String) -> String {
-        return "/tmp/k3rs-vmm-\(id).sock"
+        return "/tmp/k3rs-runtime/vms/vmm-\(id).sock"
     }
 
     /// Start IPC listener for exec requests targeting a specific VM.
@@ -454,8 +454,11 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
             }
             let logFileHandle = try FileHandle(forWritingTo: logURL)
             logFileHandle.seekToEndOfFile()
+            // Note: VZFileHandleSerialPortAttachment rejects FileHandle.nullDevice
+            // so we open /dev/null explicitly for reading
+            let devNull = FileHandle(forReadingAtPath: "/dev/null")!
             consoleConfig.attachment = VZFileHandleSerialPortAttachment(
-                fileHandleForReading: FileHandle.nullDevice,
+                fileHandleForReading: devNull,
                 fileHandleForWriting: logFileHandle
             )
         }
