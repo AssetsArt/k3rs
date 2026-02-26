@@ -19,19 +19,43 @@ pub async fn exec_into_pod(
 ) -> impl IntoResponse {
     info!("Exec request for pod {}/{}", ns, pod_name);
 
-    // Verify pod exists
-    let key = format!("/registry/pods/{}/{}", ns, pod_name);
-    let pod_exists = state.store.get(&key).await.ok().flatten().is_some();
+    // Find pod: try direct key first, then scan by name or ID
+    let pod_prefix = format!("/registry/pods/{}/", ns);
+    let mut found_pod: Option<pkg_types::pod::Pod> = None;
 
-    if !pod_exists {
-        return axum::http::StatusCode::NOT_FOUND.into_response();
+    // Direct key lookup (works when pod_name is the key/id)
+    let direct_key = format!("/registry/pods/{}/{}", ns, pod_name);
+    if let Ok(Some(data)) = state.store.get(&direct_key).await {
+        found_pod = serde_json::from_slice::<pkg_types::pod::Pod>(&data).ok();
     }
 
-    let runtime = state.container_runtime.clone();
-    let pod_name_clone = pod_name.clone();
+    // If not found, scan all pods in the namespace by name or id
+    if found_pod.is_none() {
+        if let Ok(entries) = state.store.list_prefix(&pod_prefix).await {
+            for (_, v) in entries {
+                if let Ok(pod) = serde_json::from_slice::<pkg_types::pod::Pod>(&v) {
+                    if pod.name == pod_name || pod.id == pod_name || pod.id.starts_with(&pod_name) {
+                        found_pod = Some(pod);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
-    ws.on_upgrade(move |socket| handle_exec_session(socket, runtime, ns, pod_name_clone))
-        .into_response()
+    let pod = match found_pod {
+        Some(p) => p,
+        None => return axum::http::StatusCode::NOT_FOUND.into_response(),
+    };
+
+    let runtime = state.container_runtime.clone();
+    let container_id = pod.id.clone();
+    let display_name = pod.name.clone();
+
+    ws.on_upgrade(move |socket| {
+        handle_exec_session(socket, runtime, ns, container_id, display_name)
+    })
+    .into_response()
 }
 
 /// Handle the WebSocket exec session.
@@ -40,15 +64,19 @@ async fn handle_exec_session(
     mut socket: WebSocket,
     runtime: Arc<pkg_container::ContainerRuntime>,
     ns: String,
-    pod_name: String,
+    container_id: String,
+    display_name: String,
 ) {
-    info!("Exec session started for {}/{}", ns, pod_name);
+    info!(
+        "Exec session started for {}/{} (container={})",
+        ns, display_name, container_id
+    );
 
     // Send welcome message
     let backend = runtime.backend_name();
     let welcome = format!(
         "Connected to pod {}/{} (runtime: {})\r\n$ ",
-        ns, pod_name, backend
+        ns, display_name, backend
     );
     if socket.send(Message::Text(welcome.into())).await.is_err() {
         return;
@@ -78,8 +106,8 @@ async fn handle_exec_session(
                     continue;
                 }
 
-                // Execute command via runtime backend
-                let output = match runtime.exec_in_container(&pod_name, &parts).await {
+                // Execute command via runtime backend using the actual container ID
+                let output = match runtime.exec_in_container(&container_id, &parts).await {
                     Ok(out) => out,
                     Err(e) => format!("exec error: {}\r\n", e),
                 };
@@ -94,5 +122,5 @@ async fn handle_exec_session(
         }
     }
 
-    info!("Exec session ended for {}/{}", ns, pod_name);
+    info!("Exec session ended for {}/{}", ns, display_name);
 }
