@@ -425,7 +425,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 | `rootfs.rs` | `tar` + `flate2` | Extract image layers → rootfs + generate `config.json` |
 | `backend.rs` | — | `RuntimeBackend` trait + Virtualization/Firecracker/OCI backends |
 | `virt.rs` | `virtualization-rs` | macOS Virtualization.framework microVM backend |
-| `firecracker.rs` | — | Linux Firecracker microVM backend (KVM) |
+| `firecracker.rs` | `kvm-ioctls`, `vm-memory`, `linux-loader` | Linux Firecracker microVM backend (KVM) via [rust-vmm](https://github.com/rust-vmm/community) |
 | `runtime.rs` | — | `ContainerRuntime` facade with platform detection + `exec_in_container` |
 | `installer.rs` | `reqwest` | Auto-download youki/crun/firecracker from GitHub Releases (Linux) |
 
@@ -465,16 +465,32 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 - [ ] Bundle minimal Linux kernel (`vmlinux`) + initrd containing `k3rs-init`
 - [ ] Sub-second boot time on Apple Silicon
 
-**FirecrackerBackend (Linux):**
-- [ ] `firecracker.rs` — implement `RuntimeBackend` trait
+**FirecrackerBackend (Linux) — powered by [rust-vmm](https://github.com/rust-vmm/community):**
+
+| rust-vmm Crate | Purpose in k3rs |
+|----------------|-----------------|
+| `kvm-ioctls` | Safe Rust KVM API (create VM, vCPU, memory regions) |
+| `kvm-bindings` | KVM FFI bindings |
+| `linux-loader` | Load `vmlinux`/`bzImage` kernel into guest memory |
+| `vm-memory` | Guest memory management (GPA → HVA mapping) |
+| `virtio-queue` | Virtqueue ring buffer for all virtio devices |
+| `virtio-vsock` | vsock device for host ↔ guest exec channel |
+| `vm-superio` | Legacy UART serial console for log streaming |
+| `seccompiler` | Seccomp BPF filter generation for Jailer sandboxing |
+| `event-manager` | epoll-based event loop for device I/O |
+| `vmm-reference` | Reference VMM starting point — fork & customize |
+
+- [ ] `firecracker.rs` — implement `RuntimeBackend` trait using `rust-vmm` crates
+- [ ] KVM setup via `kvm-ioctls`: create VM, configure vCPUs, map guest memory via `vm-memory`
+- [ ] Kernel loading via `linux-loader`: parse & load `vmlinux` into guest memory
 - [ ] Firecracker binary auto-download via `installer.rs`
 - [ ] KVM detection (`/dev/kvm` availability check)
-- [ ] **virtiofsd** shared FS: mount host rootfs folder as guest `/` via FUSE → virtio-fs (alternative to virtio-blk)
-- [ ] `virtio-net`: TAP-based networking with iptables NAT
-- [ ] Serial console for stdout/stderr log streaming
-- [ ] `vsock` for exec channel (host CID 2 ↔ guest)
+- [ ] **virtiofsd** shared FS: mount host rootfs folder as guest `/` via FUSE → virtio-fs
+- [ ] `virtio-net` via `virtio-queue`: TAP-based networking with iptables NAT
+- [ ] Serial console via `vm-superio`: stdout/stderr log streaming
+- [ ] `vsock` via `virtio-vsock`: exec channel (host CID 2 ↔ guest)
 - [ ] `k3rs-init` as PID 1 inside guest (same binary as macOS, cross-compiled)
-- [ ] Jailer support for production hardening (chroot + seccomp + cgroups)
+- [ ] Jailer via `seccompiler`: production hardening (chroot + seccomp + cgroups)
 - [ ] Platform detection: Linux + `/dev/kvm` → FirecrackerBackend → OCI fallback
 - [ ] Sub-125ms boot time, ~5MB memory overhead per microVM
 - [ ] Support x86_64 and aarch64
@@ -552,7 +568,7 @@ k3rs/
 - **Management UI**: `dioxus` 0.7 (Rust-native fullstack web framework, WASM SPA)
 - **Container Runtime**: Platform-aware with pluggable `RuntimeBackend` trait
   - **macOS**: Virtualization.framework microVM backend via `virtualization-rs` (lightweight Linux VMs)
-  - **Linux (microVM)**: [Firecracker](https://firecracker-microvm.github.io/) — KVM-based microVM, sub-125ms boot
+  - **Linux (microVM)**: [rust-vmm](https://github.com/rust-vmm/community) crates (`kvm-ioctls`, `vm-memory`, `linux-loader`, `virtio-queue`, `virtio-vsock`, `vm-superio`, `seccompiler`)
   - **Linux (OCI)**: `youki` / `crun` — auto-download from GitHub Releases (fallback when KVM unavailable)
   - **Image Pull**: `oci-client` (OCI Distribution spec — Docker Hub, GHCR, etc.)
   - **Rootfs**: `tar` + `flate2` (extract image layers → host folder), mounted in guest via `virtio-fs`
