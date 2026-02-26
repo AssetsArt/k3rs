@@ -57,7 +57,7 @@ fi
 ./scripts/cleanup-port.sh "$PORT" 2>/dev/null || true
 
 # Watch for changes and restart
-cargo watch \
+RUST_LOG=debug,k3rs=trace,info,debug,warn,error cargo watch \
     -x "run --bin k3rs-server -- --port $PORT --token $TOKEN --data-dir $DATA_DIR --node-name $NODE_NAME --allow-colocate" \
     -w pkg/ \
     -w cmd/k3rs-server \
