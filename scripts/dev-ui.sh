@@ -15,5 +15,4 @@ if ! command -v dx &>/dev/null; then
     cargo install dioxus-cli
 fi
 
-cd cmd/k3rs-ui
-dx serve
+dx serve --package k3rs-ui
