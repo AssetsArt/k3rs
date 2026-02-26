@@ -127,58 +127,57 @@ impl ReplicaSetController {
             let pod_prefix_check = format!("/registry/pods/{}/", ns);
             let current_pods = self.store.list_prefix(&pod_prefix_check).await?;
             for (pod_key, pod_value) in current_pods {
-                if let Ok(pod) = serde_json::from_slice::<Pod>(&pod_value) {
-                    if pod.owner_ref.as_deref() == Some(&rs.id)
-                        && pod.status == PodStatus::Scheduled
+                if let Ok(pod) = serde_json::from_slice::<Pod>(&pod_value)
+                    && pod.owner_ref.as_deref() == Some(&rs.id)
+                    && pod.status == PodStatus::Scheduled
+                {
+                    let mut updated = pod.clone();
+                    let container_id = &pod.id;
+
+                    // Get image from first container spec
+                    let image = pod
+                        .spec
+                        .containers
+                        .first()
+                        .map(|c| c.image.clone())
+                        .unwrap_or_else(|| "busybox:latest".to_string());
+
+                    let command: Vec<String> = pod
+                        .spec
+                        .containers
+                        .first()
+                        .map(|c| c.command.clone())
+                        .unwrap_or_default();
+
+                    // Actually create and start the container
+                    match self
+                        .create_real_container(container_id, &image, &command)
+                        .await
                     {
-                        let mut updated = pod.clone();
-                        let container_id = &pod.id;
-
-                        // Get image from first container spec
-                        let image = pod
-                            .spec
-                            .containers
-                            .first()
-                            .map(|c| c.image.clone())
-                            .unwrap_or_else(|| "busybox:latest".to_string());
-
-                        let command: Vec<String> = pod
-                            .spec
-                            .containers
-                            .first()
-                            .map(|c| c.command.clone())
-                            .unwrap_or_default();
-
-                        // Actually create and start the container
-                        match self
-                            .create_real_container(container_id, &image, &command)
-                            .await
-                        {
-                            Ok(()) => {
-                                updated.status = PodStatus::Running;
-                                updated.runtime_info = Some(PodRuntimeInfo {
-                                    backend: self.runtime.backend_name().to_string(),
-                                    version: self.runtime.runtime_info().version,
-                                });
-                                info!(
-                                    "RS {}: container created for pod {} via {} → Running",
-                                    rs.name,
-                                    pod.name,
-                                    self.runtime.backend_name()
-                                );
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "RS {}: failed to create container for pod {}: {}",
-                                    rs.name, pod.name, e
-                                );
-                                updated.status = PodStatus::Failed;
-                            }
+                        Ok(()) => {
+                            updated.status = PodStatus::Running;
+                            updated.runtime_info = Some(PodRuntimeInfo {
+                                backend: self.runtime.backend_name().to_string(),
+                                version: self.runtime.runtime_info().version,
+                            });
+                            info!(
+                                "RS {}: container created for pod {} via {} → Running",
+                                rs.name,
+                                pod.name,
+                                self.runtime.backend_name()
+                            );
                         }
-
-                        let data = serde_json::to_vec(&updated)?;
-                        self.store.put(&pod_key, &data).await?;
+                        Err(e) => {
+                            warn!(
+                                "RS {}: failed to create container for pod {}: {}",
+                                rs.name, pod.name, e
+                            );
+                            updated.status = PodStatus::Failed;
+                        }
                     }
+
+                    let data = serde_json::to_vec(&updated)?;
+                    self.store.put(&pod_key, &data).await?;
                 }
             }
 

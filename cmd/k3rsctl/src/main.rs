@@ -676,10 +676,10 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("Entering interactive exec session. Type 'exit' to quit.");
 
                 // Read the welcome message
-                if let Some(Ok(msg)) = read.next().await {
-                    if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
-                        print!("{}", text);
-                    }
+                if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
+                    read.next().await
+                {
+                    print!("{}", text);
                 }
 
                 let stdin = tokio::io::stdin();
@@ -707,10 +707,10 @@ async fn main() -> anyhow::Result<()> {
                         break;
                     }
 
-                    if let Some(Ok(msg)) = read.next().await {
-                        if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
-                            print!("{}", text);
-                        }
+                    if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
+                        read.next().await
+                    {
+                        print!("{}", text);
                     }
                 }
             } else {
@@ -729,15 +729,15 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
 
-                if let Some(Ok(msg)) = read.next().await {
-                    if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
-                        // Remove trailing prompt
-                        let output = text
-                            .trim_end()
-                            .trim_end_matches("$ ")
-                            .trim_end_matches("\r\n$ ");
-                        println!("{}", output);
-                    }
+                if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
+                    read.next().await
+                {
+                    // Remove trailing prompt
+                    let output = text
+                        .trim_end()
+                        .trim_end_matches("$ ")
+                        .trim_end_matches("\r\n$ ");
+                    println!("{}", output);
                 }
 
                 let _ = write

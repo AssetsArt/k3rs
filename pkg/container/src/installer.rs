@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 /// Default install directory for auto-downloaded runtimes
@@ -45,12 +45,12 @@ impl RuntimeInstaller {
 
         // 1. Check $PATH
         for name in &search_order {
-            if let Ok(output) = std::process::Command::new("which").arg(name).output() {
-                if output.status.success() {
-                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    info!("Found {} in PATH: {}", name, path);
-                    return Ok(PathBuf::from(path));
-                }
+            if let Ok(output) = std::process::Command::new("which").arg(name).output()
+                && output.status.success()
+            {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                info!("Found {} in PATH: {}", name, path);
+                return Ok(PathBuf::from(path));
             }
         }
 
@@ -93,7 +93,7 @@ impl RuntimeInstaller {
     }
 
     /// Download a runtime binary. Tries the preferred runtime first, then fallback.
-    async fn download_runtime(install_dir: &PathBuf, preferred: &str) -> Result<PathBuf> {
+    async fn download_runtime(install_dir: &Path, preferred: &str) -> Result<PathBuf> {
         let arch = Self::detect_arch();
 
         // Order downloads based on preference
@@ -128,7 +128,7 @@ impl RuntimeInstaller {
 
     /// Download youki from GitHub Releases.
     /// Asset: youki-{version}-{arch}-musl.tar.gz
-    async fn download_youki(install_dir: &PathBuf, arch: &str) -> Result<PathBuf> {
+    async fn download_youki(install_dir: &Path, arch: &str) -> Result<PathBuf> {
         let youki_arch = match arch {
             "x86_64" => "x86_64",
             "aarch64" => "aarch64",
@@ -161,7 +161,7 @@ impl RuntimeInstaller {
         tokio::task::spawn_blocking({
             let bytes = bytes.to_vec();
             let dest = dest.clone();
-            let install_dir = install_dir.clone();
+            let install_dir = install_dir.to_path_buf();
             move || -> Result<()> {
                 let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(&bytes));
                 let mut archive = tar::Archive::new(decoder);
@@ -214,7 +214,7 @@ impl RuntimeInstaller {
 
     /// Download crun from GitHub Releases.
     /// Asset: crun-{version}-linux-{arch} (bare binary)
-    async fn download_crun(install_dir: &PathBuf, arch: &str) -> Result<PathBuf> {
+    async fn download_crun(install_dir: &Path, arch: &str) -> Result<PathBuf> {
         let crun_arch = match arch {
             "x86_64" => "amd64",
             "aarch64" => "arm64",
@@ -264,7 +264,7 @@ impl RuntimeInstaller {
     }
 
     /// Save version info to a JSON file for tracking.
-    async fn save_version_info(install_dir: &PathBuf, name: &str, version: &str) -> Result<()> {
+    async fn save_version_info(install_dir: &Path, name: &str, version: &str) -> Result<()> {
         let version_file = install_dir.join("runtime-version.json");
         let mut versions: serde_json::Value = if version_file.exists() {
             let data = tokio::fs::read_to_string(&version_file).await?;

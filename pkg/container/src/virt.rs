@@ -63,6 +63,7 @@ pub struct VirtualizationBackend {
     /// Path to the guest Linux kernel
     kernel_path: PathBuf,
     /// Path to the guest initrd (optional)
+    #[allow(dead_code)]
     initrd_path: Option<PathBuf>,
     /// CPU count per VM
     cpu_count: u32,
