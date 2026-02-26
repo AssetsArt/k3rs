@@ -1,7 +1,53 @@
 //! Kernel & initrd asset management for microVM backends.
 //!
-//! Downloads and caches a minimal Linux kernel + initrd required to boot
+//! Manages the minimal Linux kernel + initrd required to boot
 //! lightweight VMs via Virtualization.framework (macOS) or Firecracker (Linux).
+//!
+//! ## Setup
+//!
+//! The VirtualizationBackend needs a Linux kernel compiled with virtio drivers.
+//! Place these files in the kernel directory (default: `/var/lib/k3rs/`):
+//!
+//! ```text
+//! /var/lib/k3rs/
+//! ├── vmlinux       # Uncompressed Linux kernel (ELF) with virtio support
+//! └── initrd.img    # Initial ramdisk containing k3rs-init as /sbin/init
+//! ```
+//!
+//! ### Building a minimal kernel (arm64)
+//! ```bash
+//! # 1. Get kernel source
+//! curl -LO https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.tar.xz
+//! tar xf linux-6.12.tar.xz && cd linux-6.12
+//!
+//! # 2. Configure — minimal config with virtio drivers
+//! make ARCH=arm64 defconfig
+//! scripts/config -e VIRTIO -e VIRTIO_PCI -e VIRTIO_MMIO \
+//!   -e VIRTIO_BLK -e VIRTIO_NET -e VIRTIO_CONSOLE \
+//!   -e VIRTIOFS -e FUSE -e VIRTIO_VSOCKETS -e VSOCKETS \
+//!   -e NET -e INET -e EXT4_FS -e TMPFS -e DEVTMPFS \
+//!   -e DEVTMPFS_MOUNT -e PROC_FS -e SYSFS \
+//!   -d MODULES -d SOUND -d DRM -d USB_SUPPORT -d WIRELESS
+//! make ARCH=arm64 olddefconfig
+//!
+//! # 3. Build
+//! make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image
+//!
+//! # 4. Install
+//! sudo mkdir -p /var/lib/k3rs
+//! sudo cp arch/arm64/boot/Image /var/lib/k3rs/vmlinux
+//! ```
+//!
+//! ### Creating initrd with k3rs-init
+//! ```bash
+//! # 1. Build k3rs-init
+//! cargo zigbuild --release --target aarch64-unknown-linux-musl -p k3rs-init
+//!
+//! # 2. Create initrd
+//! mkdir -p /tmp/initrd/{sbin,dev,proc,sys,tmp,run,mnt/rootfs}
+//! cp target/aarch64-unknown-linux-musl/release/k3rs-init /tmp/initrd/sbin/init
+//! cd /tmp/initrd && find . | cpio -o -H newc | gzip > /var/lib/k3rs/initrd.img
+//! ```
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -12,14 +58,12 @@ const KERNEL_DIR: &str = "/var/lib/k3rs";
 const KERNEL_FILENAME: &str = "vmlinux";
 const INITRD_FILENAME: &str = "initrd.img";
 
-/// GitHub release base URL for pre-built kernels.
-/// These are minimal 6.x kernels with virtio drivers + virtiofs support.
-const KERNEL_RELEASE_URL: &str = "https://github.com/k3rs-project/kernel/releases/latest/download";
-
 /// Manages kernel + initrd assets for microVM backends.
 pub struct KernelManager {
     /// Directory where kernel assets are stored
     kernel_dir: PathBuf,
+    /// Optional custom URL to download kernel from (user-configurable)
+    download_url: Option<String>,
 }
 
 impl KernelManager {
@@ -27,6 +71,7 @@ impl KernelManager {
     pub fn new() -> Self {
         Self {
             kernel_dir: PathBuf::from(KERNEL_DIR),
+            download_url: None,
         }
     }
 
@@ -34,7 +79,19 @@ impl KernelManager {
     pub fn with_dir(dir: &Path) -> Self {
         Self {
             kernel_dir: dir.to_path_buf(),
+            download_url: None,
         }
+    }
+
+    /// Set a custom download URL for kernel assets.
+    ///
+    /// The URL should point to a directory containing:
+    /// - `vmlinux-arm64` / `vmlinux-amd64`
+    /// - `initrd-arm64.img` / `initrd-amd64.img`
+    #[allow(dead_code)]
+    pub fn with_download_url(mut self, url: &str) -> Self {
+        self.download_url = Some(url.to_string());
+        self
     }
 
     /// Path to the kernel binary.
@@ -49,8 +106,10 @@ impl KernelManager {
 
     /// Ensure kernel and initrd are available.
     ///
-    /// Returns `(kernel_path, initrd_path)`.
-    /// If assets are missing, attempts to download them.
+    /// Returns `(kernel_path, Option<initrd_path>)`.
+    ///
+    /// If a `download_url` is configured and assets are missing, attempts download.
+    /// Otherwise, just returns the paths (kernel may not exist yet).
     pub async fn ensure_available(&self) -> Result<(PathBuf, Option<PathBuf>)> {
         tokio::fs::create_dir_all(&self.kernel_dir)
             .await
@@ -59,37 +118,48 @@ impl KernelManager {
         let kernel = self.kernel_path();
         let initrd = self.initrd_path();
 
-        // Check if kernel exists
-        if !tokio::fs::metadata(&kernel).await.is_ok() {
+        // Check if kernel exists locally
+        if tokio::fs::metadata(&kernel).await.is_ok() {
+            info!("Using kernel at {}", kernel.display());
+        } else if let Some(ref base_url) = self.download_url {
+            // Download only if a real URL is configured
             info!(
-                "Kernel not found at {} — attempting download",
-                kernel.display()
+                "Kernel not found at {} — downloading from {}",
+                kernel.display(),
+                base_url
             );
-            match self.download_kernel().await {
+            match self.download_kernel(base_url).await {
                 Ok(_) => info!("Kernel downloaded successfully"),
                 Err(e) => {
-                    warn!(
-                        "Failed to download kernel: {}. VM boot will require manual kernel placement.",
-                        e
-                    );
+                    warn!("Failed to download kernel: {}", e);
+                    self.log_setup_instructions();
                     return Ok((kernel, None));
                 }
             }
         } else {
-            info!("Using cached kernel at {}", kernel.display());
+            warn!("Kernel not found at {}", kernel.display());
+            self.log_setup_instructions();
+            return Ok((kernel, None));
         }
 
+        // Check initrd
         let initrd_result = if tokio::fs::metadata(&initrd).await.is_ok() {
+            info!("Using initrd at {}", initrd.display());
             Some(initrd)
-        } else {
-            // Try to download initrd
-            match self.download_initrd().await {
+        } else if let Some(ref base_url) = self.download_url {
+            match self.download_initrd(base_url).await {
                 Ok(_) => Some(self.initrd_path()),
                 Err(e) => {
                     warn!("Initrd not available ({}), will boot without initrd", e);
                     None
                 }
             }
+        } else {
+            warn!(
+                "Initrd not found at {} — VM will boot without initrd",
+                initrd.display()
+            );
+            None
         };
 
         Ok((kernel, initrd_result))
@@ -100,15 +170,26 @@ impl KernelManager {
         tokio::fs::metadata(self.kernel_path()).await.is_ok()
     }
 
-    /// Download the kernel binary.
-    async fn download_kernel(&self) -> Result<()> {
+    /// Log setup instructions for the user.
+    fn log_setup_instructions(&self) {
+        warn!(
+            "To use the VirtualizationBackend, place a Linux kernel at: {}",
+            self.kernel_path().display()
+        );
+        warn!(
+            "See build instructions in `pkg/container/src/kernel.rs` (module doc comment at top of file)"
+        );
+    }
+
+    /// Download the kernel binary from a configured URL.
+    async fn download_kernel(&self, base_url: &str) -> Result<()> {
         let arch = match std::env::consts::ARCH {
             "aarch64" => "arm64",
             "x86_64" => "amd64",
             other => other,
         };
 
-        let url = format!("{}/vmlinux-{}", KERNEL_RELEASE_URL, arch);
+        let url = format!("{}/vmlinux-{}", base_url, arch);
         let dest = self.kernel_path();
 
         info!("Downloading kernel from {}", url);
@@ -122,15 +203,15 @@ impl KernelManager {
         Ok(())
     }
 
-    /// Download the initrd image.
-    async fn download_initrd(&self) -> Result<()> {
+    /// Download the initrd image from a configured URL.
+    async fn download_initrd(&self, base_url: &str) -> Result<()> {
         let arch = match std::env::consts::ARCH {
             "aarch64" => "arm64",
             "x86_64" => "amd64",
             other => other,
         };
 
-        let url = format!("{}/initrd-{}.img", KERNEL_RELEASE_URL, arch);
+        let url = format!("{}/initrd-{}.img", base_url, arch);
         let dest = self.initrd_path();
 
         info!("Downloading initrd from {}", url);
@@ -163,7 +244,6 @@ impl KernelManager {
         let bytes = response.bytes().await?;
         tokio::fs::write(dest, &bytes).await?;
 
-        // Make kernel executable (in case it needs to be)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -227,6 +307,21 @@ mod tests {
         assert_eq!(
             km.initrd_path(),
             PathBuf::from("/tmp/test-kernels/initrd.img")
+        );
+    }
+
+    #[test]
+    fn test_no_download_url_by_default() {
+        let km = KernelManager::new();
+        assert!(km.download_url.is_none());
+    }
+
+    #[test]
+    fn test_with_download_url() {
+        let km = KernelManager::new().with_download_url("https://example.com/kernels");
+        assert_eq!(
+            km.download_url.as_deref(),
+            Some("https://example.com/kernels")
         );
     }
 }
