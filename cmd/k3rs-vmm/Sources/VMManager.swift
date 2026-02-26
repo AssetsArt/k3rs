@@ -15,6 +15,9 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
     private var vms: [String: ManagedVM] = [:]
     private let queue = DispatchQueue(label: "io.k3rs.vmm", qos: .userInitiated)
 
+    /// Active IPC listeners keyed by container ID
+    private var ipcListeners: [String: IPCListener] = [:]
+
     struct VMConfig {
         let id: String
         let kernelPath: String
@@ -30,6 +33,202 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
         let config: VMConfig
         let logHandle: FileHandle?
         let vsockDevice: VZVirtioSocketDevice?
+    }
+
+    // MARK: - IPC Listener
+
+    /// Unix domain socket listener for receiving exec requests from other k3rs-vmm processes.
+    class IPCListener {
+        let socketPath: String
+        let socketFd: Int32
+        var isRunning = true
+
+        init(socketPath: String) throws {
+            self.socketPath = socketPath
+
+            // Remove stale socket
+            unlink(socketPath)
+
+            // Create Unix domain socket
+            socketFd = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard socketFd >= 0 else {
+                throw VMError.ipcError("Failed to create socket: \(String(cString: strerror(errno)))")
+            }
+
+            var addr = sockaddr_un()
+            addr.sun_family = sa_family_t(AF_UNIX)
+            let pathBytes = socketPath.utf8CString
+            withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+                let raw = UnsafeMutableRawPointer(ptr)
+                pathBytes.withUnsafeBufferPointer { buf in
+                    raw.copyMemory(from: buf.baseAddress!, byteCount: min(buf.count, 104))
+                }
+            }
+
+            let bindResult = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                    Darwin.bind(socketFd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            guard bindResult == 0 else {
+                Darwin.close(socketFd)
+                throw VMError.ipcError("Failed to bind: \(String(cString: strerror(errno)))")
+            }
+
+            guard listen(socketFd, 5) == 0 else {
+                Darwin.close(socketFd)
+                throw VMError.ipcError("Failed to listen: \(String(cString: strerror(errno)))")
+            }
+        }
+
+        func accept() -> Int32? {
+            var clientAddr = sockaddr_un()
+            var addrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
+            let clientFd = withUnsafeMutablePointer(to: &clientAddr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                    Darwin.accept(socketFd, sockPtr, &addrLen)
+                }
+            }
+            return clientFd >= 0 ? clientFd : nil
+        }
+
+        func close() {
+            isRunning = false
+            Darwin.close(socketFd)
+            unlink(socketPath)
+        }
+
+        deinit {
+            close()
+        }
+    }
+
+    /// Socket path for a given VM ID
+    static func socketPath(for id: String) -> String {
+        return "/tmp/k3rs-vmm-\(id).sock"
+    }
+
+    /// Start IPC listener for exec requests targeting a specific VM.
+    func startIPCListener(id: String) {
+        let path = VMManager.socketPath(for: id)
+        do {
+            let listener = try IPCListener(socketPath: path)
+            ipcListeners[id] = listener
+            log("IPC listener started on \(path)")
+
+            // Accept connections in background
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                while listener.isRunning {
+                    guard let clientFd = listener.accept() else {
+                        if listener.isRunning {
+                            Thread.sleep(forTimeInterval: 0.01)
+                        }
+                        continue
+                    }
+                    self?.handleIPCClient(id: id, clientFd: clientFd)
+                }
+            }
+        } catch {
+            log("Failed to start IPC listener: \(error)")
+        }
+    }
+
+    /// Handle an exec request from a client connected to the IPC socket.
+    private func handleIPCClient(id: String, clientFd: Int32) {
+        defer { Darwin.close(clientFd) }
+
+        let readHandle = FileHandle(fileDescriptor: clientFd, closeOnDealloc: false)
+        let writeHandle = FileHandle(fileDescriptor: clientFd, closeOnDealloc: false)
+
+        // Read command (format: "cmd\0arg1\0arg2\n")
+        let data = readHandle.availableData
+        guard !data.isEmpty, let cmdString = String(data: data, encoding: .utf8) else {
+            return
+        }
+
+        let cmdLine = cmdString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = cmdLine.split(separator: "\0").map(String.init)
+        guard !parts.isEmpty else { return }
+
+        log("IPC exec request for VM \(id): \(parts)")
+
+        // Execute via vsock to guest
+        do {
+            let output = try exec(id: id, command: parts)
+            if let outputData = output.data(using: .utf8) {
+                writeHandle.write(outputData)
+            }
+        } catch {
+            let errMsg = "exec error: \(error)\n"
+            if let errData = errMsg.data(using: .utf8) {
+                writeHandle.write(errData)
+            }
+        }
+    }
+
+    /// Stop IPC listener for a VM.
+    func stopIPCListener(id: String) {
+        ipcListeners[id]?.close()
+        ipcListeners.removeValue(forKey: id)
+    }
+
+    // MARK: - IPC Client (for exec subcommand)
+
+    /// Connect to a running boot process's IPC socket and send an exec request.
+    static func execViaIPC(id: String, command: [String]) throws -> String {
+        let path = socketPath(for: id)
+
+        // Check socket exists
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw VMError.notFound(id)
+        }
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw VMError.ipcError("Failed to create socket")
+        }
+        defer { Darwin.close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = path.utf8CString
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            let raw = UnsafeMutableRawPointer(ptr)
+            pathBytes.withUnsafeBufferPointer { buf in
+                raw.copyMemory(from: buf.baseAddress!, byteCount: min(buf.count, 104))
+            }
+        }
+
+        let connectResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connectResult == 0 else {
+            throw VMError.ipcError("Failed to connect to IPC socket at \(path): \(String(cString: strerror(errno)))")
+        }
+
+        // Send command as NUL-delimited string + newline
+        let cmdString = command.joined(separator: "\0") + "\n"
+        if let data = cmdString.data(using: .utf8) {
+            let writeHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+            writeHandle.write(data)
+
+            // Signal that we're done writing
+            shutdown(fd, SHUT_WR)
+        }
+
+        // Read response
+        let readHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+        var responseData = Data()
+        // Read until EOF
+        while true {
+            let chunk = readHandle.availableData
+            if chunk.isEmpty { break }
+            responseData.append(chunk)
+        }
+
+        return String(data: responseData, encoding: .utf8) ?? ""
     }
 
     // MARK: - Boot
@@ -83,6 +282,9 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
             vms.removeValue(forKey: config.id)
             throw error
         }
+
+        // Start IPC listener so exec subcommand can reach this VM
+        startIPCListener(id: config.id)
     }
 
     // MARK: - Stop
@@ -91,6 +293,9 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
         guard let managed = vms[id] else {
             throw VMError.notFound(id)
         }
+
+        // Stop IPC listener first
+        stopIPCListener(id: id)
 
         let semaphore = DispatchSemaphore(value: 0)
         var stopError: Error? = nil
@@ -150,7 +355,6 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
         var execError: Error? = nil
 
         // Connect to guest vsock port 5555 (k3rs-init exec listener)
-        // The API uses Result<VZVirtioSocketConnection, Error> in the closure
         vsock.connect(toPort: 5555) { connectionResult in
             let conn: VZVirtioSocketConnection
             switch connectionResult {
@@ -275,12 +479,14 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
         let id = vms.first(where: { $0.value.vm === virtualMachine })?.key ?? "unknown"
         log("VM \(id) stopped with error: \(error)")
+        stopIPCListener(id: id)
         vms.removeValue(forKey: id)
     }
 
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         let id = vms.first(where: { $0.value.vm === virtualMachine })?.key ?? "unknown"
         log("VM \(id) guest stopped gracefully")
+        stopIPCListener(id: id)
         vms.removeValue(forKey: id)
     }
 }
@@ -293,6 +499,7 @@ enum VMError: Error, CustomStringConvertible {
     case noVsock(String)
     case bootTimeout(String)
     case execTimeout(String)
+    case ipcError(String)
 
     var description: String {
         switch self {
@@ -301,6 +508,7 @@ enum VMError: Error, CustomStringConvertible {
         case .noVsock(let id):      return "VM '\(id)' has no vsock device"
         case .bootTimeout(let id):  return "VM '\(id)' boot timed out"
         case .execTimeout(let id):  return "VM '\(id)' exec timed out"
+        case .ipcError(let msg):    return "IPC error: \(msg)"
         }
     }
 }

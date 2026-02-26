@@ -9,7 +9,7 @@ struct K3rsVMM: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "k3rs-vmm",
         abstract: "k3rs Virtual Machine Monitor — boots Linux microVMs via Virtualization.framework",
-        subcommands: [Boot.self, Stop.self, Exec.self, State.self],
+        subcommands: [Boot.self, Stop.self, Exec.self, State.self, List.self, Remove.self],
         defaultSubcommand: Boot.self
     )
 
@@ -132,7 +132,9 @@ struct Exec: ParsableCommand {
         }
 
         K3rsVMM.log("Exec in VM \(id): \(command.joined(separator: " "))")
-        let output = try K3rsVMM.vmManager.exec(id: id, command: command)
+
+        // Connect to the running boot process via Unix domain socket IPC
+        let output = try VMManager.execViaIPC(id: id, command: command)
         print(output, terminator: "")
     }
 }
@@ -148,8 +150,138 @@ struct State: ParsableCommand {
     var id: String
 
     func run() {
+        // Check IPC socket first (running in another process)
+        let sockPath = VMManager.socketPath(for: id)
+        if FileManager.default.fileExists(atPath: sockPath) {
+            print("state=running")
+            return
+        }
+        // Check in-process
         let vmState = K3rsVMM.vmManager.state(id: id)
         print("state=\(vmState)")
+    }
+}
+
+// MARK: - List Subcommand
+
+struct List: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "ls",
+        abstract: "List running microVMs"
+    )
+
+    func run() {
+        let fm = FileManager.default
+
+        // Find active VMs by scanning IPC socket files
+        guard let contents = try? fm.contentsOfDirectory(atPath: "/tmp") else {
+            print("No VMs found")
+            return
+        }
+
+        let sockets = contents
+            .filter { $0.hasPrefix("k3rs-vmm-") && $0.hasSuffix(".sock") }
+            .sorted()
+
+        if sockets.isEmpty {
+            print("No VMs running")
+            return
+        }
+
+        print(String(format: "%-38s  %-8s  %s", "VM ID", "PID", "STATE"))
+        print(String(repeating: "-", count: 60))
+
+        for sockFile in sockets {
+            let id = sockFile
+                .replacingOccurrences(of: "k3rs-vmm-", with: "")
+                .replacingOccurrences(of: ".sock", with: "")
+
+            var pid = "-"
+            var state = "running"
+
+            // Find PID via pgrep
+            let pipe = Pipe()
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            proc.arguments = ["-f", "k3rs-vmm boot.*--id \(id)"]
+            proc.standardOutput = pipe
+            proc.standardError = FileHandle.nullDevice
+            try? proc.run()
+            proc.waitUntilExit()
+
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let pidStr = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            if let firstPid = pidStr.components(separatedBy: "\n").first, !firstPid.isEmpty {
+                pid = firstPid
+            } else {
+                state = "stale"
+                // Clean up stale socket
+                try? fm.removeItem(atPath: "/tmp/\(sockFile)")
+            }
+
+            print(String(format: "%-38s  %-8s  %s", id, pid, state))
+        }
+    }
+}
+
+// MARK: - Remove Subcommand
+
+struct Remove: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "rm",
+        abstract: "Remove (kill) a running microVM"
+    )
+
+    @Argument(help: "VM ID to remove")
+    var id: String
+
+    @Flag(name: .shortAndLong, help: "Force kill (SIGKILL instead of SIGTERM)")
+    var force: Bool = false
+
+    func run() throws {
+        let sockPath = VMManager.socketPath(for: id)
+
+        // Find PID of the boot process
+        let pipe = Pipe()
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        proc.arguments = ["-f", "k3rs-vmm boot.*--id \(id)"]
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        try proc.run()
+        proc.waitUntilExit()
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let pidStr = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if let firstPid = pidStr.components(separatedBy: "\n").first,
+           let pidInt = Int32(firstPid) {
+            if force {
+                kill(pidInt, SIGKILL)
+                print("VM \(id) force killed (pid=\(pidInt))")
+            } else {
+                kill(pidInt, SIGTERM)
+                print("VM \(id) stopped (pid=\(pidInt))")
+
+                // Wait briefly for graceful shutdown
+                Thread.sleep(forTimeInterval: 1)
+
+                // Check if still running
+                if kill(pidInt, 0) == 0 {
+                    kill(pidInt, SIGKILL)
+                    print("VM \(id) force killed after timeout")
+                }
+            }
+        } else {
+            print("VM \(id) process not found")
+        }
+
+        // Clean up socket file
+        try? FileManager.default.removeItem(atPath: sockPath)
+        print("Cleaned up \(sockPath)")
     }
 }
 
