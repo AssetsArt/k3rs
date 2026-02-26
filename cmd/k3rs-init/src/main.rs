@@ -238,6 +238,7 @@ fn start_vsock_listener() {
 /// Main vsock listener loop.
 #[cfg(target_os = "linux")]
 fn vsock_listener_loop() -> Result<(), Box<dyn std::error::Error>> {
+    #[allow(unused_imports)]
     use std::io::{Read, Write};
 
     // Create vsock socket

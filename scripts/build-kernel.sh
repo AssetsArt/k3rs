@@ -99,6 +99,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential bc flex bison libelf-dev libssl-dev \
     gcc-aarch64-linux-gnu \
+    musl-tools \
     curl xz-utils cpio ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -109,10 +110,13 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
 
-# Install cargo-zigbuild + zig for musl cross-compilation
-RUN cargo install cargo-zigbuild \
-    && curl -sSL https://ziglang.org/download/0.13.0/zig-linux-$(uname -m)-0.13.0.tar.xz \
-       | tar -xJ -C /usr/local --strip-components=1
+# Install zig (for cargo-zigbuild musl cross-compilation)
+RUN mkdir -p /opt/zig \
+    && curl -fSL "https://ziglang.org/download/0.13.0/zig-linux-$(uname -m)-0.13.0.tar.xz" \
+       | tar -xJ -C /opt/zig --strip-components=1 \
+    && ln -s /opt/zig/zig /usr/local/bin/zig \
+    && zig version
+RUN cargo install cargo-zigbuild
 
 WORKDIR /build
 DOCKERFILE
