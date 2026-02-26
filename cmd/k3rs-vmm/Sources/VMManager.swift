@@ -152,13 +152,36 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
 
         log("IPC exec request for VM \(id): \(parts)")
 
-        // Execute via vsock to guest
+        // Check VM state first — if guest is not running, don't try vsock
+        guard let managed = vms[id] else {
+            let errMsg = "exec error: VM '\(id)' not found in this process\n"
+            writeHandle.write(errMsg.data(using: .utf8)!)
+            return
+        }
+
+        let vmState = managed.vm.state
+        log("VM \(id) state: \(vmState.rawValue)")
+
+        guard vmState == .running else {
+            let errMsg = "exec error: VM '\(id)' is not running (state=\(vmState.rawValue))\n"
+            writeHandle.write(errMsg.data(using: .utf8)!)
+            return
+        }
+
+        guard managed.vsockDevice != nil else {
+            let errMsg = "exec error: VM '\(id)' has no vsock device\n"
+            writeHandle.write(errMsg.data(using: .utf8)!)
+            return
+        }
+
+        // Execute via vsock to guest — with short timeout
         do {
             let output = try exec(id: id, command: parts)
             if let outputData = output.data(using: .utf8) {
                 writeHandle.write(outputData)
             }
         } catch {
+            log("Exec failed for VM \(id): \(error)")
             let errMsg = "exec error: \(error)\n"
             if let errData = errMsg.data(using: .utf8) {
                 writeHandle.write(errData)
@@ -385,7 +408,7 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
             semaphore.signal()
         }
 
-        let timeout = semaphore.wait(timeout: .now() + 30)
+        let timeout = semaphore.wait(timeout: .now() + 5)
         if timeout == .timedOut {
             throw VMError.execTimeout(id)
         }
