@@ -199,6 +199,9 @@ fn cmd_boot(args: BootArgs) {
     let vm = Arc::new(MainThreadBound::new(vz_vm, marker));
     vm::start_vm(Arc::clone(&vm));
 
+    // Register VM ID for cleanup on exit (signal, delegate, start error)
+    ipc::set_active_vm(&args.id);
+
     // Start IPC listener for exec requests
     let id_for_ipc = args.id.clone();
     ipc::start_listener(&id_for_ipc, move |_parts| {

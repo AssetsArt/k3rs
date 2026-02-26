@@ -9,11 +9,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use block2::StackBlock;
-use dispatch2::{run_on_main, DispatchQueue, DispatchTime, MainThreadBound};
+use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound, run_on_main};
 use objc2::rc::Retained;
 use objc2_foundation::NSError;
 use objc2_virtualization::VZVirtualMachine;
 use tracing::{error, info};
+
+use crate::ipc;
+
+/// Clean up IPC socket and exit the process.
+fn cleanup_exit(code: i32) -> ! {
+    ipc::cleanup();
+    process::exit(code);
+}
 
 /// Start a VM on the main thread using a completion handler.
 pub fn start_vm(vm: Arc<MainThreadBound<Retained<VZVirtualMachine>>>) {
@@ -27,7 +35,7 @@ pub fn start_vm(vm: Arc<MainThreadBound<Retained<VZVirtualMachine>>>) {
                 error!("vm failed to start, err={}", unsafe {
                     (*err).localizedDescription()
                 });
-                process::exit(1);
+                cleanup_exit(1);
             }
         });
         unsafe {
@@ -62,7 +70,7 @@ fn request_stop_vm(vm: &Retained<VZVirtualMachine>) -> bool {
                     "failed to request vm to stop, err={}",
                     err.localizedDescription()
                 );
-                process::exit(1);
+                cleanup_exit(1);
             }
             return true;
         }
@@ -78,12 +86,12 @@ fn force_stop_vm(vm: Arc<MainThreadBound<Retained<VZVirtualMachine>>>) {
             let block = &StackBlock::new(|err: *mut NSError| {
                 if err.is_null() {
                     info!("vm stopped");
-                    process::exit(0);
+                    cleanup_exit(0);
                 } else {
                     error!("vm failed to stop, err={}", unsafe {
                         (*err).localizedDescription()
                     });
-                    process::exit(1);
+                    cleanup_exit(1);
                 }
             });
             unsafe {
@@ -91,7 +99,7 @@ fn force_stop_vm(vm: Arc<MainThreadBound<Retained<VZVirtualMachine>>>) {
             }
         } else {
             error!("vm cannot be stopped");
-            process::exit(1);
+            cleanup_exit(1);
         }
     });
 }

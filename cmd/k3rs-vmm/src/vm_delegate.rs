@@ -1,15 +1,17 @@
 use std::process;
 
+use objc2::AllocAnyThread;
 use objc2::define_class;
 use objc2::msg_send;
 use objc2::rc::Retained;
-use objc2::AllocAnyThread;
 use objc2_foundation::NSError;
 use objc2_foundation::NSObject;
 use objc2_foundation::NSObjectProtocol;
 use objc2_virtualization::VZVirtualMachine;
 use objc2_virtualization::VZVirtualMachineDelegate;
 use tracing::{error, info};
+
+use crate::ipc;
 
 define_class!(
     #[unsafe(super = NSObject)]
@@ -22,6 +24,7 @@ define_class!(
         #[unsafe(method(guestDidStopVirtualMachine:))]
         fn guest_did_stop_virtual_machine(&self, _: &VZVirtualMachine) {
             info!("guest has stopped the vm");
+            ipc::cleanup();
             process::exit(0);
         }
 
@@ -31,6 +34,7 @@ define_class!(
                 "guest has stopped the vm due to error, err={}",
                 err.localizedDescription()
             );
+            ipc::cleanup();
             process::exit(1);
         }
     }

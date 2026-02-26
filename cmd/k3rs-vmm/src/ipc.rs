@@ -7,12 +7,31 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::OnceLock;
 use std::{io, thread};
 
 use tracing::{error, info};
 
 /// Socket directory for VM IPC
 const SOCKET_DIR: &str = "/tmp/k3rs-runtime/vms";
+
+/// Global VM ID for cleanup on exit (set by boot command).
+static ACTIVE_VM_ID: OnceLock<String> = OnceLock::new();
+
+/// Register the active VM ID so `cleanup()` knows which socket to remove.
+pub fn set_active_vm(id: &str) {
+    let _ = ACTIVE_VM_ID.set(id.to_string());
+}
+
+/// Clean up IPC socket for the active VM. Safe to call from any exit path
+/// (signal handler, delegate, start_vm error handler, etc.).
+pub fn cleanup() {
+    if let Some(id) = ACTIVE_VM_ID.get() {
+        let path = socket_path(id);
+        let _ = std::fs::remove_file(&path);
+        info!("cleaned up IPC socket: {}", path);
+    }
+}
 
 /// Get the socket path for a given VM ID.
 pub fn socket_path(id: &str) -> String {
@@ -95,7 +114,28 @@ pub fn exec_via_ipc(id: &str, command: &[String]) -> io::Result<String> {
         ));
     }
 
-    let mut stream = std::os::unix::net::UnixStream::connect(&path)?;
+    // Check if the boot process is actually alive before connecting
+    if !is_vm_process_alive(id) {
+        // Clean up stale socket
+        let _ = std::fs::remove_file(&path);
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "VM '{}' boot process is not running (stale socket removed)",
+                id
+            ),
+        ));
+    }
+
+    let mut stream = std::os::unix::net::UnixStream::connect(&path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("failed to connect to VM '{}' IPC socket: {}", id, e),
+        )
+    })?;
+
+    // Set a read timeout to avoid hanging forever if the boot process dies mid-connection
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
 
     // Send command as NUL-delimited string + newline
     let cmd_string = command.join("\0") + "\n";
@@ -104,7 +144,41 @@ pub fn exec_via_ipc(id: &str, command: &[String]) -> io::Result<String> {
 
     // Read response
     let mut response = String::new();
-    stream.read_to_string(&mut response)?;
+    match stream.read_to_string(&mut response) {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("VM '{}' exec timed out (boot process may have crashed)", id),
+            ));
+        }
+        Err(e) => return Err(e),
+    }
+
+    if response.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            format!(
+                "VM '{}' returned empty response (boot process may have crashed)",
+                id
+            ),
+        ));
+    }
 
     Ok(response)
+}
+
+/// Check if the k3rs-vmm boot process for a given VM ID is alive.
+fn is_vm_process_alive(id: &str) -> bool {
+    let output = std::process::Command::new("pgrep")
+        .args(["-f", &format!("k3rs-vmm boot.*--id {}", id)])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let pid_str = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            !pid_str.is_empty()
+        }
+        _ => false,
+    }
 }
