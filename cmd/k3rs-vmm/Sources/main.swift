@@ -5,7 +5,6 @@ import Foundation
 ///
 /// Wraps Apple's Virtualization.framework to boot lightweight Linux microVMs
 /// for container pod isolation on macOS.
-@main
 struct K3rsVMM: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "k3rs-vmm",
@@ -13,13 +12,18 @@ struct K3rsVMM: ParsableCommand {
         subcommands: [Boot.self, Stop.self, Exec.self, State.self],
         defaultSubcommand: Boot.self
     )
+
+    /// Track current VM ID for signal handler
+    static var currentVMId: String?
+
+    /// Global VM manager (process-lifetime singleton).
+    static let vmManager = VMManager()
+
+    static func log(_ message: String) {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        FileHandle.standardError.write("[\(ts)] [k3rs-vmm] \(message)\n".data(using: .utf8)!)
+    }
 }
-
-// MARK: - Shared VMManager instance
-
-/// Global VM manager (process-lifetime singleton).
-/// In production, boot runs as a long-lived process per VM.
-let vmManager = VMManager()
 
 // MARK: - Boot Subcommand
 
@@ -65,38 +69,29 @@ struct Boot: ParsableCommand {
             logPath: log
         )
 
-        try vmManager.boot(config: config)
+        try K3rsVMM.vmManager.boot(config: config)
 
         if foreground {
             K3rsVMM.log("VM \(id) running in foreground — press Ctrl+C to stop")
-            // Block until VM exits or signal received
+            K3rsVMM.currentVMId = id
+
             signal(SIGINT) { _ in
                 K3rsVMM.log("Received SIGINT — stopping VM")
-                try? vmManager.stop(id: K3rsVMM.currentVMId ?? "")
+                try? K3rsVMM.vmManager.stop(id: K3rsVMM.currentVMId ?? "")
                 Foundation.exit(0)
             }
             signal(SIGTERM) { _ in
                 K3rsVMM.log("Received SIGTERM — stopping VM")
-                try? vmManager.stop(id: K3rsVMM.currentVMId ?? "")
+                try? K3rsVMM.vmManager.stop(id: K3rsVMM.currentVMId ?? "")
                 Foundation.exit(0)
             }
-            K3rsVMM.currentVMId = id
+
             RunLoop.main.run()
         } else {
             // Print PID and exit (for daemon mode - parent process tracks us)
             print("pid=\(ProcessInfo.processInfo.processIdentifier)")
             print("state=running")
         }
-    }
-}
-
-extension K3rsVMM {
-    /// Track current VM ID for signal handler
-    static var currentVMId: String?
-
-    static func log(_ message: String) {
-        let ts = ISO8601DateFormatter().string(from: Date())
-        FileHandle.standardError.write("[\(ts)] [k3rs-vmm] \(message)\n".data(using: .utf8)!)
     }
 }
 
@@ -112,7 +107,7 @@ struct Stop: ParsableCommand {
 
     func run() throws {
         K3rsVMM.log("Stopping VM: \(id)")
-        try vmManager.stop(id: id)
+        try K3rsVMM.vmManager.stop(id: id)
         print("state=stopped")
     }
 }
@@ -137,7 +132,7 @@ struct Exec: ParsableCommand {
         }
 
         K3rsVMM.log("Exec in VM \(id): \(command.joined(separator: " "))")
-        let output = try vmManager.exec(id: id, command: command)
+        let output = try K3rsVMM.vmManager.exec(id: id, command: command)
         print(output, terminator: "")
     }
 }
@@ -153,7 +148,10 @@ struct State: ParsableCommand {
     var id: String
 
     func run() {
-        let vmState = vmManager.state(id: id)
+        let vmState = K3rsVMM.vmManager.state(id: id)
         print("state=\(vmState)")
     }
 }
+
+// Entry point
+K3rsVMM.main()

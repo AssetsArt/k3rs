@@ -150,40 +150,35 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
         var execError: Error? = nil
 
         // Connect to guest vsock port 5555 (k3rs-init exec listener)
-        vsock.connect(toPort: 5555) { connection, error in
-            if let error = error {
+        // The API uses Result<VZVirtioSocketConnection, Error> in the closure
+        vsock.connect(toPort: 5555) { connectionResult in
+            let conn: VZVirtioSocketConnection
+            switch connectionResult {
+            case .success(let c):
+                conn = c
+            case .failure(let error):
                 execError = error
                 semaphore.signal()
                 return
             }
-            guard let conn = connection else {
-                execError = VMError.vsockConnectionFailed(id)
-                semaphore.signal()
-                return
+
+            // VZVirtioSocketConnection exposes a raw file descriptor
+            let fd = conn.fileDescriptor
+            let writeHandle = FileHandle(fileDescriptor: fd)
+            let readHandle = FileHandle(fileDescriptor: fd)
+
+            // Send command as NUL-delimited string + newline
+            let cmdString = command.joined(separator: "\0") + "\n"
+            if let data = cmdString.data(using: .utf8) {
+                writeHandle.write(data)
             }
 
-            // Send command as newline-delimited string
-            let cmdString = command.joined(separator: "\0") + "\n"
-            conn.send(content: cmdString.data(using: .utf8)!, contentContext: .defaultMessage,
-                      isComplete: true, completion: .contentProcessed({ sendError in
-                if let sendError = sendError {
-                    execError = sendError
-                    semaphore.signal()
-                    return
-                }
+            // Read response (with a short delay to let the guest process)
+            Thread.sleep(forTimeInterval: 0.1)
+            let responseData = readHandle.availableData
+            result = String(data: responseData, encoding: .utf8) ?? ""
 
-                // Receive response
-                conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, recvError in
-                    if let data = data {
-                        result = String(data: data, encoding: .utf8) ?? ""
-                    }
-                    if let recvError = recvError {
-                        execError = recvError
-                    }
-                    conn.cancel()
-                    semaphore.signal()
-                }
-            }))
+            semaphore.signal()
         }
 
         let timeout = semaphore.wait(timeout: .now() + 30)
@@ -278,7 +273,6 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
     // MARK: - VZVirtualMachineDelegate
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
-        // Find the VM ID
         let id = vms.first(where: { $0.value.vm === virtualMachine })?.key ?? "unknown"
         log("VM \(id) stopped with error: \(error)")
         vms.removeValue(forKey: id)
@@ -299,16 +293,14 @@ enum VMError: Error, CustomStringConvertible {
     case noVsock(String)
     case bootTimeout(String)
     case execTimeout(String)
-    case vsockConnectionFailed(String)
 
     var description: String {
         switch self {
-        case .notFound(let id):             return "VM '\(id)' not found"
-        case .notRunning(let id):           return "VM '\(id)' is not running"
-        case .noVsock(let id):              return "VM '\(id)' has no vsock device"
-        case .bootTimeout(let id):          return "VM '\(id)' boot timed out"
-        case .execTimeout(let id):          return "VM '\(id)' exec timed out"
-        case .vsockConnectionFailed(let id): return "Failed to connect vsock on VM '\(id)'"
+        case .notFound(let id):     return "VM '\(id)' not found"
+        case .notRunning(let id):   return "VM '\(id)' is not running"
+        case .noVsock(let id):      return "VM '\(id)' has no vsock device"
+        case .bootTimeout(let id):  return "VM '\(id)' boot timed out"
+        case .execTimeout(let id):  return "VM '\(id)' exec timed out"
         }
     }
 }
