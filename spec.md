@@ -429,6 +429,13 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 | `runtime.rs` | — | `ContainerRuntime` facade with platform detection + `exec_in_container` |
 | `installer.rs` | `reqwest` | Auto-download youki/crun/firecracker from GitHub Releases (Linux) |
 
+**Guest Components:**
+
+| Binary | Purpose |
+|--------|---------|
+| `k3rs-vmm` | Host-side VMM helper — wraps Virtualization.framework Obj-C API (macOS) |
+| `k3rs-init` | Guest-side PID 1 — mounts `/proc`, `/sys`, `/dev`, reaps zombies, `exec()` container entrypoint |
+
 **Backends:**
 - [x] `VirtualizationBackend` — lightweight Linux microVM via Apple Virtualization.framework (macOS)
 - [ ] `FirecrackerBackend` — Firecracker microVM via KVM (Linux) — sub-125ms boot, virtio devices
@@ -437,28 +444,36 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 **VirtualizationBackend (macOS):**
 - [x] Apple Virtualization.framework via `virtualization-rs` Rust crate
 - [x] Each pod runs in an isolated lightweight microVM
-- [x] OCI image rootfs → disk image via `hdiutil` / raw `dd` fallback
-- [x] VM lifecycle: create → disk image → boot → stop → delete
+- [x] VM lifecycle: create → boot → stop → delete
 - [x] Container logs via log file (virtio-console ready)
 - [x] Exec fallback on host when VMM helper unavailable
 - [x] Platform detection: macOS → VirtualizationBackend → OCI fallback
 - [x] `linux_platform_resolver` for cross-platform multi-arch OCI image pulling
+- [ ] **virtio-fs**: mount host rootfs folder directly as guest `/` (no disk image creation — replaces `hdiutil`/`dd`)
+  - `VZVirtioFileSystemDeviceConfiguration` + `VZSharedDirectory` → guest mounts via `mount -t virtiofs`
+  - ลดเวลา: ไม่ต้องจองพื้นที่ล่วงหน้า, ไม่ต้องแปลง rootfs → block device
 - [ ] `k3rs-vmm` helper binary — wraps Virtualization.framework Obj-C API
-- [ ] virtio-blk: mount rootfs as VM root disk
-- [ ] virtio-net: NAT networking for pod connectivity
+- [ ] `k3rs-init` — minimal Rust PID 1 for guest VM:
+  - Mount `/proc`, `/sys`, `/dev`, `/tmp`
+  - Set hostname, configure networking
+  - Reap zombie processes (waitpid loop)
+  - `exec()` container entrypoint from OCI config
+  - Static-linked, ~100KB binary (musl target)
+- [ ] virtio-net: NAT networking via `VZNATNetworkDeviceAttachment`
 - [ ] virtio-console: stream stdout/stderr to host log file
 - [ ] virtio-vsock: host ↔ guest exec channel
-- [ ] Bundle minimal Linux kernel (`vmlinux`) + initrd
+- [ ] Bundle minimal Linux kernel (`vmlinux`) + initrd containing `k3rs-init`
 - [ ] Sub-second boot time on Apple Silicon
 
 **FirecrackerBackend (Linux):**
 - [ ] `firecracker.rs` — implement `RuntimeBackend` trait
 - [ ] Firecracker binary auto-download via `installer.rs`
 - [ ] KVM detection (`/dev/kvm` availability check)
-- [ ] `virtio-blk`: OCI rootfs mounted as root disk (ext4/squashfs)
+- [ ] **virtiofsd** shared FS: mount host rootfs folder as guest `/` via FUSE → virtio-fs (alternative to virtio-blk)
 - [ ] `virtio-net`: TAP-based networking with iptables NAT
 - [ ] Serial console for stdout/stderr log streaming
 - [ ] `vsock` for exec channel (host CID 2 ↔ guest)
+- [ ] `k3rs-init` as PID 1 inside guest (same binary as macOS, cross-compiled)
 - [ ] Jailer support for production hardening (chroot + seccomp + cgroups)
 - [ ] Platform detection: Linux + `/dev/kvm` → FirecrackerBackend → OCI fallback
 - [ ] Sub-125ms boot time, ~5MB memory overhead per microVM
@@ -513,6 +528,8 @@ k3rs/
 ├── cmd/
 │   ├── k3rs-server/            # Control plane binary
 │   ├── k3rs-agent/             # Data plane binary
+│   ├── k3rs-init/              # Guest PID 1 — minimal init for microVMs (static musl binary)
+│   ├── k3rs-vmm/               # Host VMM helper — Virtualization.framework Obj-C bridge (macOS)
 │   ├── k3rs-ui/                # Management UI (Dioxus web app)
 │   └── k3rsctl/                # CLI tool binary
 ├── pkg/
@@ -538,9 +555,10 @@ k3rs/
   - **Linux (microVM)**: [Firecracker](https://firecracker-microvm.github.io/) — KVM-based microVM, sub-125ms boot
   - **Linux (OCI)**: `youki` / `crun` — auto-download from GitHub Releases (fallback when KVM unavailable)
   - **Image Pull**: `oci-client` (OCI Distribution spec — Docker Hub, GHCR, etc.)
-  - **Rootfs**: `tar` + `flate2` (extract image layers → filesystem)
+  - **Rootfs**: `tar` + `flate2` (extract image layers → host folder), mounted in guest via `virtio-fs`
+  - **Guest Init**: `k3rs-init` — static Rust binary as PID 1 (mount `/proc`/`/sys`/`/dev`, reap zombies, `exec()` entrypoint)
   - **WebSocket Exec**: `tokio-tungstenite` for interactive container sessions
-  - **VM Comms**: `virtio-vsock` for host ↔ guest exec, `virtio-console` for log streaming
+  - **VM Comms**: `virtio-fs` for rootfs sharing, `virtio-vsock` for exec, `virtio-console` for logs
 - **Storage**: `slatedb` (Embedded key-value database on object storage)
 - **Object Storage**: S3 / Cloudflare R2 / MinIO / Local filesystem
 - **DNS**: `hickory-dns` (Embedded DNS resolver)
