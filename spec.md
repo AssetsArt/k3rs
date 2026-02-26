@@ -258,12 +258,13 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
     - Integrated into `POST /api/v1/namespaces/:ns/pods` — auto-schedules on creation
     - 3 unit tests: round-robin, skip-not-ready, no-eligible-nodes
 - [x] Implement container runtime with pluggable `RuntimeBackend` trait.
-    - `ContainerRuntime` with platform-aware detection: Virtualization.framework (macOS) → OCI (Linux)
-    - Backends: `VirtualizationBackend` (Apple Virtualization.framework microVM), `OciBackend` (youki/crun)
+    - `ContainerRuntime` with platform-aware detection: Virtualization.framework (macOS) → Firecracker / OCI (Linux)
+    - Backends: `VirtualizationBackend` (macOS), `FirecrackerBackend` (Linux microVM), `OciBackend` (youki/crun)
     - API: `pull_image`, `create_container`, `start_container`, `stop_container`, `exec_in_container`, `runtime_info`
     - Image pulling via `oci-client`, rootfs extraction via `tar`+`flate2`
     - macOS: boots lightweight Linux microVM per pod via Virtualization.framework (sub-second boot, virtio devices)
-    - Linux: runtime via `youki`/`crun`, auto-download from GitHub Releases via `installer.rs`
+    - Linux (microVM): Firecracker microVM per pod — KVM-based, sub-125ms boot, virtio-net/virtio-blk
+    - Linux (OCI): runtime via `youki`/`crun`, auto-download from GitHub Releases via `installer.rs`
     - `PodRuntimeInfo` on each Pod tracks which backend + version is running it
     - Runtime Management API: `GET /api/v1/runtime`, `PUT /api/v1/runtime/upgrade`
 - [x] Implement RBAC engine and API authentication flow.
@@ -416,20 +417,22 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
 #### Container Runtime (`pkg/container/`) — Virtualization + OCI 🏆
 Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` trait:
 
-**Architecture:** macOS = Virtualization.framework microVM | Linux = `oci-client` → `tar`+`flate2` → `youki`/`crun`
+**Architecture:** macOS = Virtualization.framework microVM | Linux = Firecracker microVM or `youki`/`crun` OCI runtime
 
 | Module | Crate | Purpose |
 |--------|-------|---------|
 | `image.rs` | `oci-client` | Pull images from OCI registries (Docker Hub, GHCR) |
 | `rootfs.rs` | `tar` + `flate2` | Extract image layers → rootfs + generate `config.json` |
-| `backend.rs` | — | `RuntimeBackend` trait + Virtualization/OCI backends |
+| `backend.rs` | — | `RuntimeBackend` trait + Virtualization/Firecracker/OCI backends |
 | `virt.rs` | `virtualization-rs` | macOS Virtualization.framework microVM backend |
+| `firecracker.rs` | — | Linux Firecracker microVM backend (KVM) |
 | `runtime.rs` | — | `ContainerRuntime` facade with platform detection + `exec_in_container` |
-| `installer.rs` | `reqwest` | Auto-download youki/crun from GitHub Releases (Linux) |
+| `installer.rs` | `reqwest` | Auto-download youki/crun/firecracker from GitHub Releases (Linux) |
 
 **Backends:**
-- [x] `VirtualizationBackend` — Firecracker-like lightweight Linux microVM via Apple Virtualization.framework (macOS)
-- [x] `OciBackend` — invokes `youki`/`crun` via `std::process::Command` (Linux)
+- [x] `VirtualizationBackend` — lightweight Linux microVM via Apple Virtualization.framework (macOS)
+- [ ] `FirecrackerBackend` — Firecracker microVM via KVM (Linux) — sub-125ms boot, virtio devices
+- [x] `OciBackend` — invokes `youki`/`crun` via `std::process::Command` (Linux fallback)
 
 **VirtualizationBackend Details (macOS):**
 - Uses Apple Virtualization.framework via `virtualization-rs` Rust crate
@@ -443,7 +446,21 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 - Requires macOS 12+ (Monterey) and Apple Hypervisor.framework entitlement
 - Supports both Apple Silicon (ARM64) and Intel (x86_64) Macs
 
+**FirecrackerBackend Details (Linux):**
+- Uses [Firecracker](https://github.com/firecracker-microvm/firecracker) microVM monitor (KVM-based)
+- Sub-125ms boot time, minimal memory footprint (~5MB overhead per microVM)
+- Each pod runs in an isolated microVM with virtio devices:
+  - `virtio-blk`: OCI rootfs mounted as root disk (ext4/squashfs)
+  - `virtio-net`: TAP-based networking with iptables NAT
+  - Serial console for stdout/stderr log streaming
+  - `vsock` for exec channel (host CID 2 ↔ guest)
+- Jailer support for production hardening (chroot + seccomp + cgroups)
+- Requires Linux 4.14+ with KVM enabled (`/dev/kvm`)
+- Supports x86_64 and aarch64
+- Detection priority: `FirecrackerBackend` (if `/dev/kvm` available) → `OciBackend` (fallback)
+
 **Auto-download (Linux):**
+- firecracker latest from `github.com/firecracker-microvm/firecracker/releases`
 - youki v0.6.0 from `github.com/youki-dev/youki/releases`
 - crun 1.26 from `github.com/containers/crun/releases`
 - Configurable: `ensure_runtime(Some("crun"))` — default: youki
@@ -495,7 +512,7 @@ k3rs/
 │   └── k3rsctl/                # CLI tool binary
 ├── pkg/
 │   ├── api/                    # Axum HTTP API & handlers
-│   ├── container/              # Container runtime (Virtualization.framework microVM on macOS, youki/crun on Linux)
+│   ├── container/              # Container runtime (Virtualization.framework on macOS, Firecracker/youki/crun on Linux)
 │   ├── controllers/            # Control loops (Deployment, ReplicaSet, DaemonSet, Job, CronJob, HPA)
 │   ├── metrics/                # Prometheus-format metrics registry
 │   ├── network/                # CNI (pod networking) & DNS (svc.cluster.local)
@@ -512,8 +529,9 @@ k3rs/
 - **HTTP API**: `axum`
 - **Management UI**: `dioxus` 0.7 (Rust-native fullstack web framework, WASM SPA)
 - **Container Runtime**: Platform-aware with pluggable `RuntimeBackend` trait
-  - **macOS**: Virtualization.framework microVM backend via `virtualization-rs` (Firecracker-like lightweight Linux VMs)
-  - **Linux**: OCI runtimes (`youki` / `crun`) — auto-download from GitHub Releases
+  - **macOS**: Virtualization.framework microVM backend via `virtualization-rs` (lightweight Linux VMs)
+  - **Linux (microVM)**: [Firecracker](https://firecracker-microvm.github.io/) — KVM-based microVM, sub-125ms boot
+  - **Linux (OCI)**: `youki` / `crun` — auto-download from GitHub Releases (fallback when KVM unavailable)
   - **Image Pull**: `oci-client` (OCI Distribution spec — Docker Hub, GHCR, etc.)
   - **Rootfs**: `tar` + `flate2` (extract image layers → filesystem)
   - **WebSocket Exec**: `tokio-tungstenite` for interactive container sessions
