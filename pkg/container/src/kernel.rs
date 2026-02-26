@@ -3,7 +3,13 @@
 //! Manages the minimal Linux kernel + initrd required to boot
 //! lightweight VMs via Virtualization.framework (macOS) or Firecracker (Linux).
 //!
-//! ## Setup
+//! ## Quick Setup
+//!
+//! ```bash
+//! ./scripts/build-kernel.sh   # Builds kernel + initrd (uses Docker on macOS)
+//! ```
+//!
+//! ## Manual Setup
 //!
 //! The VirtualizationBackend needs a Linux kernel compiled with virtio drivers.
 //! Place these files in the kernel directory (default: `/var/lib/k3rs/`):
@@ -177,7 +183,7 @@ impl KernelManager {
             self.kernel_path().display()
         );
         warn!(
-            "See build instructions in `pkg/container/src/kernel.rs` (module doc comment at top of file)"
+            "Run `./scripts/build-kernel.sh` to build the kernel, or see `pkg/container/src/kernel.rs` for manual instructions"
         );
     }
 
