@@ -9,14 +9,14 @@
 //! - **virtio-console**: stdout/stderr log streaming to host file
 //! - **virtio-vsock**: host ↔ guest exec channel (port 5555)
 //!
-//! The actual VM lifecycle is managed by the `k3rs-vmm` helper binary (Swift)
-//! which wraps the Virtualization.framework Obj-C API. This module communicates
-//! with k3rs-vmm via CLI invocations.
+//! The actual VM lifecycle is managed by the `k3rs-vmm` helper binary (Rust)
+//! which wraps the Virtualization.framework via objc2-virtualization. This module
+//! communicates with k3rs-vmm via CLI invocations.
 //!
 //! ## Architecture
 //! ```text
 //! ┌─────────────────────────┐     ┌──────────────────────┐
-//! │  VirtualizationBackend  │     │  k3rs-vmm (Swift)    │
+//! │  VirtualizationBackend  │     │  k3rs-vmm (Rust)     │
 //! │  (Rust, this module)    │────▶│  Virtualization.fwk  │
 //! │                         │     │  - VZLinuxBootLoader  │
 //! │  • create → rootfs dir  │     │  - virtio-fs share   │
@@ -245,7 +245,7 @@ impl VirtualizationBackend {
             None => {
                 anyhow::bail!(
                     "k3rs-vmm helper not found — cannot boot VM {}. \
-                     Build it: cd cmd/k3rs-vmm && swift build -c release",
+                     Build it: cargo build -p k3rs-vmm --release",
                     id
                 );
             }
