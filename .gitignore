@@ -1,5 +1,6 @@
 /target
 *.log
 *.pid
-cmd/k3rs-vmm/.build
+./cmd/k3rs-vmm/.build/*
 build
+.build
