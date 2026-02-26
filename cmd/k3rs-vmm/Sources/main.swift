@@ -177,15 +177,16 @@ struct List: ParsableCommand {
 
     func run() {
         let fm = FileManager.default
+        let vmsDir = "/tmp/k3rs-runtime/vms"
 
         // Find active VMs by scanning IPC socket files
-        guard let contents = try? fm.contentsOfDirectory(atPath: "/tmp") else {
+        guard let contents = try? fm.contentsOfDirectory(atPath: vmsDir) else {
             print("No VMs found")
             return
         }
 
         let sockets = contents
-            .filter { $0.hasPrefix("k3rs-vmm-") && $0.hasSuffix(".sock") }
+            .filter { $0.hasPrefix("vmm-") && $0.hasSuffix(".sock") }
             .sorted()
 
         if sockets.isEmpty {
@@ -198,7 +199,7 @@ struct List: ParsableCommand {
 
         for sockFile in sockets {
             let id = sockFile
-                .replacingOccurrences(of: "k3rs-vmm-", with: "")
+                .replacingOccurrences(of: "vmm-", with: "")
                 .replacingOccurrences(of: ".sock", with: "")
 
             var pid = "-"
@@ -223,7 +224,7 @@ struct List: ParsableCommand {
             } else {
                 state = "stale"
                 // Clean up stale socket
-                try? fm.removeItem(atPath: "/tmp/\(sockFile)")
+                try? fm.removeItem(atPath: "\(vmsDir)/\(sockFile)")
             }
 
             print("\(id.padding(toLength: 38, withPad: " ", startingAt: 0))  \(pid.padding(toLength: 8, withPad: " ", startingAt: 0))  \(state)")

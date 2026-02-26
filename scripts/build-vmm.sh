@@ -46,11 +46,17 @@ TARGET_DIR="$PROJECT_ROOT/target/$BUILD_CONFIG"
 mkdir -p "$TARGET_DIR"
 cp "$BINARY_PATH" "$TARGET_DIR/k3rs-vmm"
 
+# Sign with virtualization entitlement (required for Virtualization.framework)
+ENTITLEMENTS="$VMM_DIR/k3rs-vmm.entitlements"
+if [ -f "$ENTITLEMENTS" ]; then
+    codesign --entitlements "$ENTITLEMENTS" --force -s - "$TARGET_DIR/k3rs-vmm"
+    echo "[build-vmm] Signed with virtualization entitlement"
+else
+    echo "[build-vmm] WARNING: entitlements file not found, binary won't be able to boot VMs"
+fi
+
 echo "[build-vmm] Built: $TARGET_DIR/k3rs-vmm"
 echo "[build-vmm] Size: $(du -h "$TARGET_DIR/k3rs-vmm" | cut -f1)"
 
 # Verify the binary
 "$TARGET_DIR/k3rs-vmm" --help 2>/dev/null || true
-
-# Copy to Cargo target directory for k3rs-agent to find
-cp $VMM_DIR/.build/$SWIFT_CONFIG/k3rs-vmm $PROJECT_ROOT/target/$SWIFT_CONFIG/k3rs-vmm
