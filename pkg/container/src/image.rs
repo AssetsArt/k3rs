@@ -1,7 +1,7 @@
 use anyhow::Result;
 use oci_client::{Client, Reference, client::ClientConfig};
 use std::path::{Path, PathBuf};
-use tracing::{info, warn};
+use tracing::info;
 
 /// Manages OCI image pulling and layer caching.
 pub struct ImageManager {
@@ -49,74 +49,54 @@ impl ImageManager {
 
         tokio::fs::create_dir_all(&image_dir).await?;
 
-        // Pull image manifest and layers
+        // Pull platform-resolved image manifest (auto-resolves multi-arch ImageIndex)
         let auth = oci_client::secrets::RegistryAuth::Anonymous;
-        let _accepted_media_types = [
-            oci_client::manifest::OCI_IMAGE_MEDIA_TYPE.to_string(),
-            oci_client::manifest::IMAGE_MANIFEST_MEDIA_TYPE.to_string(),
-            oci_client::manifest::IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE.to_string(),
-        ];
 
-        let (manifest, _digest) = self
+        let (img_manifest, _digest) = self
             .client
-            .pull_manifest(&reference, &auth)
+            .pull_image_manifest(&reference, &auth)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to pull manifest for {}: {}", image_ref, e))?;
 
         // Save manifest
-        let manifest_json = serde_json::to_string_pretty(&manifest)?;
+        let manifest_json = serde_json::to_string_pretty(&img_manifest)?;
         tokio::fs::write(image_dir.join("manifest.json"), &manifest_json).await?;
 
         // Pull each layer blob
-        match &manifest {
-            oci_client::manifest::OciManifest::Image(img_manifest) => {
-                let layers_dir = image_dir.join("layers");
-                tokio::fs::create_dir_all(&layers_dir).await?;
+        let layers_dir = image_dir.join("layers");
+        tokio::fs::create_dir_all(&layers_dir).await?;
 
-                for (i, layer) in img_manifest.layers.iter().enumerate() {
-                    let layer_path = layers_dir.join(format!("layer_{}.tar.gz", i));
-                    if layer_path.exists() {
-                        info!("  Layer {} already cached", i);
-                        continue;
-                    }
-
-                    info!(
-                        "  Pulling layer {}/{}: {} ({})",
-                        i + 1,
-                        img_manifest.layers.len(),
-                        layer.digest,
-                        format_size(layer.size as u64),
-                    );
-
-                    let mut layer_data = Vec::new();
-                    self.client
-                        .pull_blob(&reference, &layer, &mut layer_data)
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!("Failed to pull layer {}: {}", layer.digest, e)
-                        })?;
-
-                    tokio::fs::write(&layer_path, &layer_data).await?;
-                }
-
-                // Also pull the config blob
-                let mut config_data = Vec::new();
-                self.client
-                    .pull_blob(&reference, &img_manifest.config, &mut config_data)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to pull config: {}", e))?;
-                tokio::fs::write(image_dir.join("config.json"), &config_data).await?;
+        for (i, layer) in img_manifest.layers.iter().enumerate() {
+            let layer_path = layers_dir.join(format!("layer_{}.tar.gz", i));
+            if layer_path.exists() {
+                info!("  Layer {} already cached", i);
+                continue;
             }
-            oci_client::manifest::OciManifest::ImageIndex(index) => {
-                // For multi-arch images, save the index and pick the first matching manifest
-                warn!(
-                    "Image index with {} manifests — using first entry",
-                    index.manifests.len()
-                );
-                let manifest_json = serde_json::to_string_pretty(&index)?;
-                tokio::fs::write(image_dir.join("index.json"), &manifest_json).await?;
-            }
+
+            info!(
+                "  Pulling layer {}/{}: {} ({})",
+                i + 1,
+                img_manifest.layers.len(),
+                layer.digest,
+                format_size(layer.size as u64),
+            );
+
+            let mut layer_data = Vec::new();
+            self.client
+                .pull_blob(&reference, layer, &mut layer_data)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to pull layer {}: {}", layer.digest, e))?;
+
+            tokio::fs::write(&layer_path, &layer_data).await?;
         }
+
+        // Also pull the config blob
+        let mut config_data = Vec::new();
+        self.client
+            .pull_blob(&reference, &img_manifest.config, &mut config_data)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to pull config: {}", e))?;
+        tokio::fs::write(image_dir.join("config.json"), &config_data).await?;
 
         info!("Image {} pulled to {}", image_ref, image_dir.display());
         Ok(image_dir)

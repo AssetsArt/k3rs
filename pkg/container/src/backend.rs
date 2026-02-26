@@ -72,6 +72,20 @@ impl RuntimeBackend for StubBackend {
         Ok(())
     }
 
+    async fn create_from_image(&self, id: &str, image: &str, command: &[String]) -> Result<()> {
+        tracing::info!(
+            "[stub] create container from image: id={}, image={}, cmd={:?}",
+            id,
+            image,
+            command
+        );
+        Ok(())
+    }
+
+    fn handles_images(&self) -> bool {
+        true // Stub skips real image pulling
+    }
+
     async fn start(&self, id: &str) -> Result<()> {
         tracing::info!("[stub] start container: {}", id);
         Ok(())
@@ -415,7 +429,7 @@ impl RuntimeBackend for OciBackend {
         tracing::info!("[{}] create container: {}", self.runtime_name, id);
         let output = self
             .cmd()
-            .args(["create", id, "--bundle", &bundle.to_string_lossy()])
+            .args(["create", "--bundle", &bundle.to_string_lossy(), id])
             .output()?;
 
         if !output.status.success() {
