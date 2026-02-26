@@ -445,7 +445,8 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
         // --- Boot Loader ---
         let bootLoader = VZLinuxBootLoader(kernelURL: URL(fileURLWithPath: config.kernelPath))
         // Kernel command line: mount virtio-fs as root, use k3rs-init as init
-        bootLoader.commandLine = "console=hvc0 root=virtiofs:rootfs rw init=/sbin/init"
+        // Try hvc0 AND ttyS0 for serial console output
+        bootLoader.commandLine = "console=hvc0 console=ttyS0 root=virtiofs:rootfs rw init=/sbin/init"
         if let initrdPath = config.initrdPath {
             bootLoader.initialRamdiskURL = URL(fileURLWithPath: initrdPath)
         }
@@ -483,6 +484,13 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
             consoleConfig.attachment = VZFileHandleSerialPortAttachment(
                 fileHandleForReading: devNull,
                 fileHandleForWriting: logFileHandle
+            )
+        } else {
+            // Write console to stdout if no log path provided
+            let devNull = FileHandle(forReadingAtPath: "/dev/null")!
+            consoleConfig.attachment = VZFileHandleSerialPortAttachment(
+                fileHandleForReading: devNull,
+                fileHandleForWriting: FileHandle.standardOutput
             )
         }
         vzConfig.serialPorts = [consoleConfig]
