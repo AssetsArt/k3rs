@@ -1,5 +1,5 @@
 use anyhow::Result;
-use oci_client::{Client, Reference, client::ClientConfig};
+use oci_client::{Client, Reference, client::ClientConfig, manifest::ImageIndexEntry};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -18,6 +18,9 @@ impl ImageManager {
             protocol: oci_client::client::ClientProtocol::HttpsExcept(vec![
                 "localhost:5000".to_string(),
             ]),
+            // Always resolve to linux/<host_arch> — container images are Linux-based,
+            // even when running on macOS (VirtualizationBackend boots a Linux microVM).
+            platform_resolver: Some(Box::new(linux_platform_resolver)),
             ..Default::default()
         };
         let client = Client::new(config);
@@ -238,4 +241,36 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+/// Platform resolver that picks the first `linux/<host_arch>` entry from an
+/// OCI Image Index. This ensures images resolve correctly on macOS (where the
+/// host OS is `darwin`) since all container images target Linux.
+fn linux_platform_resolver(manifests: &[ImageIndexEntry]) -> Option<String> {
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        other => other,
+    };
+
+    // First try: exact match linux/<host_arch>
+    for entry in manifests {
+        if let Some(platform) = &entry.platform
+            && platform.os == "linux"
+            && platform.architecture == arch
+        {
+            return Some(entry.digest.clone());
+        }
+    }
+
+    // Fallback: any linux image
+    for entry in manifests {
+        if let Some(platform) = &entry.platform
+            && platform.os == "linux"
+        {
+            return Some(entry.digest.clone());
+        }
+    }
+
+    None
 }
