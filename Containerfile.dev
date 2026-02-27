@@ -28,13 +28,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ─── Rust targets + tools ────────────────────────────────────────────
-# Limit parallel jobs to avoid OOM when compiling heavy deps (e.g. apple-codesign, ring)
-ENV CARGO_BUILD_JOBS=1
+ARG DIOXUS_CLI_VERSION=0.7.3
 RUN rustup target add \
     x86_64-unknown-linux-musl \
     aarch64-unknown-linux-musl \
     && cargo install cargo-watch --locked \
-    && cargo install dioxus-cli --locked
+    && ( ARCH=$(uname -m); \
+         if [ "$ARCH" = "aarch64" ]; then \
+           curl -fsSL "https://github.com/DioxusLabs/dioxus/releases/download/v${DIOXUS_CLI_VERSION}/dx-aarch64-unknown-linux-gnu.tar.gz" -o /tmp/dx.tar.gz \
+             && tar xzf /tmp/dx.tar.gz -C /tmp \
+             && install -m 755 /tmp/dx /usr/local/bin/dx 2>/dev/null || install -m 755 /tmp/dx-*/dx /usr/local/bin/dx \
+             && rm -rf /tmp/dx /tmp/dx.tar.gz /tmp/dx-*; \
+         else \
+           CARGO_BUILD_JOBS=1 cargo install dioxus-cli --locked --version "=${DIOXUS_CLI_VERSION}"; \
+         fi ) \
+    && dx --version
 
 # ─── Install youki (OCI runtime) ─────────────────────────────────────
 ARG YOUKI_VERSION=0.6.0
