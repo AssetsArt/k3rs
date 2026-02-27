@@ -10,7 +10,7 @@
 #   - cargo-watch for auto-reload dev loop
 #   - Full workspace mount at /workspace
 
-FROM rust:1.86-bookworm
+FROM rust:latest
 
 # ─── System deps ──────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN rustup target add \
     x86_64-unknown-linux-musl \
     aarch64-unknown-linux-musl \
-    && cargo install cargo-watch
+    && cargo install cargo-watch --locked
 
 # ─── Install youki (OCI runtime) ─────────────────────────────────────
 ARG YOUKI_VERSION=0.6.0
