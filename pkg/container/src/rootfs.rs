@@ -189,18 +189,6 @@ impl RootfsManager {
                     "type": "mqueue",
                     "source": "mqueue",
                     "options": ["nosuid", "noexec", "nodev"]
-                },
-                {
-                    "destination": "/sys",
-                    "type": "sysfs",
-                    "source": "sysfs",
-                    "options": ["nosuid", "noexec", "nodev", "ro"]
-                },
-                {
-                    "destination": "/sys/fs/cgroup",
-                    "type": "cgroup",
-                    "source": "cgroup",
-                    "options": ["nosuid", "noexec", "nodev", "relatime", "ro"]
                 }
             ],
             "linux": {
@@ -209,8 +197,7 @@ impl RootfsManager {
                     { "type": "ipc" },
                     { "type": "uts" },
                     { "type": "mount" },
-                    { "type": "user" },
-                    { "type": "network" }
+                    { "type": "user" }
                 ],
                 "uidMappings": [
                     { "containerID": 0, "hostID": host_uid(), "size": 1 }
@@ -356,8 +343,6 @@ mod tests {
         assert!(mount_dests.contains(&"/dev/pts"));
         assert!(mount_dests.contains(&"/dev/shm"));
         assert!(mount_dests.contains(&"/dev/mqueue"));
-        assert!(mount_dests.contains(&"/sys"));
-        assert!(mount_dests.contains(&"/sys/fs/cgroup"));
     }
 
     #[test]
@@ -390,8 +375,8 @@ mod tests {
             .iter()
             .map(|n| n["type"].as_str().unwrap())
             .collect();
-        assert!(ns_types.contains(&"network"));
         assert!(ns_types.contains(&"pid"));
         assert!(ns_types.contains(&"user"));
+        assert!(ns_types.contains(&"mount"));
     }
 }
