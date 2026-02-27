@@ -57,5 +57,5 @@ chrono = { version = "0.4", features = ["serde"] }
 serde_yaml = "0.9"
 tokio-stream = { version = "0.1", features = ["sync"] }
 sysinfo = "0.38"
-tokio-tungstenite = { version = "0.26", features = ["connect"] }
+tokio-tungstenite = { version = "0.28", features = ["connect"] }
 futures-util = "0.3"
