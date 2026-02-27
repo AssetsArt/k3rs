@@ -358,6 +358,256 @@ Using [SlateDB](https://slatedb.io/) as the state store provides unique advantag
 - **Scalable Storage**: Object storage backends scale to virtually unlimited capacity without re-sharding.
 - **Built for LSM**: SlateDB's LSM-tree architecture is well-suited for write-heavy orchestration workloads (frequent pod/node status updates).
 
+## Backup & Restore
+
+### Overview
+
+k3rs provides snapshot-based backup and restore of all cluster state. Since all state lives in SlateDB as key-value pairs, a backup is a **full logical dump** of every key-value pair plus PKI certificates — exported as a single portable file.
+
+> **Design Principle**: Backup captures **logical state** (JSON key-value pairs), not physical storage files. This makes backups portable across storage backends (local → S3, S3 → R2) and SlateDB versions.
+
+### Backup Scope
+
+| Data | Included | Source |
+|---|---|---|
+| Nodes | ✅ | `/registry/nodes/*` |
+| Namespaces | ✅ | `/registry/namespaces/*` |
+| Pods | ✅ | `/registry/pods/*` |
+| Deployments | ✅ | `/registry/deployments/*` |
+| ReplicaSets | ✅ | `/registry/replicasets/*` |
+| Services | ✅ | `/registry/services/*` |
+| Endpoints | ✅ | `/registry/endpoints/*` |
+| ConfigMaps | ✅ | `/registry/configmaps/*` |
+| Secrets | ✅ (encrypted) | `/registry/secrets/*` |
+| RBAC (Roles/Bindings) | ✅ | `/registry/rbac/*` |
+| Ingresses | ✅ | `/registry/ingresses/*` |
+| NetworkPolicies | ✅ | `/registry/networkpolicies/*` |
+| ResourceQuotas | ✅ | `/registry/resourcequotas/*` |
+| PVCs | ✅ | `/registry/pvcs/*` |
+| HPAs | ✅ | `/registry/hpa/*` |
+| DaemonSets | ✅ | `/registry/daemonsets/*` |
+| Jobs / CronJobs | ✅ | `/registry/jobs/*`, `/registry/cronjobs/*` |
+| Leader Leases | ❌ (ephemeral) | `/registry/leases/*` |
+| Events | ❌ (ephemeral) | `/events/*` |
+| PKI (CA cert + key) | ✅ | In-memory `ClusterCA` → exported to backup |
+
+### Backup File Format
+
+Backups are stored as **gzip-compressed JSON** (`.k3rs-backup.json.gz`):
+
+```json
+{
+  "version": 1,
+  "created_at": "2026-02-27T15:50:00Z",
+  "cluster_id": "abc-123",
+  "server_version": "0.1.0",
+  "key_count": 142,
+  "pki": {
+    "ca_cert_pem": "-----BEGIN CERTIFICATE-----\n...",
+    "ca_key_pem": "-----BEGIN PRIVATE KEY-----\n..."
+  },
+  "entries": [
+    {
+      "key": "/registry/namespaces/default",
+      "value": { "name": "default", "id": "...", "created_at": "..." }
+    },
+    {
+      "key": "/registry/pods/default/nginx-abc",
+      "value": { "name": "nginx-abc", "namespace": "default", "spec": { ... } }
+    }
+  ]
+}
+```
+
+**Why JSON (not binary)?**
+- Human-readable → easy to inspect and debug
+- Portable → no dependency on SlateDB internals or SST file format
+- Diffable → can compare two backups with standard tools
+- Filterable → can selectively restore by parsing entries
+
+### Backup Triggers
+
+#### Manual Backup (API + CLI)
+
+```bash
+# Create a backup
+k3rsctl backup create --output ./cluster-backup.k3rs-backup.json.gz
+
+# Create with custom name
+k3rsctl backup create --name "pre-upgrade" --output /backups/
+
+# List existing backups (from backup directory)
+k3rsctl backup list --dir /backups/
+
+# Backup info (key count, size, created time)
+k3rsctl backup inspect ./cluster-backup.k3rs-backup.json.gz
+```
+
+**Server API:**
+```
+POST /api/v1/cluster/backup          → returns backup as streaming download
+GET  /api/v1/cluster/backup/status   → returns last backup info (time, key_count, size)
+```
+
+#### Scheduled Backup
+
+Configured via server config or CLI flags:
+
+```yaml
+# config.yaml
+backup:
+  enabled: true
+  schedule: "0 */6 * * *"        # every 6 hours (cron format)
+  dir: /var/lib/k3rs/backups     # local backup directory
+  retention: 7                    # keep last 7 backups, delete older
+```
+
+```bash
+k3rs-server --backup-dir /var/lib/k3rs/backups --backup-interval 6h --backup-retention 7
+```
+
+**Backup Controller** (runs on leader only):
+- Interval-based trigger (no full cron parser needed — just hour interval)
+- Writes backup to `--backup-dir` with timestamp filename: `backup-20260227-155000.k3rs-backup.json.gz`
+- Rotates old backups: keeps `--backup-retention` most recent, deletes the rest
+- Emits cluster event on success/failure
+
+### Restore Procedure
+
+Restore replaces **all** cluster state with the backup contents via a running Server — **no server stop required**.
+
+#### How It Works
+
+```
+k3rsctl restore --from ./backup.gz
+   │
+   ▼
+POST /api/v1/cluster/restore  (multipart upload)
+   │
+   ▼ (Leader Server)
+1. Validate backup (version, format)
+2. Pause all controllers + scheduler
+3. Wipe all /registry/ keys
+4. Import all entries from backup
+5. Reload PKI (CA cert + key)
+6. Resume controllers + scheduler
+7. Emit restore-complete event
+   │
+   ▼
+Controllers reconcile from restored state
+Agents detect state change via watch/heartbeat
+```
+
+#### CLI
+
+```bash
+# Restore (ส่ง backup ไป Server ผ่าน API ทำให้เลย)
+k3rsctl restore --from ./cluster-backup.k3rs-backup.json.gz
+
+# Dry-run (แสดงว่าจะ restore อะไรบ้าง ไม่เขียนจริง)
+k3rsctl restore --from ./cluster-backup.k3rs-backup.json.gz --dry-run
+
+# Force (ไม่ถาม confirm)
+k3rsctl restore --from ./cluster-backup.k3rs-backup.json.gz --force
+```
+
+#### Server API
+
+```
+POST /api/v1/cluster/restore           → multipart upload backup file, returns restore result
+POST /api/v1/cluster/restore/dry-run   → validate + show diff without applying
+```
+
+#### Multi-Server Mode
+
+เมื่อมี Server หลายตัว share SlateDB (object storage):
+
+```
+                        ┌─────────────┐
+k3rsctl restore ──────► │  Leader     │  ← restore runs here only
+                        │  Server     │
+                        └──────┬──────┘
+                               │ wipe + import to SlateDB
+                               │ (shared object storage)
+                               ▼
+                ┌──────────────────────────────┐
+                │     SlateDB (Object Storage) │
+                └──────────────────────────────┘
+                    ▲              ▲
+                    │              │
+            ┌───────┴──┐   ┌──────┴───┐
+            │ Follower  │   │ Follower │  ← detect + reload
+            │ Server A  │   │ Server B │
+            └──────────┘   └──────────┘
+```
+
+| เรื่อง | วิธีจัดการ |
+|---|---|
+| **ใครทำ restore?** | Leader เท่านั้น — followers reject restore request ด้วย `409 Conflict` |
+| **Followers รู้ได้ไง?** | Leader เขียน `/registry/_restore/epoch` key (monotonic counter) — followers watch key นี้ |
+| **Followers ทำอะไร?** | เมื่อเห็น epoch เปลี่ยน → pause controllers → reload state from SlateDB → resume |
+| **ระหว่าง restore?** | Leader ตอบ API requests ด้วย `503 Service Unavailable` (ประมาณ 1-5 วินาที) |
+| **Agent ได้รับผลกระทบ?** | ไม่ — containers ยัง run อยู่ (fail-static), agent reconnect + reconcile หลัง restore |
+
+#### Restore Flow (Leader, Internal)
+
+1. **Validate** — parse backup, check `version`, verify key format
+2. **Set restore mode** — write `/registry/_restore/status = "in_progress"`, reject new writes
+3. **Pause controllers** — stop all 8 controllers + scheduler
+4. **Wipe** — scan + delete all `/registry/` keys (except `_restore/`)
+5. **Import** — batch write all entries from backup to SlateDB
+6. **Reload PKI** — update in-memory `ClusterCA` with restored cert + key
+7. **Bump epoch** — write `/registry/_restore/epoch` → triggers follower reload
+8. **Resume** — restart controllers + scheduler, clear restore mode, emit event
+
+#### Post-Restore Behavior
+
+| Component | Behavior |
+|---|---|
+| **Nodes** | Restored as `Unknown` → transition to `Ready` when Agents reconnect |
+| **Pods** | Restored with last-known status → Agent reconciles actual vs desired |
+| **Deployments** | Controllers resume reconciliation from restored generation |
+| **Services/DNS** | Restored → Agents rebuild routing tables on next sync |
+| **Secrets** | Restored (still encrypted at rest) |
+| **PKI** | CA cert + key restored → existing Agent certs remain valid |
+| **Leader Lease** | Kept (current leader continues) |
+| **Running Containers** | ✅ Not affected (fail-static) |
+
+#### Selective Restore (future)
+
+```bash
+# Restore เฉพาะ namespace
+k3rsctl restore --from ./backup.gz --namespace production
+
+# Restore เฉพาะ resource types
+k3rsctl restore --from ./backup.gz --resources deployments,services,configmaps
+```
+
+### Implementation Checklist
+
+#### Backup
+- [ ] `StateStore::snapshot()` — scan all `/registry/` prefixes, return `Vec<(key, value)>`
+- [ ] `BackupFile` struct — version, metadata, PKI, entries with serde Serialize/Deserialize
+- [ ] `create_backup(state_store, ca)` → compress to `.k3rs-backup.json.gz`
+- [ ] `validate_backup(path)` → parse, verify version and key format
+- [ ] `POST /api/v1/cluster/backup` API endpoint — streaming backup download
+- [ ] `GET /api/v1/cluster/backup/status` API endpoint
+- [ ] `BackupController` — scheduled backup with rotation on leader node
+- [ ] `k3rsctl backup create` CLI command
+- [ ] `k3rsctl backup list` / `k3rsctl backup inspect` CLI commands
+- [ ] Server config: `--backup-dir`, `--backup-interval`, `--backup-retention`
+
+#### Restore
+- [ ] `POST /api/v1/cluster/restore` endpoint — multipart upload, leader-only
+- [ ] `POST /api/v1/cluster/restore/dry-run` endpoint — validate + diff
+- [ ] Restore engine: pause → wipe → import → reload PKI → bump epoch → resume
+- [ ] `/registry/_restore/epoch` key — monotonic counter for follower detection
+- [ ] `/registry/_restore/status` key — `in_progress` / `completed` with timestamp
+- [ ] Follower: watch `_restore/epoch` → pause → reload → resume
+- [ ] `503 Service Unavailable` during restore window
+- [ ] `k3rsctl restore --from <file>` CLI command (with `--force`, `--dry-run`)
+
+
 ## Implementation Phases
 
 ### Phase 1: Core Foundation & Communication
