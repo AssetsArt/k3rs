@@ -536,8 +536,8 @@ k3rsctl restore ──────► │  Leader     │  ← restore runs here
                     ▲              ▲
                     │              │
             ┌───────┴──┐   ┌──────┴───┐
-            │ Follower  │   │ Follower │  ← detect + reload
-            │ Server A  │   │ Server B │
+            │ Follower │   │ Follower │  ← detect + reload
+            │ Server A │   │ Server B │
             └──────────┘   └──────────┘
 ```
 
