@@ -145,6 +145,9 @@ For testing OCI runtimes (youki/crun) and Firecracker on Linux:
 # With KVM passthrough (Firecracker)
 ./scripts/dev-podman.sh --kvm shell
 
+# With ALL
+./scripts/dev-podman.sh --all --ui
+
 # Environment variables
 K3RS_RUNTIME=crun ./scripts/dev-podman.sh agent   # use crun instead of youki
 K3RS_KVM=1 ./scripts/dev-podman.sh agent           # enable KVM

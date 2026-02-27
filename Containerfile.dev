@@ -31,7 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN rustup target add \
     x86_64-unknown-linux-musl \
     aarch64-unknown-linux-musl \
-    && cargo install cargo-watch --locked
+    && cargo install cargo-watch --locked \
+    && cargo install dioxus-cli --locked
 
 # ─── Install youki (OCI runtime) ─────────────────────────────────────
 ARG YOUKI_VERSION=0.6.0

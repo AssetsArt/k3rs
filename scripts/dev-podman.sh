@@ -6,6 +6,7 @@ set -euo pipefail
 # Usage:
 #   ./scripts/dev-podman.sh                    # interactive shell
 #   ./scripts/dev-podman.sh --all              # server + agent in tmux (KVM enabled)
+#   ./scripts/dev-podman.sh --all --ui         # server + agent + UI in tmux
 #   ./scripts/dev-podman.sh server             # run k3rs-server inside container
 #   ./scripts/dev-podman.sh agent              # run k3rs-agent inside container
 #   ./scripts/dev-podman.sh test               # run cargo test
@@ -15,6 +16,7 @@ set -euo pipefail
 # Environment:
 #   K3RS_RUNTIME=youki|crun    OCI runtime to use (default: youki)
 #   K3RS_KVM=1                 Enable KVM passthrough
+#   K3RS_UI=1                  Enable UI (dx serve)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -22,6 +24,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONTAINER_NAME="k3rs-dev"
 IMAGE_NAME="k3rs-dev"
 ENABLE_KVM="${K3RS_KVM:-0}"
+ENABLE_UI="${K3RS_UI:-0}"
 RUNTIME="${K3RS_RUNTIME:-youki}"
 
 # Parse flags first, then positional
@@ -29,6 +32,7 @@ ARGS=()
 for arg in "$@"; do
     case "$arg" in
         --kvm)  ENABLE_KVM=1 ;;
+        --ui)   ENABLE_UI=1 ;;
         --all)  ARGS+=("all") ; ENABLE_KVM=1 ;;
         *)      ARGS+=("$arg") ;;
     esac
@@ -79,6 +83,14 @@ build_run_args() {
         -p 6444:6444
         -p 10256:10256
         # DNS port 5353 is internal only (conflicts with macOS mDNS)
+    )
+
+    # UI port
+    if [ "$ENABLE_UI" = "1" ]; then
+        args+=(-p 8080:8080)
+    fi
+
+    args+=(
         # Environment
         -e "RUST_LOG=debug"
         -e "K3RS_RUNTIME=$RUNTIME"
@@ -123,9 +135,10 @@ run_container() {
             echo -e "${CYAN}🚀 Starting full dev environment (server + agent) in tmux${NC}"
             echo -e "   Runtime: ${GREEN}$RUNTIME${NC}"
             echo -e "   KVM: $([ "$ENABLE_KVM" = "1" ] && echo -e "${GREEN}enabled${NC}" || echo -e "${YELLOW}disabled${NC}")"
+            echo -e "   UI: $([ "$ENABLE_UI" = "1" ] && echo -e "${GREEN}enabled (port 8080)${NC}" || echo -e "${YELLOW}disabled${NC}")"
             echo ""
             # shellcheck disable=SC2086
-            podman run $run_args "$IMAGE_NAME" bash -c '
+            podman run -e K3RS_UI="$ENABLE_UI" $run_args "$IMAGE_NAME" bash -c '
                 echo "🔨 Building workspace first..."
                 cargo build --workspace 2>&1 | tail -3
 
@@ -142,6 +155,12 @@ run_container() {
                     "RUST_LOG=debug cargo watch \
                         -x \"run --bin k3rs-agent -- --server http://127.0.0.1:6443 --token demo-token-123 --node-name node-1 --proxy-port 6444 --service-proxy-port 10256 --dns-port 5353\" \
                         -w pkg/ -w cmd/k3rs-agent -i \"target/*\""
+
+                # UI pane (if enabled)
+                if [ "${K3RS_UI:-0}" = "1" ]; then
+                    tmux split-window -v -t "$SESSION" \
+                        "cd cmd/k3rs-ui && dx serve --addr 0.0.0.0 --port 8080"
+                fi
 
                 tmux select-pane -t 0
                 exec tmux attach-session -t "$SESSION"
@@ -201,11 +220,13 @@ run_container() {
             echo ""
             echo "Flags:"
             echo "  --kvm    Passthrough /dev/kvm for Firecracker"
+            echo "  --ui     Enable Dioxus UI (dx serve on port 8080)"
             echo "  --all    Same as 'all' mode"
             echo ""
             echo "Environment:"
             echo "  K3RS_RUNTIME=youki|crun   OCI runtime (default: youki)"
             echo "  K3RS_KVM=1                Enable KVM passthrough"
+            echo "  K3RS_UI=1                 Enable UI"
             exit 1
             ;;
     esac
@@ -218,6 +239,7 @@ echo "╠═══════════════════════�
 echo "║  Mode     : $MODE"
 echo "║  Runtime  : $RUNTIME"
 echo "║  KVM      : $([ "$ENABLE_KVM" = "1" ] && echo "enabled" || echo "disabled")"
+echo "║  UI       : $([ "$ENABLE_UI" = "1" ] && echo "enabled" || echo "disabled")"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo
 
