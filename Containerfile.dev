@@ -10,7 +10,8 @@
 #   - cargo-watch for auto-reload dev loop
 #   - Full workspace mount at /workspace
 
-FROM rust:1.93.1-bookworm
+# Trixie has glibc 2.39 so pre-built dx (dioxus-cli) binary runs; Bookworm has 2.36
+FROM rust:1.93.1-trixie
 
 # ─── System deps ──────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
