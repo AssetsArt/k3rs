@@ -80,7 +80,7 @@ pub struct OciBackend {
 impl OciBackend {
     /// Auto-detect an OCI runtime in $PATH.
     /// Priority: youki or crun
-    pub fn detect() -> Result<Self> {
+    pub fn detect(data_dir: &std::path::Path) -> Result<Self> {
         for name in &["youki", "crun"] {
             if let Ok(output) = std::process::Command::new("which").arg(name).output()
                 && output.status.success()
@@ -92,8 +92,8 @@ impl OciBackend {
                     runtime_path: path,
                     runtime_name: name.to_string(),
                     runtime_version: version,
-                    log_dir: PathBuf::from("/var/run/k3rs/containers"),
-                    state_dir: PathBuf::from("/var/run/k3rs/state"),
+                    log_dir: data_dir.join("logs"),
+                    state_dir: data_dir.join("state"),
                 });
             }
         }
@@ -103,7 +103,7 @@ impl OciBackend {
     }
 
     /// Create with an explicit runtime path.
-    pub fn new(runtime_path: &str) -> Self {
+    pub fn new(runtime_path: &str, data_dir: &std::path::Path) -> Self {
         let name = std::path::Path::new(runtime_path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -113,8 +113,8 @@ impl OciBackend {
             runtime_path: runtime_path.to_string(),
             runtime_name: name,
             runtime_version: version,
-            log_dir: PathBuf::from("/var/run/k3rs/containers"),
-            state_dir: PathBuf::from("/var/run/k3rs/state"),
+            log_dir: data_dir.join("logs"),
+            state_dir: data_dir.join("state"),
         }
     }
 

@@ -213,10 +213,10 @@ impl RootfsManager {
                     { "type": "network" }
                 ],
                 "uidMappings": [
-                    { "containerID": 0, "hostID": host_uid(), "size": 65536 }
+                    { "containerID": 0, "hostID": host_uid(), "size": 1 }
                 ],
                 "gidMappings": [
-                    { "containerID": 0, "hostID": host_gid(), "size": 65536 }
+                    { "containerID": 0, "hostID": host_gid(), "size": 1 }
                 ],
                 "maskedPaths": [
                     "/proc/acpi",

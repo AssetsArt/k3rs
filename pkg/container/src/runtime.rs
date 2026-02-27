@@ -67,7 +67,7 @@ impl ContainerRuntime {
                         e
                     );
                     // Fallback to OCI if available
-                    match OciBackend::detect() {
+                    match OciBackend::detect(&data_dir) {
                         Ok(oci) => {
                             info!("Using OCI runtime: {} ({})", oci.name(), oci.version());
                             Arc::new(oci)
@@ -85,7 +85,7 @@ impl ContainerRuntime {
             }
         } else {
             // Linux: try OCI runtimes
-            match OciBackend::detect() {
+            match OciBackend::detect(&data_dir) {
                 Ok(oci) => {
                     info!("Using OCI runtime: {} ({})", oci.name(), oci.version());
                     Arc::new(oci)
@@ -95,7 +95,7 @@ impl ContainerRuntime {
                     info!("No OCI runtime in PATH — attempting auto-download...");
                     match crate::installer::RuntimeInstaller::ensure_runtime(None).await {
                         Ok(path) => {
-                            let oci = OciBackend::new(&path.to_string_lossy());
+                            let oci = OciBackend::new(&path.to_string_lossy(), &data_dir);
                             info!(
                                 "Using auto-downloaded runtime: {} ({})",
                                 oci.name(),
@@ -179,7 +179,7 @@ impl ContainerRuntime {
         );
 
         let container_dir = self.data_dir.join("containers").join(id);
-        let log_path = format!("/var/run/k3rs/containers/{}/stdout.log", id);
+        let log_path = self.data_dir.join("logs").join(id).join("stdout.log");
 
         if self.backend.handles_images() {
             // Backend handles images internally (e.g. Docker)
@@ -197,9 +197,12 @@ impl ContainerRuntime {
             self.backend.create(id, &container_dir).await?;
         }
 
-        // Track in container store
-        self.store
-            .track(id, image, &container_dir.to_string_lossy(), &log_path);
+        self.store.track(
+            id,
+            image,
+            &container_dir.to_string_lossy(),
+            &log_path.to_string_lossy(),
+        );
 
         info!(
             "Container {} created successfully via {}",
