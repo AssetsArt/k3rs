@@ -78,7 +78,7 @@ build_run_args() {
         -p 6443:6443
         -p 6444:6444
         -p 10256:10256
-        -p 5353:5353/udp
+        # DNS port 5353 is internal only (conflicts with macOS mDNS)
         # Environment
         -e "RUST_LOG=debug"
         -e "K3RS_RUNTIME=$RUNTIME"
