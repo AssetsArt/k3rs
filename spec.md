@@ -431,11 +431,12 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 | Module | Crate | Purpose |
 |--------|-------|---------|
 | `image.rs` | `oci-client` | Pull images from OCI registries (Docker Hub, GHCR) with `linux_platform_resolver` for cross-platform multi-arch resolution |
-| `rootfs.rs` | `tar` + `flate2` | Extract image layers → rootfs + generate `config.json` |
-| `backend.rs` | — | `RuntimeBackend` trait + Virtualization/Firecracker/OCI backends |
+| `rootfs.rs` | `tar` + `flate2` | Extract image layers → rootfs + generate production OCI `config.json` (capabilities, mounts, rlimits, masked/readonly paths, env passthrough) |
+| `backend.rs` | — | `RuntimeBackend` trait + Virtualization/Firecracker/OCI backends + PID tracking + `state()` query |
+| `state.rs` | `dashmap` | In-process container state tracking (`ContainerStore`) — lifecycle: Created → Running → Stopped/Failed |
 | `virt.rs` | `virtualization-rs` | macOS Virtualization.framework microVM backend |
 | `firecracker.rs` | `kvm-ioctls`, `vm-memory`, `linux-loader` | Linux Firecracker microVM backend (KVM) via [rust-vmm](https://github.com/rust-vmm/community) |
-| `runtime.rs` | — | `ContainerRuntime` facade with platform detection + `exec_in_container` |
+| `runtime.rs` | — | `ContainerRuntime` facade with platform detection, `ContainerStore` integration, `exec_in_container`, `cleanup_container` |
 | `installer.rs` | `reqwest` | Auto-download youki/crun/firecracker from GitHub Releases (Linux) |
 
 **Guest Components:**
@@ -448,7 +449,21 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 **Backends:**
 - [x] `VirtualizationBackend` — lightweight Linux microVM via Apple Virtualization.framework (macOS)
 - [ ] `FirecrackerBackend` — Firecracker microVM via KVM (Linux) — sub-125ms boot, virtio devices
-- [x] `OciBackend` — invokes `youki`/`crun` via `std::process::Command` (Linux fallback)
+- [x] `OciBackend` — invokes `youki`/`crun` via `std::process::Command` (Linux) — complete implementation, no mocking/fallback
+
+**OCI Runtime Features (Complete):**
+- [x] Production OCI `config.json` — Docker-compatible Linux capabilities (14 caps), 7 mount points (`/proc`, `/dev`, `/dev/pts`, `/dev/shm`, `/dev/mqueue`, `/sys`, `/sys/fs/cgroup`), `RLIMIT_NOFILE`, masked paths (`/proc/kcore`, `/proc/keys`, etc.), readonly paths (`/proc/bus`, `/proc/sys`, etc.)
+- [x] Container state tracking — `ContainerStore` via `DashMap` (concurrent in-process): tracks lifecycle state, PID, exit code, timestamps, log/bundle paths
+- [x] PID tracking — `--pid-file` flag on create, `--root` custom state directory
+- [x] OCI runtime state query — `state()` method runs `<runtime> state <id>`, parses JSON
+- [x] Log directory management — structured log paths at `/var/run/k3rs/containers/<id>/stdout.log`
+- [x] Environment variable passthrough — pod `ContainerSpec.env` → OCI `config.json` `process.env`
+- [x] User namespace with 65536 UID/GID range mapping (rootless-compatible)
+- [x] Network namespace isolation
+- [x] Agent pod sync — proper error handling with `status_message` reporting (`ImagePullError`, `ContainerCreateError`, `ContainerStartError`)
+- [x] Pod type — `status_message: Option<String>` + `container_id: Option<String>` fields
+- [x] Container cleanup — `cleanup_container()` for failed containers (stop + delete + remove from store + cleanup dir)
+- [x] Container spec passthrough — command, args, env from pod spec into OCI container
 
 **VirtualizationBackend (macOS):**
 - [x] Apple Virtualization.framework via `virtualization-rs` Rust crate
@@ -514,6 +529,8 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 
 **Pod Runtime Tracking:**
 - [x] `PodRuntimeInfo { backend, version }` on each Pod
+- [x] `Pod.status_message` — human-readable error reason for failed containers
+- [x] `Pod.container_id` — maps pod to its OCI container ID for runtime queries
 
 #### Image & Registry Management (multi-node)
 - [x] `GET /api/v1/images` — aggregated image list across all nodes

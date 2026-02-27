@@ -167,6 +167,8 @@ impl DaemonSetController {
             namespace: ns.to_string(),
             spec: ds.spec.template.clone(),
             status: PodStatus::Scheduled,
+            status_message: None,
+            container_id: None,
             node_name: Some(node.name.clone()),
             labels: ds.spec.node_selector.clone(),
             owner_ref: Some(ds.id.clone()),

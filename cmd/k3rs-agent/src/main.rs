@@ -282,27 +282,95 @@ async fn main() -> anyhow::Result<()> {
                         && (pod.status == pkg_types::pod::PodStatus::Scheduled
                             || pod.status == pkg_types::pod::PodStatus::ContainerCreating)
                     {
-                        info!("Found new scheduled pod: {}", pod.name);
+                        info!(
+                            "Found new scheduled pod: {} (image: {})",
+                            pod.name,
+                            pod.spec
+                                .containers
+                                .first()
+                                .map(|c| c.image.as_str())
+                                .unwrap_or("unknown")
+                        );
 
-                        // 1. Pull Image (using first container for demo)
-                        let image = pod
-                            .spec
-                            .containers
-                            .first()
-                            .map(|c| c.image.as_str())
-                            .unwrap_or("alpine:latest");
-                        let _ = runtime.pull_image(image).await;
-
-                        // 2. Create & Start
-                        let _ = runtime.create_container(&pod.id, image, &[]).await;
-                        let _ = runtime.start_container(&pod.id).await;
-
-                        // 3. Update Status
                         let status_url = format!(
                             "{}/api/v1/namespaces/{}/pods/{}/status",
                             sync_server_base.trim_end_matches('/'),
                             ns,
                             pod.id
+                        );
+
+                        // Extract container spec from pod
+                        let container_spec = pod.spec.containers.first();
+                        let image = container_spec
+                            .map(|c| c.image.as_str())
+                            .unwrap_or("alpine:latest");
+                        let command: Vec<String> = container_spec
+                            .map(|c| {
+                                let mut cmd = c.command.clone();
+                                cmd.extend(c.args.clone());
+                                cmd
+                            })
+                            .unwrap_or_default();
+                        let env = container_spec.map(|c| c.env.clone()).unwrap_or_default();
+
+                        // 1. Pull Image
+                        info!("[pod:{}] Pulling image: {}", pod.name, image);
+                        if let Err(e) = runtime.pull_image(image).await {
+                            error!("[pod:{}] Image pull failed: {}", pod.name, e);
+                            let _ = sync_client
+                                .put(&status_url)
+                                .header("Authorization", format!("Bearer {}", sync_token))
+                                .json(&serde_json::json!({
+                                    "status": "Failed",
+                                    "status_message": format!("ImagePullError: {}", e)
+                                }))
+                                .send()
+                                .await;
+                            continue;
+                        }
+
+                        // 2. Create Container
+                        info!("[pod:{}] Creating container: {}", pod.name, pod.id);
+                        if let Err(e) = runtime
+                            .create_container(&pod.id, image, &command, &env)
+                            .await
+                        {
+                            error!("[pod:{}] Container creation failed: {}", pod.name, e);
+                            let _ = sync_client
+                                .put(&status_url)
+                                .header("Authorization", format!("Bearer {}", sync_token))
+                                .json(&serde_json::json!({
+                                    "status": "Failed",
+                                    "status_message": format!("ContainerCreateError: {}", e)
+                                }))
+                                .send()
+                                .await;
+                            continue;
+                        }
+
+                        // 3. Start Container
+                        info!("[pod:{}] Starting container: {}", pod.name, pod.id);
+                        if let Err(e) = runtime.start_container(&pod.id).await {
+                            error!("[pod:{}] Container start failed: {}", pod.name, e);
+                            // Clean up the created-but-failed container
+                            let _ = runtime.cleanup_container(&pod.id).await;
+                            let _ = sync_client
+                                .put(&status_url)
+                                .header("Authorization", format!("Bearer {}", sync_token))
+                                .json(&serde_json::json!({
+                                    "status": "Failed",
+                                    "status_message": format!("ContainerStartError: {}", e)
+                                }))
+                                .send()
+                                .await;
+                            continue;
+                        }
+
+                        // 4. Success — Update Status to Running
+                        info!(
+                            "[pod:{}] Container running via {}",
+                            pod.name,
+                            runtime.backend_name()
                         );
                         let new_status = pkg_types::pod::PodStatus::Running;
                         let _ = sync_client

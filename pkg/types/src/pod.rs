@@ -118,6 +118,12 @@ pub struct Pod {
     pub namespace: String,
     pub spec: PodSpec,
     pub status: PodStatus,
+    /// Human-readable reason for the current status (e.g. error message on failure).
+    #[serde(default)]
+    pub status_message: Option<String>,
+    /// The OCI container ID for this pod (set by agent after container creation).
+    #[serde(default)]
+    pub container_id: Option<String>,
     /// The node this pod is assigned to (set by scheduler)
     #[serde(default)]
     pub node_name: Option<String>,

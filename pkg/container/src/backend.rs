@@ -1,6 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::state::ContainerStateInfo;
 
 /// Pluggable runtime backend trait.
 /// Implementations: Virtualization (macOS), OCI (youki/crun on Linux).
@@ -20,7 +22,7 @@ pub trait RuntimeBackend: Send + Sync {
     async fn create_from_image(&self, id: &str, image: &str, command: &[String]) -> Result<()> {
         let _ = (id, image, command);
         Err(anyhow::anyhow!(
-            "create_from_image not supported by this backend"
+            "create_from_image not supported by this backend",
         ))
     }
 
@@ -42,6 +44,16 @@ pub trait RuntimeBackend: Send + Sync {
     /// Execute a command inside a running container.
     async fn exec(&self, id: &str, command: &[&str]) -> Result<String>;
 
+    /// Query the real OCI runtime state of a container.
+    /// Runs `<runtime> state <id>` and parses the JSON output.
+    async fn state(&self, id: &str) -> Result<ContainerStateInfo> {
+        // Default: not implemented — subclasses override
+        Err(anyhow::anyhow!(
+            "state query not supported by backend for container {}",
+            id
+        ))
+    }
+
     /// Whether this backend handles image pulling internally (e.g. Docker).
     fn handles_images(&self) -> bool {
         false
@@ -51,6 +63,7 @@ pub trait RuntimeBackend: Send + Sync {
 // ─── OCI Backend ────────────────────────────────────────────────
 
 /// OCI-compliant runtime backend — invokes youki or crun.
+/// No mocking — every method is a real subprocess call to the OCI runtime.
 pub struct OciBackend {
     /// Path to the OCI runtime binary (e.g. /usr/bin/youki)
     runtime_path: String,
@@ -58,6 +71,10 @@ pub struct OciBackend {
     runtime_name: String,
     /// Version string
     runtime_version: String,
+    /// Directory for container log files
+    log_dir: PathBuf,
+    /// Root directory for runtime state (--root flag)
+    state_dir: PathBuf,
 }
 
 impl OciBackend {
@@ -75,11 +92,13 @@ impl OciBackend {
                     runtime_path: path,
                     runtime_name: name.to_string(),
                     runtime_version: version,
+                    log_dir: PathBuf::from("/var/run/k3rs/containers"),
+                    state_dir: PathBuf::from("/var/run/k3rs/state"),
                 });
             }
         }
         Err(anyhow::anyhow!(
-            "No OCI runtime found in PATH. Install youki or crun."
+            "No OCI runtime found in PATH. Install youki or crun.",
         ))
     }
 
@@ -94,7 +113,39 @@ impl OciBackend {
             runtime_path: runtime_path.to_string(),
             runtime_name: name,
             runtime_version: version,
+            log_dir: PathBuf::from("/var/run/k3rs/containers"),
+            state_dir: PathBuf::from("/var/run/k3rs/state"),
         }
+    }
+
+    /// Get the log directory for a container.
+    pub fn container_log_dir(&self, id: &str) -> PathBuf {
+        self.log_dir.join(id)
+    }
+
+    /// Get the stdout log path for a container.
+    pub fn container_log_path(&self, id: &str) -> PathBuf {
+        self.log_dir.join(id).join("stdout.log")
+    }
+
+    /// Get the PID file path for a container.
+    pub fn container_pid_file(&self, id: &str) -> PathBuf {
+        self.log_dir.join(id).join("container.pid")
+    }
+
+    /// Read the PID from the PID file, if it exists.
+    pub fn read_pid(&self, id: &str) -> Option<u32> {
+        let pid_path = self.container_pid_file(id);
+        std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+    }
+
+    /// Ensure the log directory exists for a container.
+    pub fn ensure_log_dir(&self, id: &str) -> Result<PathBuf> {
+        let dir = self.container_log_dir(id);
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
     }
 
     fn get_version(path: &str) -> String {
@@ -114,7 +165,10 @@ impl OciBackend {
     }
 
     fn cmd(&self) -> std::process::Command {
-        std::process::Command::new(&self.runtime_path)
+        let mut cmd = std::process::Command::new(&self.runtime_path);
+        // Use a custom root directory for state — avoids permission issues
+        cmd.arg("--root").arg(&self.state_dir);
+        cmd
     }
 }
 
@@ -130,15 +184,44 @@ impl RuntimeBackend for OciBackend {
 
     async fn create(&self, id: &str, bundle: &Path) -> Result<()> {
         tracing::info!("[{}] create container: {}", self.runtime_name, id);
+
+        // Ensure log directory and state directory exist
+        self.ensure_log_dir(id)?;
+        std::fs::create_dir_all(&self.state_dir).map_err(|e| {
+            tracing::warn!("[{}] failed to create state dir: {}", self.runtime_name, e);
+            e
+        })?;
+
+        let pid_file = self.container_pid_file(id);
+
         let output = self
             .cmd()
-            .args(["create", "--bundle", &bundle.to_string_lossy(), id])
+            .args([
+                "create",
+                "--bundle",
+                &bundle.to_string_lossy(),
+                "--pid-file",
+                &pid_file.to_string_lossy(),
+                id,
+            ])
             .output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("create failed: {}", stderr);
+            anyhow::bail!(
+                "[{}] create failed for {}: {}",
+                self.runtime_name,
+                id,
+                stderr.trim()
+            );
         }
+
+        tracing::info!(
+            "[{}] container {} created (pid-file: {})",
+            self.runtime_name,
+            id,
+            pid_file.display()
+        );
         Ok(())
     }
 
@@ -148,8 +231,24 @@ impl RuntimeBackend for OciBackend {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("start failed: {}", stderr);
+            anyhow::bail!(
+                "[{}] start failed for {}: {}",
+                self.runtime_name,
+                id,
+                stderr.trim()
+            );
         }
+
+        // Log the PID if captured
+        if let Some(pid) = self.read_pid(id) {
+            tracing::info!(
+                "[{}] container {} started with PID {}",
+                self.runtime_name,
+                id,
+                pid
+            );
+        }
+
         Ok(())
     }
 
@@ -172,8 +271,20 @@ impl RuntimeBackend for OciBackend {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("delete warning: {}", stderr);
+            tracing::warn!(
+                "[{}] delete warning for {}: {}",
+                self.runtime_name,
+                id,
+                stderr.trim()
+            );
         }
+
+        // Clean up log/pid files
+        let log_dir = self.container_log_dir(id);
+        if log_dir.exists() {
+            let _ = std::fs::remove_dir_all(&log_dir);
+        }
+
         Ok(())
     }
 
@@ -189,9 +300,8 @@ impl RuntimeBackend for OciBackend {
     }
 
     async fn logs(&self, id: &str, tail: usize) -> Result<Vec<String>> {
-        // OCI runtimes don't have a built-in log command.
-        // Logs are read from the container's stdout log file.
-        let log_path = format!("/var/run/k3rs/containers/{}/stdout.log", id);
+        // Read from the container's stdout log file.
+        let log_path = self.container_log_path(id);
         match tokio::fs::read_to_string(&log_path).await {
             Ok(content) => {
                 let lines: Vec<String> = content
@@ -206,8 +316,10 @@ impl RuntimeBackend for OciBackend {
                 Ok(lines)
             }
             Err(_) => Ok(vec![format!(
-                "[{}] No logs available for {}",
-                self.runtime_name, id
+                "[{}] No logs available for container {} (log path: {})",
+                self.runtime_name,
+                id,
+                log_path.display()
             )]),
         }
     }
@@ -230,7 +342,60 @@ impl RuntimeBackend for OciBackend {
         if output.status.success() {
             Ok(stdout)
         } else {
-            anyhow::bail!("{} exec failed: {}{}", self.runtime_name, stdout, stderr)
+            anyhow::bail!(
+                "[{}] exec failed in {}: {}{}",
+                self.runtime_name,
+                id,
+                stdout,
+                stderr
+            )
         }
+    }
+
+    async fn state(&self, id: &str) -> Result<ContainerStateInfo> {
+        let output = self.cmd().args(["state", id]).output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "[{}] state query failed for {}: {}",
+                self.runtime_name,
+                id,
+                stderr.trim()
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // Parse the OCI runtime state JSON
+        // Format: { "ociVersion": "...", "id": "...", "status": "...", "pid": N, "bundle": "..." }
+        let state: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
+            anyhow::anyhow!(
+                "[{}] failed to parse state JSON for {}: {} (raw: {})",
+                self.runtime_name,
+                id,
+                e,
+                stdout.trim()
+            )
+        })?;
+
+        Ok(ContainerStateInfo {
+            id: state
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(id)
+                .to_string(),
+            status: state
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            pid: state.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            bundle: state
+                .get("bundle")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
     }
 }

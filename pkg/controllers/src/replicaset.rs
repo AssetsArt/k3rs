@@ -239,6 +239,8 @@ impl ReplicaSetController {
             namespace: ns.to_string(),
             spec: rs.spec.template.clone(),
             status: PodStatus::Pending,
+            status_message: None,
+            container_id: None,
             node_name: None,
             labels: rs.spec.selector.clone(),
             owner_ref: Some(rs.id.clone()),
@@ -271,7 +273,12 @@ impl ReplicaSetController {
 
         // Create container
         self.runtime
-            .create_container(container_id, image, command)
+            .create_container(
+                container_id,
+                image,
+                command,
+                &std::collections::HashMap::new(),
+            )
             .await?;
 
         // Start container

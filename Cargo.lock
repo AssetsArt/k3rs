@@ -5397,6 +5397,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "dashmap",
  "flate2",
  "oci-client",
  "oci-spec",

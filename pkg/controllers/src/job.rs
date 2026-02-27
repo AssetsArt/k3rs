@@ -165,6 +165,8 @@ impl JobController {
             namespace: ns.to_string(),
             spec: job.spec.template.clone(),
             status: PodStatus::Pending,
+            status_message: None,
+            container_id: None,
             node_name: None,
             labels: HashMap::new(),
             owner_ref: Some(job.id.clone()),
