@@ -710,17 +710,13 @@ pub async fn pod_logs(
     let key = format!("/registry/pods/{}/{}", ns, pod_name);
     match state.store.get(&key).await {
         Ok(Some(_)) => {
-            // Use the container runtime to fetch real logs
-            let logs = match state.container_runtime.container_logs(&pod_name, 100).await {
-                Ok(lines) => lines,
-                Err(e) => vec![format!("[error] Failed to get logs: {}", e)],
-            };
-            let resp = PodLogResponse {
-                pod_name: pod_name.clone(),
-                namespace: ns,
-                logs,
-            };
-            (StatusCode::OK, Json(resp)).into_response()
+            // Pod logs are available from the Agent node where the pod is running.
+            // The server (control plane) does not have access to container logs.
+            (
+                StatusCode::NOT_IMPLEMENTED,
+                "Pod logs are available from the Agent node where the pod is running.",
+            )
+                .into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

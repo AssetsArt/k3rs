@@ -4,36 +4,37 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use pkg_container::image::ImageInfo;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::AppState;
+
+/// Image metadata reported by agents.
+/// Mirrors `pkg_container::image::ImageInfo` but defined locally
+/// so pkg-api does not depend on pkg-container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageInfo {
+    pub id: String,
+    pub node_name: String,
+    pub size: u64,
+    pub size_human: String,
+    pub layers: usize,
+    pub architecture: String,
+    pub os: String,
+    pub created: String,
+}
 
 /// List all cached OCI images across all nodes.
 /// Aggregates from state store where agents report their images.
 pub async fn list_images(State(state): State<AppState>) -> impl IntoResponse {
     let mut all_images: Vec<ImageInfo> = Vec::new();
 
-    // 1. Collect images reported by agents (stored per-node in state)
+    // Collect images reported by agents (stored per-node in state)
     if let Ok(entries) = state.store.list_prefix("/registry/images/").await {
         for (_key, value) in entries {
             if let Ok(node_images) = serde_json::from_slice::<Vec<ImageInfo>>(&value) {
                 all_images.extend(node_images);
             }
-        }
-    }
-
-    // 2. Also include local server images (if any)
-    if let Ok(local_images) = state.container_runtime.list_images().await {
-        let hostname = std::env::var("HOSTNAME")
-            .or_else(|_| std::env::var("COMPUTERNAME"))
-            .unwrap_or_else(|_| "server".to_string());
-        for mut img in local_images {
-            if img.node_name.is_empty() {
-                img.node_name = hostname.clone();
-            }
-            all_images.push(img);
         }
     }
 
@@ -73,39 +74,35 @@ pub async fn report_node_images(
     }
 }
 
-/// Pull an image from a registry (on the server node).
+/// Pull an image from a registry.
+/// Image pulling is handled by the Agent where the pod will run.
 #[derive(Debug, Deserialize)]
 pub struct PullImageRequest {
     pub image: String,
 }
 
-pub async fn pull_image(
-    State(state): State<AppState>,
-    Json(req): Json<PullImageRequest>,
-) -> impl IntoResponse {
-    info!("Pull image request: {}", req.image);
-    match state.container_runtime.pull_image(&req.image).await {
-        Ok(()) => (
-            StatusCode::OK,
-            format!("Image {} pulled successfully", req.image),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to pull {}: {}", req.image, e),
-        )
-            .into_response(),
-    }
+pub async fn pull_image(Json(req): Json<PullImageRequest>) -> impl IntoResponse {
+    info!(
+        "Pull image request: {} — not available on control plane",
+        req.image
+    );
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        "Image pull is handled by the Agent node. \
+         The server (control plane) does not pull or cache images.",
+    )
 }
 
-/// Delete a cached image by ID (from server node).
-pub async fn delete_image(
-    State(state): State<AppState>,
-    AxumPath(image_id): AxumPath<String>,
-) -> impl IntoResponse {
-    info!("Delete image request: {}", image_id);
-    match state.container_runtime.delete_image(&image_id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
-    }
+/// Delete a cached image by ID.
+/// Image management is handled by the Agent.
+pub async fn delete_image(AxumPath(image_id): AxumPath<String>) -> impl IntoResponse {
+    info!(
+        "Delete image request: {} — not available on control plane",
+        image_id
+    );
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        "Image delete is handled by the Agent node. \
+         The server (control plane) does not manage local images.",
+    )
 }

@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 pkg-types = { path = "../types" }
 pkg-state = { path = "../state" }
-pkg-container = { path = "../container" }
 pkg-scheduler = { path = "../scheduler" }
 tokio = { workspace = true }
 tracing = { workspace = true }

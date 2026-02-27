@@ -14,7 +14,7 @@ use crate::handlers::{
     cluster, drain, endpoints, exec, heartbeat, images, processes, register, resources, watch,
 };
 use crate::request_id::request_id_middleware;
-use pkg_container::ContainerRuntime;
+
 use pkg_controllers::cronjob::CronJobController;
 use pkg_controllers::daemonset::DaemonSetController;
 use pkg_controllers::deployment::DeploymentController;
@@ -58,9 +58,6 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         "Whether this server is the leader (1=leader, 0=follower)",
     );
 
-    // Initialize container runtime
-    let container_runtime = Arc::new(ContainerRuntime::new(None::<&str>).await?);
-
     let state = AppState {
         store: store.clone(),
         ca: Arc::new(ca),
@@ -68,7 +65,6 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         listen_addr: config.addr.to_string(),
         scheduler: Some(scheduler.clone()),
         metrics,
-        container_runtime,
     };
 
     // Seed default namespaces
@@ -84,7 +80,6 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     // Start leader-gated controllers
     let ctrl_store = store.clone();
     let ctrl_scheduler = scheduler.clone();
-    let ctrl_runtime = state.container_runtime.clone();
     tokio::spawn(async move {
         let mut rx = leader_rx;
         loop {
@@ -99,12 +94,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             let handles = vec![
                 NodeController::new(ctrl_store.clone()).start(),
                 DeploymentController::new(ctrl_store.clone()).start(),
-                ReplicaSetController::new(
-                    ctrl_store.clone(),
-                    ctrl_scheduler.clone(),
-                    ctrl_runtime.clone(),
-                )
-                .start(),
+                ReplicaSetController::new(ctrl_store.clone(), ctrl_scheduler.clone()).start(),
                 DaemonSetController::new(ctrl_store.clone()).start(),
                 JobController::new(ctrl_store.clone(), ctrl_scheduler.clone()).start(),
                 CronJobController::new(ctrl_store.clone()).start(),

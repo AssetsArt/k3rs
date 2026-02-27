@@ -5368,7 +5368,6 @@ dependencies = [
  "anyhow",
  "axum 0.8.8",
  "chrono",
- "pkg-container",
  "pkg-controllers",
  "pkg-metrics",
  "pkg-pki",
@@ -5415,7 +5414,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "pkg-container",
  "pkg-scheduler",
  "pkg-state",
  "pkg-types",

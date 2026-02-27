@@ -5,7 +5,6 @@ pub mod server;
 
 use std::sync::Arc;
 
-use pkg_container::ContainerRuntime;
 use pkg_pki::ca::ClusterCA;
 use pkg_scheduler::Scheduler;
 use pkg_state::client::StateStore;
@@ -19,5 +18,4 @@ pub struct AppState {
     pub listen_addr: String,
     pub scheduler: Option<Arc<Scheduler>>,
     pub metrics: Arc<pkg_metrics::MetricsRegistry>,
-    pub container_runtime: Arc<ContainerRuntime>,
 }

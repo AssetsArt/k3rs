@@ -1,8 +1,7 @@
 use chrono::Utc;
-use pkg_container::ContainerRuntime;
 use pkg_scheduler::Scheduler;
 use pkg_state::client::StateStore;
-use pkg_types::pod::{Pod, PodRuntimeInfo, PodStatus};
+use pkg_types::pod::{Pod, PodStatus};
 use pkg_types::replicaset::ReplicaSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,23 +10,21 @@ use uuid::Uuid;
 
 /// Controller that reconciles ReplicaSets into Pods.
 /// Ensures the desired number of pod replicas are running.
+///
+/// Note: This controller only manages the desired state (create/delete Pod records
+/// in the state store). The actual container lifecycle (pull image, create container,
+/// start container) is handled by the Agent on each node.
 pub struct ReplicaSetController {
     store: StateStore,
     scheduler: Arc<Scheduler>,
-    runtime: Arc<ContainerRuntime>,
     check_interval: Duration,
 }
 
 impl ReplicaSetController {
-    pub fn new(
-        store: StateStore,
-        scheduler: Arc<Scheduler>,
-        runtime: Arc<ContainerRuntime>,
-    ) -> Self {
+    pub fn new(store: StateStore, scheduler: Arc<Scheduler>) -> Self {
         Self {
             store,
             scheduler,
-            runtime,
             check_interval: Duration::from_secs(10),
         }
     }
@@ -121,76 +118,6 @@ impl ReplicaSetController {
                 }
             }
 
-            // Create real containers for Scheduled pods.
-            // Pulls image, creates container, starts it, then marks Running.
-            // If container creation fails, marks the pod as Failed.
-            let pod_prefix_check = format!("/registry/pods/{}/", ns);
-            let current_pods = self.store.list_prefix(&pod_prefix_check).await?;
-            for (pod_key, pod_value) in current_pods {
-                if let Ok(pod) = serde_json::from_slice::<Pod>(&pod_value)
-                    && pod.owner_ref.as_deref() == Some(&rs.id)
-                    && (pod.status == PodStatus::Scheduled
-                        || pod.status == PodStatus::ContainerCreating)
-                {
-                    let container_id = &pod.id;
-
-                    // Get image from first container spec
-                    let image = pod
-                        .spec
-                        .containers
-                        .first()
-                        .map(|c| c.image.clone())
-                        .unwrap_or_else(|| "busybox:latest".to_string());
-
-                    let command: Vec<String> = pod
-                        .spec
-                        .containers
-                        .first()
-                        .map(|c| c.command.clone())
-                        .unwrap_or_default();
-
-                    // Immediately transition to ContainerCreating so the UI
-                    // reflects the real state while we pull images / create the VM.
-                    if pod.status == PodStatus::Scheduled {
-                        let mut creating = pod.clone();
-                        creating.status = PodStatus::ContainerCreating;
-                        let data = serde_json::to_vec(&creating)?;
-                        self.store.put(&pod_key, &data).await?;
-                    }
-
-                    // Actually create and start the container (may take minutes)
-                    let mut updated = pod.clone();
-                    match self
-                        .create_real_container(container_id, &image, &command)
-                        .await
-                    {
-                        Ok(()) => {
-                            updated.status = PodStatus::Running;
-                            updated.runtime_info = Some(PodRuntimeInfo {
-                                backend: self.runtime.backend_name().to_string(),
-                                version: self.runtime.runtime_info().version,
-                            });
-                            info!(
-                                "RS {}: container created for pod {} via {} → Running",
-                                rs.name,
-                                pod.name,
-                                self.runtime.backend_name()
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                "RS {}: failed to create container for pod {}: {}",
-                                rs.name, pod.name, e
-                            );
-                            updated.status = PodStatus::Failed;
-                        }
-                    }
-
-                    let data = serde_json::to_vec(&updated)?;
-                    self.store.put(&pod_key, &data).await?;
-                }
-            }
-
             // Recount pods for status update
             let pod_prefix = format!("/registry/pods/{}/", ns);
             let pod_entries = self.store.list_prefix(&pod_prefix).await?;
@@ -259,31 +186,5 @@ impl ReplicaSetController {
         let data = serde_json::to_vec(&pod)?;
         self.store.put(&key, &data).await?;
         Ok(pod)
-    }
-
-    /// Actually create and start a container via the runtime backend.
-    async fn create_real_container(
-        &self,
-        container_id: &str,
-        image: &str,
-        command: &[String],
-    ) -> anyhow::Result<()> {
-        // Pull image (skipped for Docker backend which handles it internally)
-        self.runtime.pull_image(image).await?;
-
-        // Create container
-        self.runtime
-            .create_container(
-                container_id,
-                image,
-                command,
-                &std::collections::HashMap::new(),
-            )
-            .await?;
-
-        // Start container
-        self.runtime.start_container(container_id).await?;
-
-        Ok(())
     }
 }

@@ -13,23 +13,75 @@ This document outlines the design and architecture for a new Scheduling & Orches
 
 ## Architecture Structure
 
-The system follows a classical Control Plane (Server) and Data Plane (Agent) architecture.
+The system follows a classical **Control Plane (Server)** and **Data Plane (Agent)** architecture with strict separation of concerns. The Server **does not** run containers — all container lifecycle management is performed by the Agent.
+
+> **Restart Resilience**: Restarting `k3rs-server` does not affect running Pods. Containers continue to run on Agent nodes. The Agent's ServiceProxy, DNS, and container runtime operate independently. Only control plane operations (scheduling, reconciliation, API) are temporarily unavailable until the Server restarts. Agents automatically reconnect with exponential backoff.
+
+```mermaid
+graph TB
+    subgraph server["k3rs-server (Control Plane)"]
+        direction TB
+        API["API Server<br/>(Axum)"]
+        SCHED["Scheduler"]
+        CTRL["Controller Manager<br/>(8 controllers)"]
+        DB["Data Store<br/>(SlateDB)"]
+        LEADER["Leader Election"]
+        METRICS["Metrics<br/>(/metrics)"]
+        PKI["PKI / CA<br/>(mTLS)"]
+
+        API <--> DB
+        SCHED <--> DB
+        CTRL <--> DB
+        LEADER --> CTRL
+        LEADER --> SCHED
+        API --> PKI
+    end
+
+    subgraph agent["k3rs-agent (Data Plane)"]
+        direction TB
+        KUBELET["Pod Sync Loop<br/>(Kubelet equivalent)"]
+        RUNTIME["Container Runtime<br/>(Virtualization / OCI)"]
+        SPROXY["Service Proxy<br/>(Pingora)"]
+        TUNNEL["Tunnel Proxy<br/>(Pingora)"]
+        DNS["DNS Server<br/>(svc.cluster.local)"]
+        CNI["CNI<br/>(Pod Networking)"]
+
+        KUBELET --> RUNTIME
+        RUNTIME --> PODS
+        SPROXY <--> PODS
+        DNS --> SPROXY
+        CNI --> PODS
+    end
+
+    PODS["Pods"]
+
+    CLI["k3rsctl (CLI)"] --> API
+    UI["k3rs-ui (Dioxus)"] --> API
+    TUNNEL <--> API
+    KUBELET <--> API
+
+    style server fill:#1a1a2e,stroke:#e94560,stroke-width:2px,color:#fff
+    style agent fill:#16213e,stroke:#0f3460,stroke-width:2px,color:#fff
+    style PODS fill:#533483,stroke:#e94560,color:#fff
+```
 
 ### 1. Server Components (Control Plane)
-The server binary encapsulates all control plane processes:
-- **Supervisor**: The init process managing the lifecycle of all internal processes and threads.
+The server binary encapsulates **only** control plane processes. It does not run containers or manage container runtimes:
 - **API Server (powered by Axum)**: The central entry point for all control plane communications. Handles Agent registration, workload definitions, and API requests using the ergonomic, high-performance Axum web framework.
 - **Scheduler**: Determines which node (Agent) a workload should run on, based on resource availability, node labeling, affinity/anti-affinity rules, taints, and tolerations.
-- **Controller Manager**: Runs background control loops to maintain the desired state of the cluster (e.g., node liveness, workload deployments, replica count, auto-scaling).
+- **Controller Manager**: Runs background control loops to maintain the desired state of the cluster (e.g., node liveness, workload deployments, replica count, auto-scaling). Controllers only manage desired state — they create/delete Pod records, but the Agent is responsible for the actual container lifecycle.
 - **Data Store (SlateDB)**: Embedded key-value database built on object storage using [SlateDB](https://slatedb.io/) for robust, cost-effective, and highly available state persistence. Eliminates the need for etcd or an external database.
+- **Leader Election**: Ensures only one Server runs Scheduler + Controllers in multi-server HA mode.
+- **PKI / CA**: Issues mTLS certificates to Agents on registration.
 
 ### 2. Agent Components (Data Plane)
 The agent binary runs on worker nodes and executes workloads:
 - **Tunnel Proxy (powered by Pingora)**: Maintains a persistent, secure reverse tunnel back to the Server (similar to K3s). Pingora's connection pooling and multiplexing capabilities make it ideal for managing these reverse tunnels dynamically without dropping packets.
-- **Agent Node Supervisor (Kubelet equivalent)**: Communicates with the Server API, manages container lifecycles, and reports node resource utilization and health status.
+- **Pod Sync Loop (Kubelet equivalent)**: Watches for Scheduled pods, pulls images, creates and starts containers, monitors health, and reports status back to the Server API.
 - **Container Runtime Integrator**: Platform-aware container runtime with pluggable backends — Virtualization.framework microVM on macOS (Firecracker-like lightweight Linux VMs), OCI runtimes (`youki`/`crun`) with auto-download from GitHub Releases on Linux. Pulls OCI images via `oci-client`, extracts rootfs layers, boots minimal Linux VMs or OCI containers, and manages full container lifecycle including exec.
 - **Service Proxy (powered by Pingora)**: Replaces `kube-proxy`. Uses Pingora to dynamically manage advanced L4/L7 load balancing for services running on the node, routing traffic seamlessly to the correct local or remote Pods.
-- **Overlay Networking (CNI)**: Manages pod-to-pod networking (similar to Flannel or Cilium).
+- **DNS Server**: Lightweight embedded DNS resolver for `<service>.<namespace>.svc.cluster.local` resolution.
+- **Overlay Networking (CNI)**: Manages pod-to-pod networking and IP allocation (similar to Flannel or Cilium).
 
 ### 3. CLI Tool (`k3rsctl`)
 A command-line interface for cluster management:
