@@ -102,6 +102,8 @@ RUN rm -rf /workspace/*
 
 EXPOSE 6443 6444 10256 5353
 
+# Limit parallel jobs to avoid OOM when linking (e.g. k3rs-server); increase if container has more memory
+ENV CARGO_BUILD_JOBS=2
 ENV RUST_LOG=debug
 ENV K3RS_DATA_DIR=/var/lib/k3rs/data
 ENV K3RS_RUNTIME=youki
