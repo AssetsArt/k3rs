@@ -19,12 +19,12 @@ members = [
     "cmd/k3rs-init",
 ]
 # k3rs-init is Linux-only (guest PID 1) — excluded from default builds on macOS.
-# Build it explicitly: cargo build -p k3rs-init --target x86_64-unknown-linux-musl --release
+# k3rs-vmm is macOS-only (Virtualization.framework) — excluded from default builds on Linux.
+# Build explicitly: cargo build -p k3rs-vmm (macOS) / cargo build -p k3rs-init --target x86_64-unknown-linux-musl (Linux)
 default-members = [
     "cmd/k3rs-server",
     "cmd/k3rs-agent",
     "cmd/k3rsctl",
-    "cmd/k3rs-vmm",
     "pkg/api",
     "pkg/container",
     "pkg/controllers",
