@@ -15,7 +15,7 @@ This document outlines the design and architecture for a new Scheduling & Orches
 
 The system follows a classical **Control Plane (Server)** and **Data Plane (Agent)** architecture with strict separation of concerns. The Server **does not** run containers — all container lifecycle management is performed by the Agent.
 
-> **Restart Resilience**: Restarting `k3rs-server` does not affect running Pods. Containers continue to run on Agent nodes. The Agent's ServiceProxy, DNS, and container runtime operate independently. Only control plane operations (scheduling, reconciliation, API) are temporarily unavailable until the Server restarts. Agents automatically reconnect with exponential backoff.
+> **Fail-Static Principle**: Restarting or crashing any component must **never** disrupt running workloads. Containers continue to run on Agent nodes regardless of Server or Agent process state. See [Fail-Static Guarantees](#fail-static-guarantees) for the full specification.
 
 ```mermaid
 graph TB
@@ -228,6 +228,120 @@ UUIDs are stored as `.id` fields for internal reference only.
 ### Failure Recovery
 - **Agent reconnection**: If the Server restarts, Agents automatically reconnect via the Tunnel Proxy with exponential backoff.
 - **Workload rescheduling**: If a node becomes unavailable (missed health checks), the Controller Manager reschedules its workloads to healthy nodes after a configurable grace period.
+
+## Fail-Static Guarantees
+
+The system is designed to be **fail-static**: running workloads **must** continue executing even when control plane or agent processes crash or restart. No component failure may cause previously-healthy containers to stop.
+
+### Server Restart Resilience
+
+Restarting `k3rs-server` has **zero impact** on running Pods:
+
+| Component | During Server Downtime | After Server Restart |
+|---|---|---|
+| **Running Containers** | ✅ Continue running on Agent nodes | ✅ No restart needed |
+| **Service Proxy (Pingora)** | ✅ Continues routing traffic | ✅ Reconnects route sync |
+| **DNS Server** | ✅ Continues resolving cached records | ✅ Refreshes from new sync |
+| **Agent Container Runtime** | ✅ Fully independent | ✅ No state change |
+| **Scheduling** | ❌ Paused (no new pod placement) | ✅ Resumes immediately |
+| **Controllers** | ❌ Paused (no reconciliation) | ✅ Catch up via level-triggered reconcile |
+| **API** | ❌ Unavailable | ✅ Available immediately |
+
+**Agent behavior**: Agents detect Server disconnection and retry with **exponential backoff** (1s → 2s → 4s → 8s → capped at 30s). Existing workloads are unaffected during the entire retry window.
+
+### Agent Crash Resilience
+
+Restarting or crashing `k3rs-agent` **must not** terminate running containers:
+
+**Container Process Independence** (MANDATORY):
+
+- Container processes **must not** be children of the Agent process tree. If the Agent is killed (`SIGKILL`), container processes must continue running.
+- **OCI Runtime**: Containers spawned via `youki`/`crun` are already independent — the OCI runtime `create` + `start` detaches the container process from the caller.
+- **MicroVM (Virtualization.framework / Firecracker)**: VM processes must be **double-forked** or launched via a helper so they are not reaped when the Agent exits.
+- **Invariant**: `kill -9 <agent-pid>` must **never** cause any container to stop.
+
+**Data Plane Continuity** (during Agent downtime):
+
+| Component | During Agent Crash | After Agent Restart |
+|---|---|---|
+| **Running Containers** | ✅ Continue running (independent processes) | ✅ Reconciled by pod sync loop |
+| **Service Proxy (Pingora)** | ❌ Stops (runs in-process) | ✅ Restarts with cached routes |
+| **DNS Server** | ❌ Stops (runs in-process) | ✅ Restarts, rebuilds from Server sync |
+| **Pod Networking** | ✅ Existing connections continue | ✅ IP allocations restored from state |
+| **Heartbeat** | ❌ Stops → Server marks node NotReady/Unknown | ✅ Resumes, node transitions back to Ready |
+
+> **Trade-off**: Service Proxy and DNS run in-process with the Agent for simplicity. During an Agent crash, new service discovery and load balancing are temporarily unavailable, but existing TCP connections to pods continue working because containers and their network stacks are independent.
+
+### Agent Recovery Procedure
+
+When the Agent restarts after a crash, it **must** perform the following recovery steps in order:
+
+1. **Discover Running Containers**
+   - Query the OCI runtime for all containers in running state: `<runtime> list --format json`
+   - For MicroVMs, scan for running VM processes (PID files or process list)
+   - Build an in-memory map of `container_id → pod` from runtime state
+
+2. **Reconcile with Server State**
+   - Fetch desired pod list from Server API: `GET /api/v1/pods?fieldSelector=spec.nodeName=<self>`
+   - Compare actual (discovered) vs desired (Server) state
+   - **Running and desired**: Adopt — update internal tracking, resume health monitoring
+   - **Running but NOT desired**: Stop — container was deleted while Agent was down
+   - **Desired but NOT running**: Create — container crashed independently while Agent was down
+
+3. **Restore Networking**
+   - Rebuild IP allocation table from discovered containers
+   - Restart Service Proxy with current service/endpoint state from Server
+   - Restart DNS server with current service records
+
+4. **Resume Normal Operation**
+   - Resume heartbeat loop
+   - Resume pod sync loop (periodic reconciliation)
+   - Resume route sync loop (service proxy updates)
+
+**Idempotency**: Every step must be **idempotent** — the same recovery procedure runs regardless of whether the Agent crashed, was gracefully restarted, or is starting for the first time.
+
+### Design Invariants
+
+1. **No container is a child of the Agent** — Agent crash ≠ container crash
+2. **No persistent lock files** — Agent restart does not block on stale locks
+3. **Level-triggered reconciliation** — Agent does not rely on missed events; it always compares full actual vs desired state
+4. **Server is stateless w.r.t. runtime** — Server never holds container runtime handles or references
+5. **Idempotent recovery** — Running the recovery procedure on a healthy Agent is a no-op
+
+### Implementation Checklist
+
+#### Container Process Independence
+- [ ] OCI backend (`youki`/`crun`): Verify `create` + `start` fully detaches container process from Agent PID tree
+- [ ] OCI backend: Write integration test — `kill -9 <agent-pid>` → verify container still running via `<runtime> state <id>`
+- [ ] VirtualizationBackend (macOS): Launch `k3rs-vmm` helper via double-fork or `setsid()` so VM outlives Agent
+- [ ] FirecrackerBackend (Linux): Ensure Firecracker VMM process is not child of Agent (use Jailer or double-fork)
+- [ ] PID file management: Write VM/container PID to `/var/run/k3rs/containers/<id>/pid` for discovery after restart
+
+#### Agent Recovery
+- [ ] `discover_running_containers()` — query OCI runtime `list` command, parse running container IDs
+- [ ] `discover_running_vms()` — scan PID files under `/var/run/k3rs/containers/`, verify process alive
+- [ ] `reconcile_with_server(discovered, desired)` — adopt/stop/create logic
+- [ ] `restore_ip_allocations(discovered_containers)` — rebuild `PodNetwork` state from running containers
+- [ ] Refactor Agent boot sequence: use recovery procedure as the **default startup path** (idempotent — works for fresh start and crash recovery)
+- [ ] Add `GET /api/v1/pods?fieldSelector=spec.nodeName=<name>` endpoint on Server for node-scoped pod queries
+
+#### Server Resilience
+- [x] Remove `ContainerRuntime` from Server — Server is pure Control Plane
+- [x] Remove server lock file system (lock file write/cleanup, colocation guard)
+- [x] Update dev scripts (`dev.sh`, `dev-agent.sh`) — remove colocation flags
+- [ ] Agent exponential backoff on Server disconnect (1s → 2s → 4s → … → 30s cap)
+- [ ] Agent: continue running containers + Service Proxy + DNS when Server unreachable
+
+#### Networking Recovery
+- [ ] Service Proxy: cache last-known routing table to disk (`/var/run/k3rs/routes.json`) for fast restart
+- [ ] DNS Server: cache last-known service records to disk (`/var/run/k3rs/dns-records.json`) for fast restart
+- [ ] On Agent restart: load cached routes/records immediately → serve stale while syncing fresh from Server
+
+#### Testing & Validation
+- [ ] Test: kill Agent → verify containers still running → restart Agent → verify pod adoption
+- [ ] Test: kill Server → verify Agent continues serving traffic → restart Server → verify reconnection
+- [ ] Test: kill Agent + Server simultaneously → restart both → verify full cluster recovery
+- [ ] Test: Agent starts fresh (no prior containers) → verify normal boot path works (idempotent recovery)
 
 ## Why Cloudflare Pingora?
 Using Cloudflare Pingora as the backbone for this orchestrator provides several architectural advantages:
