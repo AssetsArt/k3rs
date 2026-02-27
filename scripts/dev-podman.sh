@@ -94,9 +94,9 @@ build_run_args() {
     if [ "$ENABLE_KVM" = "1" ]; then
         if [ -e /dev/kvm ]; then
             args+=(--device /dev/kvm)
-            echo -e "${GREEN}🔥 KVM passthrough enabled (/dev/kvm)${NC}"
+            echo -e "${GREEN}🔥 KVM passthrough enabled (/dev/kvm)${NC}" >&2
         else
-            echo -e "${YELLOW}⚠ /dev/kvm not found — Firecracker will not be available${NC}"
+            echo -e "${YELLOW}⚠ /dev/kvm not found — Firecracker will not be available${NC}" >&2
         fi
     fi
 
