@@ -58,7 +58,7 @@ fi
 
 # Watch for changes and restart
 RUST_LOG=debug cargo watch \
-    -x "run --bin k3rs-server -- --port $PORT --token $TOKEN --data-dir $DATA_DIR --node-name $NODE_NAME --allow-colocate" \
+    -x "run --bin k3rs-server -- --port $PORT --token $TOKEN --data-dir $DATA_DIR --node-name $NODE_NAME" \
     -w pkg/ \
     -w cmd/k3rs-server \
     -i "target/*"

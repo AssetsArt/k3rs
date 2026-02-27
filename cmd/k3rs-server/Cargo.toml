@@ -12,11 +12,6 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 pkg-api = { path = "../../pkg/api" }
 pkg-types = { path = "../../pkg/types" }
-pkg-pki = { path = "../../pkg/pki" }
-pkg-state = { path = "../../pkg/state" }
-pkg-controllers = { path = "../../pkg/controllers" }
-pkg-scheduler = { path = "../../pkg/scheduler" }
-libc = "0.2"
 opentelemetry = "0.28"
 opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic"] }
