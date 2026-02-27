@@ -1,0 +1,97 @@
+# k3rs development container — Linux environment for OCI + Firecracker backends
+#
+# Build:  podman build -f Containerfile.dev -t k3rs-dev .
+# Run:    ./scripts/dev-podman.sh
+#
+# Provides:
+#   - Rust toolchain (stable + musl targets)
+#   - OCI runtimes: youki, crun
+#   - Firecracker: KVM passthrough (/dev/kvm)
+#   - cargo-watch for auto-reload dev loop
+#   - Full workspace mount at /workspace
+
+FROM rust:1.86-bookworm
+
+# ─── System deps ──────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Build essentials
+    build-essential pkg-config libssl-dev \
+    # OCI runtime deps
+    libseccomp-dev libyajl-dev \
+    # Firecracker / KVM
+    qemu-utils iproute2 iptables \
+    # Container networking
+    uidmap slirp4netns \
+    # Dev tools
+    tmux curl jq git strace procps \
+    # Cleanup
+    && rm -rf /var/lib/apt/lists/*
+
+# ─── Rust targets + tools ────────────────────────────────────────────
+RUN rustup target add \
+    x86_64-unknown-linux-musl \
+    aarch64-unknown-linux-musl \
+    && cargo install cargo-watch
+
+# ─── Install youki (OCI runtime) ─────────────────────────────────────
+ARG YOUKI_VERSION=0.6.0
+RUN ARCH=$(uname -m) && \
+    case "$ARCH" in \
+        x86_64)  YOUKI_ARCH="x86_64" ;; \
+        aarch64) YOUKI_ARCH="aarch64" ;; \
+    esac && \
+    curl -fsSL "https://github.com/youki-dev/youki/releases/download/v${YOUKI_VERSION}/youki_${YOUKI_VERSION}_linux_${YOUKI_ARCH}.tar.gz" \
+    | tar xz -C /usr/local/bin/ youki && \
+    chmod +x /usr/local/bin/youki && \
+    youki --version || true
+
+# ─── Install crun (OCI runtime) ──────────────────────────────────────
+ARG CRUN_VERSION=1.26
+RUN ARCH=$(uname -m) && \
+    curl -fsSL "https://github.com/containers/crun/releases/download/${CRUN_VERSION}/crun-${CRUN_VERSION}-linux-${ARCH}" \
+    -o /usr/local/bin/crun && \
+    chmod +x /usr/local/bin/crun && \
+    crun --version || true
+
+# ─── Install Firecracker (x86_64 only) ───────────────────────────────
+ARG FIRECRACKER_VERSION=1.12.0
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/v${FIRECRACKER_VERSION}/firecracker-v${FIRECRACKER_VERSION}-${ARCH}.tgz" \
+        | tar xz -C /tmp && \
+        mv /tmp/release-v${FIRECRACKER_VERSION}-${ARCH}/firecracker-v${FIRECRACKER_VERSION}-${ARCH} /usr/local/bin/firecracker && \
+        mv /tmp/release-v${FIRECRACKER_VERSION}-${ARCH}/jailer-v${FIRECRACKER_VERSION}-${ARCH} /usr/local/bin/jailer && \
+        chmod +x /usr/local/bin/firecracker /usr/local/bin/jailer && \
+        rm -rf /tmp/release-* && \
+        firecracker --version; \
+    else \
+        echo "Firecracker not available for $ARCH — skipping"; \
+    fi
+
+# ─── Runtime directories ─────────────────────────────────────────────
+RUN mkdir -p \
+    /var/run/k3rs/containers \
+    /var/lib/k3rs/data \
+    /var/lib/k3rs/backups \
+    /var/lib/k3rs/images \
+    /tmp/k3rs-data
+
+# ─── Workspace ────────────────────────────────────────────────────────
+WORKDIR /workspace
+
+# Pre-warm cargo registry cache (optional, speeds up first build)
+COPY Cargo.toml Cargo.lock* ./
+COPY cmd/ ./cmd/
+COPY pkg/ ./pkg/
+RUN cargo fetch 2>/dev/null || true
+
+# Reset for bind-mount at runtime
+RUN rm -rf /workspace/*
+
+EXPOSE 6443 6444 10256 5353
+
+ENV RUST_LOG=debug
+ENV K3RS_DATA_DIR=/var/lib/k3rs/data
+ENV K3RS_RUNTIME=youki
+
+CMD ["bash"]
