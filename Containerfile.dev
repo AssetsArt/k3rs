@@ -28,6 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ─── Rust targets + tools ────────────────────────────────────────────
+# Limit parallel jobs to avoid OOM when compiling heavy deps (e.g. apple-codesign, ring)
+ENV CARGO_BUILD_JOBS=1
 RUN rustup target add \
     x86_64-unknown-linux-musl \
     aarch64-unknown-linux-musl \
