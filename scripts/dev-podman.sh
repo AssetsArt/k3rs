@@ -5,6 +5,7 @@ set -euo pipefail
 #
 # Usage:
 #   ./scripts/dev-podman.sh                    # interactive shell
+#   ./scripts/dev-podman.sh --all              # server + agent in tmux (KVM enabled)
 #   ./scripts/dev-podman.sh server             # run k3rs-server inside container
 #   ./scripts/dev-podman.sh agent              # run k3rs-agent inside container
 #   ./scripts/dev-podman.sh test               # run cargo test
@@ -22,15 +23,17 @@ CONTAINER_NAME="k3rs-dev"
 IMAGE_NAME="k3rs-dev"
 ENABLE_KVM="${K3RS_KVM:-0}"
 RUNTIME="${K3RS_RUNTIME:-youki}"
-MODE="${1:-shell}"
 
-# Parse flags
+# Parse flags first, then positional
+ARGS=()
 for arg in "$@"; do
     case "$arg" in
-        --kvm) ENABLE_KVM=1; shift ;;
+        --kvm)  ENABLE_KVM=1 ;;
+        --all)  ARGS+=("all") ; ENABLE_KVM=1 ;;
+        *)      ARGS+=("$arg") ;;
     esac
 done
-MODE="${1:-shell}"
+MODE="${ARGS[0]:-shell}"
 
 # ─── Colors ───────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -93,8 +96,7 @@ build_run_args() {
             args+=(--device /dev/kvm)
             echo -e "${GREEN}🔥 KVM passthrough enabled (/dev/kvm)${NC}"
         else
-            echo -e "${RED}❌ /dev/kvm not found — Firecracker requires a Linux host with KVM${NC}"
-            echo -e "${YELLOW}   On macOS, use Podman Machine with nested virt (experimental)${NC}"
+            echo -e "${YELLOW}⚠ /dev/kvm not found — Firecracker will not be available${NC}"
         fi
     fi
 
@@ -115,6 +117,35 @@ run_container() {
             echo ""
             # shellcheck disable=SC2086
             podman run $run_args "$IMAGE_NAME" bash
+            ;;
+
+        all)
+            echo -e "${CYAN}🚀 Starting full dev environment (server + agent) in tmux${NC}"
+            echo -e "   Runtime: ${GREEN}$RUNTIME${NC}"
+            echo -e "   KVM: $([ "$ENABLE_KVM" = "1" ] && echo -e "${GREEN}enabled${NC}" || echo -e "${YELLOW}disabled${NC}")"
+            echo ""
+            # shellcheck disable=SC2086
+            podman run $run_args "$IMAGE_NAME" bash -c '
+                echo "🔨 Building workspace first..."
+                cargo build --workspace 2>&1 | tail -3
+
+                SESSION="k3rs"
+                tmux new-session -d -s "$SESSION" -n server \
+                    "RUST_LOG=debug cargo watch \
+                        -x \"run --bin k3rs-server -- --port 6443 --token demo-token-123 --data-dir /var/lib/k3rs/data --node-name master-1\" \
+                        -w pkg/ -w cmd/k3rs-server -i \"target/*\""
+
+                # Wait for server to start
+                sleep 3
+
+                tmux split-window -h -t "$SESSION" \
+                    "RUST_LOG=debug cargo watch \
+                        -x \"run --bin k3rs-agent -- --server http://127.0.0.1:6443 --token demo-token-123 --node-name node-1 --proxy-port 6444 --service-proxy-port 10256 --dns-port 5353\" \
+                        -w pkg/ -w cmd/k3rs-agent -i \"target/*\""
+
+                tmux select-pane -t 0
+                exec tmux attach-session -t "$SESSION"
+            '
             ;;
 
         server)
@@ -157,10 +188,11 @@ run_container() {
             ;;
 
         *)
-            echo "Usage: $0 [shell|server|agent|test|build|check] [--kvm]"
+            echo "Usage: $0 [shell|all|server|agent|test|build|check] [--kvm]"
             echo ""
             echo "Modes:"
             echo "  shell    Interactive bash shell (default)"
+            echo "  all      Server + Agent in tmux (KVM auto-enabled)"
             echo "  server   Run k3rs-server with cargo-watch"
             echo "  agent    Run k3rs-agent with cargo-watch"
             echo "  test     Run cargo test --workspace"
@@ -169,6 +201,7 @@ run_container() {
             echo ""
             echo "Flags:"
             echo "  --kvm    Passthrough /dev/kvm for Firecracker"
+            echo "  --all    Same as 'all' mode"
             echo ""
             echo "Environment:"
             echo "  K3RS_RUNTIME=youki|crun   OCI runtime (default: youki)"

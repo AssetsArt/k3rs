@@ -49,7 +49,7 @@ Inspired by [K3s](https://k3s.io/), powered by [Cloudflare Pingora](https://gith
 
 ### Prerequisites
 
-- **Rust** (edition 2024, nightly or stable 1.86+)
+- **Rust** 1.93.1+ (edition 2024)
 - **macOS** (primary dev platform) or **Linux**
 
 ### Run the Server

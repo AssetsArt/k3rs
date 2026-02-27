@@ -10,7 +10,7 @@
 #   - cargo-watch for auto-reload dev loop
 #   - Full workspace mount at /workspace
 
-FROM rust:latest
+FROM rust:1.93.1-bookworm
 
 # ─── System deps ──────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
