@@ -275,7 +275,7 @@ impl DeploymentController {
             template_hash: template_hash.to_string(),
             created_at: Utc::now(),
         };
-        let key = format!("/registry/replicasets/{}/{}", ns, rs_id);
+        let key = format!("/registry/replicasets/{}/{}", ns, rs.name);
         let data = serde_json::to_vec(&rs)?;
         self.store.put(&key, &data).await?;
         Ok(rs)

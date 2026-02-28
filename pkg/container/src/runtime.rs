@@ -181,6 +181,15 @@ impl ContainerRuntime {
         let container_dir = self.data_dir.join("containers").join(id);
         let log_path = self.data_dir.join("logs").join(id).join("stdout.log");
 
+        // Best-effort cleanup in case old state exists (e.g. from a previous failed run)
+        // to avoid "container already exists" errors.
+        if let Ok(state) = self.backend.state(id).await {
+            if state.status == "stopped" || state.status == "exited" {
+                info!("Container {} exists in stopped/exited state, cleaning up first...", id);
+                let _ = self.backend.delete(id).await;
+            }
+        }
+
         if self.backend.handles_images() {
             // Backend handles images internally (e.g. Docker)
             self.backend.create_from_image(id, image, command).await?;

@@ -86,7 +86,7 @@ impl CronJobController {
                     created_at: now,
                 };
 
-                let job_key = format!("/registry/jobs/{}/{}", ns, job_id);
+                let job_key = format!("/registry/jobs/{}/{}", ns, job.name);
                 let data = serde_json::to_vec(&job)?;
                 self.store.put(&job_key, &data).await?;
 

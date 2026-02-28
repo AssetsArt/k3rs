@@ -180,7 +180,7 @@ impl JobController {
             pod.status = PodStatus::Scheduled;
         }
 
-        let key = format!("/registry/pods/{}/{}", ns, pod_id);
+        let key = format!("/registry/pods/{}/{}", ns, pod.name);
         let data = serde_json::to_vec(&pod)?;
         self.store.put(&key, &data).await?;
         Ok(pod)
