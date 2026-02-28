@@ -53,16 +53,27 @@ if [ -z "$TARGET_ARCH" ]; then
 fi
 
 # Map our arch names to kernel/rust conventions
+HOST_ARCH="$(uname -m)"
+
 case "$TARGET_ARCH" in
     arm64)
         KERNEL_ARCH="arm64"
-        CROSS_COMPILE="aarch64-linux-gnu-"
+        # Only cross-compile if we're not on aarch64 already
+        if [ "$HOST_ARCH" = "aarch64" ] || [ "$HOST_ARCH" = "arm64" ]; then
+            CROSS_COMPILE=""
+        else
+            CROSS_COMPILE="aarch64-linux-gnu-"
+        fi
         KERNEL_IMAGE="arch/arm64/boot/Image"
         RUST_TARGET="aarch64-unknown-linux-musl"
         ;;
     amd64)
         KERNEL_ARCH="x86_64"
-        CROSS_COMPILE=""
+        if [ "$HOST_ARCH" = "x86_64" ]; then
+            CROSS_COMPILE=""
+        else
+            CROSS_COMPILE="x86_64-linux-gnu-"
+        fi
         KERNEL_IMAGE="arch/x86/boot/bzImage"
         RUST_TARGET="x86_64-unknown-linux-musl"
         ;;
@@ -227,11 +238,9 @@ for cmd in make gcc curl cpio flex bison bc; do
     fi
 done
 
-if [ "$TARGET_ARCH" = "arm64" ] && [ "$(uname -m)" != "aarch64" ]; then
-    if ! command -v aarch64-linux-gnu-gcc &>/dev/null; then
-        echo "[build-kernel] ERROR: cross-compiler 'aarch64-linux-gnu-gcc' required. Install gcc-aarch64-linux-gnu." >&2
-        exit 1
-    fi
+if [ -n "$CROSS_COMPILE" ] && ! command -v "${CROSS_COMPILE}gcc" &>/dev/null; then
+    echo "[build-kernel] ERROR: cross-compiler '${CROSS_COMPILE}gcc' required." >&2
+    exit 1
 fi
 
 BUILD_DIR="/tmp/k3rs-kernel-build"
