@@ -385,6 +385,10 @@ async fn main() -> anyhow::Result<()> {
             let sync_server = ctrl_server.clone();
             let sync_token = ctrl_token.clone();
             let sync_node_id = ctrl_node_id.clone();
+            // Track pod IDs that are currently being created to avoid spawning
+            // a second creation task on the next 5-second tick.
+            let in_flight: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
                 loop {
@@ -525,6 +529,16 @@ async fn main() -> anyhow::Result<()> {
                                     let pod_client = sync_client.clone();
                                     let pod_server = sync_server.clone();
                                     let pod_token = sync_token.clone();
+                                    let pod_in_flight = in_flight.clone();
+
+                                    // Skip if a creation task is already running for this pod.
+                                    {
+                                        let mut set = pod_in_flight.lock().unwrap();
+                                        if set.contains(&pod.id) {
+                                            continue; // already being created
+                                        }
+                                        set.insert(pod.id.clone());
+                                    }
 
                                     tokio::spawn(async move {
                                         let status_url = format!(
@@ -600,6 +614,7 @@ async fn main() -> anyhow::Result<()> {
                                                 "[pod:{}] Container start failed: {}",
                                                 pod.name, e
                                             );
+                                            pod_in_flight.lock().unwrap().remove(&pod.id);
                                             let _ = pod_runtime.cleanup_container(&pod.id).await;
                                             let _ = pod_client
                                                 .put(&status_url)
@@ -613,7 +628,8 @@ async fn main() -> anyhow::Result<()> {
                                             return;
                                         }
 
-                                        // 4. Success
+                                        // 4. Success — remove from in-flight
+                                        pod_in_flight.lock().unwrap().remove(&pod.id);
                                         info!(
                                             "[pod:{}] Container running via {}",
                                             pod.name,

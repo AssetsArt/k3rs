@@ -440,6 +440,17 @@ impl ContainerRuntime {
         backend.spawn_exec(id, command, tty).await
     }
 
+    /// Return the main process PID of a running container.
+    ///
+    /// Reads the pid file that the OCI runtime wrote at `create` time.
+    /// Returns `None` if the pid file is missing or unparseable.
+    pub fn container_pid(&self, id: &str) -> Option<u32> {
+        let pid_file = self.data_dir.join("logs").join(id).join("container.pid");
+        std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+    }
+
     /// Query the real OCI runtime state of a container.
     pub async fn container_state(&self, id: &str) -> Result<ContainerStateInfo> {
         let backend = self.get_backend_for_container(id).await;

@@ -98,18 +98,20 @@ async fn handle_tty(
     command: Vec<&str>,
     runtime: Arc<ContainerRuntime>,
 ) {
-    // We need the OCI runtime binary to spawn with a PTY slave fd.
-    let runtime_bin = match runtime.oci_runtime_path() {
-        Some(p) => p,
-        None => {
-            let _ = ws_sender
-                .send(Message::Text(
-                    "Error: PTY exec not supported on this backend\r\n".into(),
-                ))
-                .await;
-            return;
-        }
-    };
+    // We need to know how to spawn a command inside the container.
+    // Prefer nsenter (no cgroup permissions needed) over youki exec.
+    // Get the container's main process PID (written by youki at create time).
+    let container_pid = runtime.container_pid(&container_id);
+    let runtime_bin = runtime.oci_runtime_path();
+
+    if container_pid.is_none() && runtime_bin.is_none() {
+        let _ = ws_sender
+            .send(Message::Text(
+                "Error: PTY exec not supported on this backend\r\n".into(),
+            ))
+            .await;
+        return;
+    }
 
     // Create a PTY pair using libc::openpty.
     // master = our side (we read/write raw terminal bytes)
@@ -139,19 +141,49 @@ async fn handle_tty(
         (master, slave)
     };
 
-    // Build the OCI exec command, giving it the PTY slave as its terminal.
-    let mut cmd_args = vec!["exec".to_string(), container_id.clone()];
-    if command.is_empty() {
-        cmd_args.push("/bin/sh".to_string());
+    // Build the exec command: nsenter (preferred, avoids cgroup permission issues)
+    // or youki exec as fallback.
+    let mut cmd_args_owned: Vec<String>;
+    let (bin, bin_args): (&str, Vec<String>);
+
+    if let Some(pid) = container_pid {
+        // nsenter: enters the container's namespaces by PID, no cgroup interaction needed.
+        cmd_args_owned = vec![
+            "--target".to_string(),
+            pid.to_string(),
+            "--pid".to_string(),
+            "--uts".to_string(),
+            "--ipc".to_string(),
+            "--net".to_string(),
+            "--mount".to_string(),
+            "--user".to_string(),
+            "--".to_string(),
+        ];
+        if command.is_empty() {
+            cmd_args_owned.push("/bin/sh".to_string());
+        } else {
+            cmd_args_owned.extend(command.iter().map(|s| s.to_string()));
+        }
+        bin = "nsenter";
+        bin_args = cmd_args_owned.clone();
     } else {
-        cmd_args.extend(command.iter().map(|s| s.to_string()));
+        let rb = runtime_bin.as_deref().unwrap_or("");
+        cmd_args_owned = vec!["exec".to_string(), container_id.clone()];
+        if command.is_empty() {
+            cmd_args_owned.push("/bin/sh".to_string());
+        } else {
+            cmd_args_owned.extend(command.iter().map(|s| s.to_string()));
+        }
+        bin = rb;
+        bin_args = cmd_args_owned.clone();
     }
 
     let child = unsafe {
         use std::os::unix::io::FromRawFd;
         use std::process::Stdio;
-        tokio::process::Command::new(&runtime_bin)
-            .args(&cmd_args)
+        tokio::process::Command::new(bin)
+            .args(&bin_args)
+            .env("TERM", "xterm-256color")
             // Give the slave side to the child as its controlling terminal.
             .stdin(Stdio::from_raw_fd(slave_fd))
             .stdout(Stdio::from_raw_fd(slave_fd))
