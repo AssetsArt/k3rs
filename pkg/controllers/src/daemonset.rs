@@ -29,11 +29,38 @@ impl DaemonSetController {
                 "DaemonSetController started (interval={}s)",
                 self.check_interval.as_secs()
             );
+            let mut event_rx = self.store.event_log.subscribe();
             let mut interval = tokio::time::interval(self.check_interval);
             loop {
-                interval.tick().await;
-                if let Err(e) = self.reconcile().await {
-                    warn!("DaemonSetController reconcile error: {}", e);
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if let Err(e) = self.reconcile().await {
+                            warn!("DaemonSetController reconcile error: {}", e);
+                        }
+                    }
+                    result = event_rx.recv() => {
+                        match result {
+                            Ok(ref event)
+                                if event.key.starts_with("/registry/daemonsets/")
+                                    || event.key.starts_with("/registry/nodes/") =>
+                            {
+                                while event_rx.try_recv().is_ok() {}
+                                if let Err(e) = self.reconcile().await {
+                                    warn!("DaemonSetController reconcile error: {}", e);
+                                }
+                                while event_rx.try_recv().is_ok() {}
+                                interval.reset();
+                            }
+                            Ok(_) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                if let Err(e) = self.reconcile().await {
+                                    warn!("DaemonSetController reconcile error: {}", e);
+                                }
+                                interval.reset();
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
                 }
             }
         })
