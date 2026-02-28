@@ -40,8 +40,21 @@ impl ImageManager {
         let image_hash = format!("{:x}", md5_hash(image_ref));
         let image_dir = self.images_dir.join(&image_hash);
 
-        // Check if already pulled
-        if image_dir.join("manifest.json").exists() {
+        // Check if already pulled — manifest must exist AND at least one layer file.
+        // An empty/partial cache (e.g. from a crashed download) is treated as a miss.
+        let layers_dir = image_dir.join("layers");
+        let has_layers = layers_dir.exists()
+            && std::fs::read_dir(&layers_dir)
+                .map(|mut rd| {
+                    rd.any(|e| {
+                        e.ok()
+                            .and_then(|e| e.path().extension().map(|x| x == "gz"))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+
+        if image_dir.join("manifest.json").exists() && has_layers {
             info!(
                 "Image {} already cached at {}",
                 image_ref,

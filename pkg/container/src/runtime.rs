@@ -85,36 +85,40 @@ impl ContainerRuntime {
                 }
             }
         } else {
-            // Linux: try Firecracker then OCI runtimes
-            // For now we check if /dev/kvm exists as a proxy for Firecracker readiness
-            let has_kvm = std::path::Path::new("/dev/kvm").exists();
-            if has_kvm {
-                info!("KVM detected, using Firecracker microVM runtime (vm)");
-                Arc::new(crate::firecracker::FirecrackerBackend::new(&data_dir))
-            } else {
-                match OciBackend::detect(&data_dir) {
-                    Ok(oci) => {
-                        info!("Using OCI runtime: {} ({})", oci.name(), oci.version());
-                        Arc::new(oci)
-                    }
-                    Err(_) => {
-                        // Try auto-download
-                        info!("No OCI runtime found — attempting auto-download...");
-                        match crate::installer::RuntimeInstaller::ensure_runtime(None).await {
-                            Ok(path) => {
-                                let oci = OciBackend::new(&path.to_string_lossy(), &data_dir);
+            // Linux: prefer OCI runtimes; Firecracker is only a fallback when
+            // no OCI runtime is available but KVM is present.
+            // This ensures backend_name() correctly reflects the active runtime
+            // (e.g. "youki") rather than always showing "vm".
+            match OciBackend::detect(&data_dir) {
+                Ok(oci) => {
+                    info!("Using OCI runtime: {} ({})", oci.name(), oci.version());
+                    Arc::new(oci)
+                }
+                Err(_) => {
+                    // No OCI runtime in PATH or install dirs — try auto-download.
+                    info!("No OCI runtime found — attempting auto-download...");
+                    match crate::installer::RuntimeInstaller::ensure_runtime(None).await {
+                        Ok(path) => {
+                            let oci = OciBackend::new(&path.to_string_lossy(), &data_dir);
+                            info!(
+                                "Using auto-downloaded runtime: {} ({})",
+                                oci.name(),
+                                oci.version()
+                            );
+                            Arc::new(oci)
+                        }
+                        Err(_) => {
+                            // Last resort: Firecracker if KVM is available.
+                            let has_kvm = std::path::Path::new("/dev/kvm").exists();
+                            if has_kvm {
                                 info!(
-                                    "Using auto-downloaded runtime: {} ({})",
-                                    oci.name(),
-                                    oci.version()
+                                    "OCI unavailable — falling back to Firecracker microVM runtime"
                                 );
-                                Arc::new(oci)
-                            }
-                            Err(e) => {
+                                Arc::new(crate::firecracker::FirecrackerBackend::new(&data_dir))
+                            } else {
                                 anyhow::bail!(
-                                    "No container runtime available. \
-                                     OCI auto-download failed: {}",
-                                    e
+                                    "No container runtime available: OCI auto-download failed \
+                                     and /dev/kvm not present for Firecracker fallback"
                                 );
                             }
                         }
