@@ -5,6 +5,7 @@ members = [
     "cmd/k3rs-agent",
     "cmd/k3rsctl",
     "cmd/k3rs-vmm",
+    "pkg/constants",
     "pkg/api",
     "pkg/container",
     "pkg/controllers",
@@ -25,6 +26,7 @@ default-members = [
     "cmd/k3rs-server",
     "cmd/k3rs-agent",
     "cmd/k3rsctl",
+    "pkg/constants",
     "pkg/api",
     "pkg/container",
     "pkg/controllers",
@@ -59,3 +61,4 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 sysinfo = "0.38"
 tokio-tungstenite = { version = "0.28", features = ["connect"] }
 futures-util = "0.3"
+pkg-constants = { path = "pkg/constants" }

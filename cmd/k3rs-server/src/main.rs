@@ -13,7 +13,7 @@ struct Cli {
     config: String,
 
     #[cfg(not(debug_assertions))]
-    #[arg(long, short, default_value = "/etc/k3rs/config.yaml")]
+    #[arg(long, short, default_value = pkg_constants::paths::DEFAULT_SERVER_CONFIG)]
     config: String,
 
     /// Port to listen on
@@ -61,15 +61,18 @@ async fn main() -> anyhow::Result<()> {
     info!("Config file: {}", cli.config);
 
     // Merge: CLI args > config file > defaults
-    let port = cli.port.or(file_cfg.port).unwrap_or(6443);
+    let port = cli
+        .port
+        .or(file_cfg.port)
+        .unwrap_or(pkg_constants::network::DEFAULT_API_PORT);
     let data_dir = cli
         .data_dir
         .or(file_cfg.data_dir)
-        .unwrap_or_else(|| "/tmp/k3rs-data".to_string());
+        .unwrap_or_else(|| pkg_constants::paths::DEFAULT_SERVER_DATA_DIR.to_string());
     let token = cli
         .token
         .or(file_cfg.token)
-        .unwrap_or_else(|| "demo-token-123".to_string());
+        .unwrap_or_else(|| pkg_constants::auth::DEFAULT_JOIN_TOKEN.to_string());
     let node_name = cli
         .node_name
         .or(file_cfg.node_name)

@@ -1,8 +1,10 @@
 use crate::*;
 
-/// Server configuration — the k3rs API server address.
-const K3RS_API: &str = "http://127.0.0.1:6443";
-const K3RS_TOKEN: &str = "demo-token-123";
+use pkg_constants::{auth, network};
+
+/// Server config re-exported as locals for ergonomic use below.
+const K3RS_API: &str = network::DEFAULT_API_ADDR;
+const K3RS_TOKEN: &str = auth::DEFAULT_JOIN_TOKEN;
 
 // ============================================================
 // Server functions — run on the server, called from WASM client

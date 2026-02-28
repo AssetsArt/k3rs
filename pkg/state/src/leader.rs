@@ -6,9 +6,9 @@ use tracing::{info, warn};
 
 use crate::client::StateStore;
 
-const LEASE_KEY: &str = "/registry/leases/controller-leader";
-const DEFAULT_TTL: u64 = 15; // seconds
-const RENEW_INTERVAL_DIVISOR: u64 = 3; // renew every TTL/3
+use pkg_constants::state::{
+    LEADER_LEASE_KEY, LEADER_LEASE_TTL_SECS, LEADER_RENEW_INTERVAL_DIVISOR,
+};
 
 /// A distributed lease for leader election.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,8 +42,9 @@ pub struct LeaderElection {
 
 impl LeaderElection {
     pub fn new(store: StateStore, server_id: String) -> Self {
-        let ttl = Duration::from_secs(DEFAULT_TTL);
-        let renew_interval = Duration::from_secs(DEFAULT_TTL / RENEW_INTERVAL_DIVISOR);
+        let ttl = Duration::from_secs(LEADER_LEASE_TTL_SECS);
+        let renew_interval =
+            Duration::from_secs(LEADER_LEASE_TTL_SECS / LEADER_RENEW_INTERVAL_DIVISOR);
         let (leader_tx, leader_rx) = watch::channel(false);
 
         Self {
@@ -70,7 +71,7 @@ impl LeaderElection {
     async fn try_acquire_or_renew(&self) -> anyhow::Result<bool> {
         let now = Utc::now();
 
-        match self.store.get(LEASE_KEY).await? {
+        match self.store.get(LEADER_LEASE_KEY).await? {
             Some(data) => {
                 let lease: Lease = serde_json::from_slice(&data)?;
 
@@ -81,7 +82,7 @@ impl LeaderElection {
                         ..lease
                     };
                     let data = serde_json::to_vec(&renewed)?;
-                    self.store.put(LEASE_KEY, &data).await?;
+                    self.store.put(LEADER_LEASE_KEY, &data).await?;
                     Ok(true)
                 } else if lease.is_expired() {
                     // Previous holder's lease expired — take over
@@ -97,7 +98,7 @@ impl LeaderElection {
                         ttl_seconds: self.ttl.as_secs(),
                     };
                     let data = serde_json::to_vec(&new_lease)?;
-                    self.store.put(LEASE_KEY, &data).await?;
+                    self.store.put(LEADER_LEASE_KEY, &data).await?;
                     Ok(true)
                 } else {
                     Ok(false)
@@ -113,7 +114,7 @@ impl LeaderElection {
                     ttl_seconds: self.ttl.as_secs(),
                 };
                 let data = serde_json::to_vec(&lease)?;
-                self.store.put(LEASE_KEY, &data).await?;
+                self.store.put(LEADER_LEASE_KEY, &data).await?;
                 Ok(true)
             }
         }

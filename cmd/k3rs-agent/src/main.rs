@@ -14,7 +14,7 @@ use tracing::{error, info, warn};
 #[command(name = "k3rs-agent", about = "k3rs node agent (data plane)")]
 struct Cli {
     /// Path to YAML config file
-    #[arg(long, short, default_value = "/etc/k3rs/agent-config.yaml")]
+    #[arg(long, short, default_value = pkg_constants::paths::DEFAULT_AGENT_CONFIG)]
     config: String,
 
     /// Server API endpoint
@@ -74,21 +74,27 @@ async fn main() -> anyhow::Result<()> {
     let server = cli
         .server
         .or(file_cfg.server)
-        .unwrap_or_else(|| "http://127.0.0.1:6443".to_string());
+        .unwrap_or_else(|| pkg_constants::network::DEFAULT_API_ADDR.to_string());
     let token = cli
         .token
         .or(file_cfg.token)
-        .unwrap_or_else(|| "demo-token-123".to_string());
+        .unwrap_or_else(|| pkg_constants::auth::DEFAULT_JOIN_TOKEN.to_string());
     let node_name = cli
         .node_name
         .or(file_cfg.node_name)
         .unwrap_or_else(|| "node-1".to_string());
-    let proxy_port = cli.proxy_port.or(file_cfg.proxy_port).unwrap_or(6444);
+    let proxy_port = cli
+        .proxy_port
+        .or(file_cfg.proxy_port)
+        .unwrap_or(pkg_constants::network::DEFAULT_TUNNEL_PORT);
     let service_proxy_port = cli
         .service_proxy_port
         .or(file_cfg.service_proxy_port)
-        .unwrap_or(10256);
-    let _dns_port = cli.dns_port.or(file_cfg.dns_port).unwrap_or(5353);
+        .unwrap_or(pkg_constants::network::DEFAULT_SERVICE_PROXY_PORT);
+    let _dns_port = cli
+        .dns_port
+        .or(file_cfg.dns_port)
+        .unwrap_or(pkg_constants::network::DEFAULT_DNS_PORT);
 
     info!("Starting k3rs-agent for node: {}", node_name);
 
@@ -146,7 +152,11 @@ async fn main() -> anyhow::Result<()> {
                 );
 
                 // Store certs to disk for future mTLS connections
-                let cert_dir = format!("/tmp/k3rs-agent-{}", node_name);
+                let cert_dir = format!(
+                    "{}{}",
+                    pkg_constants::paths::AGENT_CERT_DIR_PREFIX,
+                    node_name
+                );
                 tokio::fs::create_dir_all(&cert_dir).await?;
                 tokio::fs::write(format!("{}/node.crt", cert_dir), &reg_resp.certificate).await?;
                 tokio::fs::write(format!("{}/node.key", cert_dir), &reg_resp.private_key).await?;
@@ -256,84 +266,89 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap();
 
             // Init container runtime (may download youki/crun)
-            let runtime: Option<Arc<ContainerRuntime>> =
-                match ContainerRuntime::new(None::<&str>).await {
-                    Ok(rt) => {
-                        let rt_arc = Arc::new(rt);
-                        info!("Container runtime ready: {}", rt_arc.backend_name());
+            let runtime: Option<Arc<ContainerRuntime>> = match ContainerRuntime::new(None::<&str>)
+                .await
+            {
+                Ok(rt) => {
+                    let rt_arc = Arc::new(rt);
+                    info!("Container runtime ready: {}", rt_arc.backend_name());
 
-                        // Start Agent API server for exec/logs
-                        let agent_state = api::AgentState {
-                            runtime: rt_arc.clone(),
-                        };
-                        let agent_router = api::create_agent_router(agent_state);
-                        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", ctrl_agent_api_port))
+                    // Start Agent API server for exec/logs
+                    let agent_state = api::AgentState {
+                        runtime: rt_arc.clone(),
+                    };
+                    let agent_router = api::create_agent_router(agent_state);
+                    let listener =
+                        tokio::net::TcpListener::bind(format!("0.0.0.0:{}", ctrl_agent_api_port))
                             .await
                             .expect("Failed to bind agent API port");
-                        info!("Agent API listening on 0.0.0.0:{}", ctrl_agent_api_port);
-                        tokio::spawn(async move {
-                            axum::serve(listener, agent_router).await.ok();
-                        });
+                    info!("Agent API listening on 0.0.0.0:{}", ctrl_agent_api_port);
+                    tokio::spawn(async move {
+                        axum::serve(listener, agent_router).await.ok();
+                    });
 
-                        // --- Agent Recovery ---
-                        info!("Starting agent recovery procedure...");
-                        let discovered = rt_arc.discover_running_containers().await.unwrap_or_default();
+                    // --- Agent Recovery ---
+                    info!("Starting agent recovery procedure...");
+                    let discovered = rt_arc
+                        .discover_running_containers()
+                        .await
+                        .unwrap_or_default();
 
-                        // Using ctrl_server, ctrl_token, ctrl_node_id here
-                        let url = format!(
-                            "{}/api/v1/nodes/{}/pods",
-                            ctrl_server.trim_end_matches('/'),
-                            ctrl_node_id
-                        );
-                        let desired_pods: Vec<pkg_types::pod::Pod> = match client
-                            .get(&url)
-                            .header("Authorization", format!("Bearer {}", ctrl_token))
-                            .send()
-                            .await
-                        {
-                            Ok(resp) => resp.json().await.unwrap_or_default(),
-                            Err(e) => {
-                                warn!("Agent recovery: failed to fetch desired pods: {}", e);
-                                vec![]
-                            }
-                        };
-
-                        let mut desired_running_ids = std::collections::HashMap::new();
-                        for pod in &desired_pods {
-                            desired_running_ids
-                                .insert(pod.id.clone(), (pod.name.clone(), pod.namespace.clone()));
+                    // Using ctrl_server, ctrl_token, ctrl_node_id here
+                    let url = format!(
+                        "{}/api/v1/nodes/{}/pods",
+                        ctrl_server.trim_end_matches('/'),
+                        ctrl_node_id
+                    );
+                    let desired_pods: Vec<pkg_types::pod::Pod> = match client
+                        .get(&url)
+                        .header("Authorization", format!("Bearer {}", ctrl_token))
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => resp.json().await.unwrap_or_default(),
+                        Err(e) => {
+                            warn!("Agent recovery: failed to fetch desired pods: {}", e);
+                            vec![]
                         }
+                    };
 
-                        for cid in discovered {
-                            if let Some((pod_name, pod_ns)) = desired_running_ids.get(&cid) {
-                                info!("Agent recovery: adopting desired container {}", cid);
-                                let status_url = format!(
-                                    "{}/api/v1/namespaces/{}/pods/{}/status",
-                                    ctrl_server.trim_end_matches('/'),
-                                    pod_ns,
-                                    pod_name
-                                );
-                                let _ = client
-                                    .put(&status_url)
-                                    .header("Authorization", format!("Bearer {}", ctrl_token))
-                                    .json(&pkg_types::pod::PodStatus::Running)
-                                    .send()
-                                    .await;
-                            } else {
-                                info!("Agent recovery: stopping orphaned container {}", cid);
-                                let _ = rt_arc.cleanup_container(&cid).await;
-                            }
+                    let mut desired_running_ids = std::collections::HashMap::new();
+                    for pod in &desired_pods {
+                        desired_running_ids
+                            .insert(pod.id.clone(), (pod.name.clone(), pod.namespace.clone()));
+                    }
+
+                    for cid in discovered {
+                        if let Some((pod_name, pod_ns)) = desired_running_ids.get(&cid) {
+                            info!("Agent recovery: adopting desired container {}", cid);
+                            let status_url = format!(
+                                "{}/api/v1/namespaces/{}/pods/{}/status",
+                                ctrl_server.trim_end_matches('/'),
+                                pod_ns,
+                                pod_name
+                            );
+                            let _ = client
+                                .put(&status_url)
+                                .header("Authorization", format!("Bearer {}", ctrl_token))
+                                .json(&pkg_types::pod::PodStatus::Running)
+                                .send()
+                                .await;
+                        } else {
+                            info!("Agent recovery: stopping orphaned container {}", cid);
+                            let _ = rt_arc.cleanup_container(&cid).await;
                         }
-                        info!("Agent recovery complete.");
-                        // ----------------------
+                    }
+                    info!("Agent recovery complete.");
+                    // ----------------------
 
-                        Some(rt_arc)
-                    }
-                    Err(e) => {
-                        warn!("Container runtime not available: {}. Pods will fail.", e);
-                        None
-                    }
-                };
+                    Some(rt_arc)
+                }
+                Err(e) => {
+                    warn!("Container runtime not available: {}. Pods will fail.", e);
+                    None
+                }
+            };
 
             // Image report loop
             let img_runtime = runtime.clone();

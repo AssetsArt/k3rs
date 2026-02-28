@@ -18,3 +18,4 @@ block2 = "0"
 dispatch2 = "*"
 signal-hook = "0"
 libc = "*"
+pkg-constants = { workspace = true }

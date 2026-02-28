@@ -1,20 +1,13 @@
 use anyhow::Result;
+use pkg_constants::{paths, runtime};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
-/// Default install directory for auto-downloaded runtimes
-const RUNTIME_DIR: &str = "/usr/local/bin/k3rs-runtime";
-const FALLBACK_RUNTIME_DIR: &str = ".k3rs/bin";
+/// All OCI runtimes supported by the installer (re-exported for callers).
+pub use runtime::SUPPORTED_RUNTIMES;
 
-/// Runtime versions to auto-download
-const YOUKI_VERSION: &str = "v0.6.0";
-const CRUN_VERSION: &str = "1.26";
-
-/// Supported OCI runtimes.
-pub const SUPPORTED_RUNTIMES: &[&str] = &["youki", "crun"];
-
-/// Default runtime when none is specified.
-pub const DEFAULT_RUNTIME: &str = "youki";
+/// Default runtime when none is specified (re-exported for callers).
+pub use runtime::DEFAULT_RUNTIME;
 
 /// Manages auto-downloading OCI runtimes (youki/crun) on Linux.
 pub struct RuntimeInstaller;
@@ -31,12 +24,12 @@ impl RuntimeInstaller {
     /// 3. Auto-download preferred runtime
     /// 4. Fallback: try other supported runtimes
     pub async fn ensure_runtime(preferred: Option<&str>) -> Result<PathBuf> {
-        let preferred = preferred.unwrap_or(DEFAULT_RUNTIME);
+        let preferred = preferred.unwrap_or(runtime::DEFAULT_RUNTIME);
 
         // Build search order: preferred first, then others
         let search_order: Vec<&str> = std::iter::once(preferred)
             .chain(
-                SUPPORTED_RUNTIMES
+                runtime::SUPPORTED_RUNTIMES
                     .iter()
                     .copied()
                     .filter(|r| *r != preferred),
@@ -72,7 +65,7 @@ impl RuntimeInstaller {
     /// Get the install directory — prefers /usr/local/bin/k3rs-runtime,
     /// falls back to $HOME/.k3rs/bin/ if no write access.
     fn install_dir() -> PathBuf {
-        let system_dir = PathBuf::from(RUNTIME_DIR);
+        let system_dir = PathBuf::from(paths::RUNTIME_INSTALL_DIR);
         if std::fs::create_dir_all(&system_dir).is_ok() {
             // Test write access
             let test_file = system_dir.join(".write_test");
@@ -84,7 +77,7 @@ impl RuntimeInstaller {
 
         // Fall back to home directory
         if let Ok(home) = std::env::var("HOME") {
-            let home_dir = PathBuf::from(home).join(FALLBACK_RUNTIME_DIR);
+            let home_dir = PathBuf::from(home).join(paths::RUNTIME_FALLBACK_DIR);
             let _ = std::fs::create_dir_all(&home_dir);
             return home_dir;
         }
@@ -137,12 +130,12 @@ impl RuntimeInstaller {
 
         let url = format!(
             "https://github.com/youki-dev/youki/releases/download/{}/youki-{}-{}-musl.tar.gz",
-            YOUKI_VERSION,
-            YOUKI_VERSION.trim_start_matches('v'),
+            runtime::YOUKI_VERSION,
+            runtime::YOUKI_VERSION.trim_start_matches('v'),
             youki_arch
         );
 
-        info!("Downloading youki {} from {}", YOUKI_VERSION, url);
+        info!("Downloading youki {} from {}", runtime::YOUKI_VERSION, url);
 
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
@@ -207,7 +200,7 @@ impl RuntimeInstaller {
         }
 
         // Save version info
-        Self::save_version_info(install_dir, "youki", YOUKI_VERSION).await?;
+        Self::save_version_info(install_dir, "youki", runtime::YOUKI_VERSION).await?;
 
         Ok(dest)
     }
@@ -223,10 +216,12 @@ impl RuntimeInstaller {
 
         let url = format!(
             "https://github.com/containers/crun/releases/download/{}/crun-{}-linux-{}",
-            CRUN_VERSION, CRUN_VERSION, crun_arch
+            runtime::CRUN_VERSION,
+            runtime::CRUN_VERSION,
+            crun_arch
         );
 
-        info!("Downloading crun {} from {}", CRUN_VERSION, url);
+        info!("Downloading crun {} from {}", runtime::CRUN_VERSION, url);
 
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
@@ -253,7 +248,7 @@ impl RuntimeInstaller {
         info!("Downloaded crun to {}", dest.display());
 
         // Save version info
-        Self::save_version_info(install_dir, "crun", CRUN_VERSION).await?;
+        Self::save_version_info(install_dir, "crun", runtime::CRUN_VERSION).await?;
 
         Ok(dest)
     }

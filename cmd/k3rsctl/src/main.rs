@@ -17,11 +17,11 @@ use tracing::info;
 #[command(name = "k3rsctl", about = "CLI tool for k3rs cluster management")]
 struct Cli {
     /// Server API endpoint
-    #[arg(long, default_value = "http://127.0.0.1:6443")]
+    #[arg(long, default_value = pkg_constants::network::DEFAULT_API_ADDR)]
     server: String,
 
     /// Authentication token
-    #[arg(long, default_value = "demo-token-123")]
+    #[arg(long, default_value = pkg_constants::auth::DEFAULT_JOIN_TOKEN)]
     token: String,
 
     #[command(subcommand)]

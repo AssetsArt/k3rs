@@ -42,8 +42,7 @@ use crate::backend::RuntimeBackend;
 use crate::kernel::KernelManager;
 
 /// Default VM resource configuration
-const DEFAULT_CPU_COUNT: u32 = 1;
-const DEFAULT_MEMORY_MB: u64 = 128;
+use pkg_constants::runtime::{DEFAULT_CPU_COUNT, DEFAULT_MEMORY_MB};
 
 /// Per-VM resource and path configuration.
 #[derive(Debug, Clone)]

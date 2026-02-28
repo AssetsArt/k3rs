@@ -16,3 +16,4 @@ serde_yaml = { workspace = true }
 pkg-types = { path = "../../pkg/types" }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+pkg-constants = { workspace = true }

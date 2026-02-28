@@ -12,8 +12,7 @@ use std::{io, thread};
 
 use tracing::{error, info};
 
-/// Socket directory for VM IPC
-const SOCKET_DIR: &str = "/tmp/k3rs-runtime/vms";
+use pkg_constants::paths::VMM_SOCKET_DIR;
 
 /// Global VM ID for cleanup on exit (set by boot command).
 static ACTIVE_VM_ID: OnceLock<String> = OnceLock::new();
@@ -35,7 +34,7 @@ pub fn cleanup() {
 
 /// Get the socket path for a given VM ID.
 pub fn socket_path(id: &str) -> String {
-    format!("{}/vmm-{}.sock", SOCKET_DIR, id)
+    format!("{}/vmm-{}.sock", VMM_SOCKET_DIR, id)
 }
 
 /// Start an IPC listener for exec requests on the given VM.
@@ -46,7 +45,7 @@ pub fn start_listener(id: &str, exec_handler: impl Fn(&[String]) -> String + Sen
     let path = socket_path(id);
 
     // Ensure socket directory exists
-    let _ = std::fs::create_dir_all(SOCKET_DIR);
+    let _ = std::fs::create_dir_all(VMM_SOCKET_DIR);
 
     // Remove stale socket
     let _ = std::fs::remove_file(&path);

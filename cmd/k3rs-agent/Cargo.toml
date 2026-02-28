@@ -20,3 +20,4 @@ pkg-types = { path = "../../pkg/types" }
 pkg-proxy = { path = "../../pkg/proxy" }
 pkg-container = { path = "../../pkg/container" }
 pkg-network = { path = "../../pkg/network" }
+pkg-constants = { workspace = true }

@@ -3675,6 +3675,7 @@ dependencies = [
  "axum 0.8.8",
  "clap",
  "futures-util",
+ "pkg-constants",
  "pkg-container",
  "pkg-network",
  "pkg-proxy",
@@ -3710,6 +3711,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "pkg-api",
+ "pkg-constants",
  "pkg-types",
  "tokio",
  "tracing",
@@ -3725,6 +3727,7 @@ dependencies = [
  "dioxus",
  "dioxus-free-icons",
  "gloo-timers",
+ "pkg-constants",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -3742,6 +3745,7 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "objc2-virtualization",
+ "pkg-constants",
  "signal-hook",
  "tracing",
  "tracing-subscriber",
@@ -3754,6 +3758,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures-util",
+ "pkg-constants",
  "pkg-types",
  "reqwest 0.13.2",
  "serde",
@@ -5390,6 +5395,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
+name = "pkg-constants"
+version = "0.1.0"
+
+[[package]]
 name = "pkg-container"
 version = "0.1.0"
 dependencies = [
@@ -5400,6 +5409,7 @@ dependencies = [
  "flate2",
  "libc",
  "oci-client",
+ "pkg-constants",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -5481,6 +5491,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "pkg-constants",
  "serde",
  "serde_json",
  "slatedb",
