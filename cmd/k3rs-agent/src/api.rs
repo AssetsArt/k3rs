@@ -187,6 +187,7 @@ async fn handle_tty(
     // (which is what lets reads on the master return EOF when the child exits).
     let child = unsafe {
         use std::os::unix::io::FromRawFd;
+        use std::os::unix::process::CommandExt;
         use std::process::Stdio;
         tokio::process::Command::new(bin)
             .args(&bin_args)
@@ -194,6 +195,14 @@ async fn handle_tty(
             .stdin(Stdio::from_raw_fd(slave_fd))
             .stdout(Stdio::from_raw_fd(libc::dup(slave_fd)))
             .stderr(Stdio::from_raw_fd(libc::dup(slave_fd)))
+            .pre_exec(|| {
+                // Create a new session so we can acquire a controlling terminal.
+                libc::setsid();
+                // Make the slave PTY the controlling terminal of this session.
+                // Without this, shells print "can't access tty" and disable job control.
+                libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0);
+                Ok(())
+            })
             .spawn()
     };
 
