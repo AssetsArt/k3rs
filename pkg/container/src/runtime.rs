@@ -199,7 +199,25 @@ impl ContainerRuntime {
                     self.backend.clone()
                 }
             } else if name == "youki" || name == "crun" {
-                Arc::new(OciBackend::with_name(name, &self.data_dir)?) as Arc<dyn RuntimeBackend>
+                // Try PATH first; auto-download if not found.
+                match OciBackend::with_name(name, &self.data_dir) {
+                    Ok(b) => Arc::new(b) as Arc<dyn RuntimeBackend>,
+                    Err(_) => {
+                        info!(
+                            "OCI runtime {} not in PATH — attempting auto-download...",
+                            name
+                        );
+                        let downloaded = crate::installer::RuntimeInstaller::ensure_runtime(None)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("Auto-download failed for {}: {}", name, e)
+                            })?;
+                        Arc::new(OciBackend::new(
+                            &downloaded.to_string_lossy(),
+                            &self.data_dir,
+                        )) as Arc<dyn RuntimeBackend>
+                    }
+                }
             } else {
                 info!("Requested runtime {} not available, using default", name);
                 self.backend.clone()
@@ -222,7 +240,10 @@ impl ContainerRuntime {
         // to avoid "container already exists" errors.
         if let Ok(state) = backend.state(id).await {
             if state.status == "stopped" || state.status == "exited" {
-                info!("Container {} exists in stopped/exited state, cleaning up first...", id);
+                info!(
+                    "Container {} exists in stopped/exited state, cleaning up first...",
+                    id
+                );
                 let _ = backend.delete(id).await;
             }
         }
@@ -276,7 +297,9 @@ impl ContainerRuntime {
                         return self.backend.clone();
                     } else {
                         // This shouldn't happen often, but handle fallback
-                        if let Ok(virt) = crate::virt::VirtualizationBackend::new(&self.data_dir).await {
+                        if let Ok(virt) =
+                            crate::virt::VirtualizationBackend::new(&self.data_dir).await
+                        {
                             return Arc::new(virt);
                         }
                     }
@@ -284,7 +307,9 @@ impl ContainerRuntime {
                     if self.backend.name() == "vm" {
                         return self.backend.clone();
                     } else {
-                        return Arc::new(crate::firecracker::FirecrackerBackend::new(&self.data_dir));
+                        return Arc::new(crate::firecracker::FirecrackerBackend::new(
+                            &self.data_dir,
+                        ));
                     }
                 }
             } else if entry.runtime_name == "youki" || entry.runtime_name == "crun" {
@@ -312,7 +337,11 @@ impl ContainerRuntime {
         backend.stop(id).await?;
         backend.delete(id).await?;
         self.store.update_state(id, ContainerState::Stopped);
-        info!("Container {} stopped and deleted via {}", id, backend.name());
+        info!(
+            "Container {} stopped and deleted via {}",
+            id,
+            backend.name()
+        );
         Ok(())
     }
 
