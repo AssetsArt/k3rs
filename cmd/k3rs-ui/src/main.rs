@@ -75,116 +75,151 @@ fn Layout() -> Element {
     let route: Route = use_route();
     use_context_provider(move || namespace);
 
-    let link_cls = |target: &Route| {
+    let nav_cls = |target: &Route| {
         if *target == route {
-            "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium text-blue-400 bg-blue-500/10"
+            "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium text-blue-400 bg-blue-500/10 ring-1 ring-blue-500/20"
         } else {
-            "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 transition-all"
+            "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-all"
         }
     };
-    let sub_link_cls = |target: &Route| {
+    let sub_cls = |target: &Route| {
         if *target == route {
-            "flex items-center gap-2 pl-5 pr-3 py-1.5 rounded-lg text-[13px] font-medium text-blue-400 bg-blue-500/10"
+            "flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-[13px] font-medium text-blue-400 bg-blue-500/10 ring-1 ring-blue-500/20"
         } else {
-            "flex items-center gap-2 pl-5 pr-3 py-1.5 rounded-lg text-[13px] font-medium text-slate-500 hover:text-slate-300 hover:bg-slate-800/60 transition-all"
+            "flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-[13px] font-medium text-slate-500 hover:text-slate-300 hover:bg-white/5 transition-all"
         }
     };
 
     rsx! {
-        div { class: "flex min-h-screen",
-            // Sidebar
-            nav { class: "w-56 bg-slate-900 border-r border-slate-800 fixed top-0 left-0 bottom-0 flex flex-col",
-                div { class: "px-5 py-5 border-b border-slate-800",
-                    h1 { class: "text-lg font-bold text-white tracking-tight", "k3rs" }
-                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest mt-0.5", "management" }
+        div { class: "flex min-h-screen bg-slate-950",
+            // ── Sidebar ──────────────────────────────────────────
+            nav { class: "w-56 bg-slate-950 border-r border-slate-800/60 fixed top-0 left-0 bottom-0 flex flex-col",
+
+                // Brand
+                div { class: "px-4 py-5 border-b border-slate-800/60",
+                    div { class: "flex items-center gap-2.5",
+                        div { class: "w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center shrink-0 shadow-lg shadow-blue-500/20",
+                            span { class: "text-white text-xs font-black tracking-tight", "k3" }
+                        }
+                        div {
+                            p { class: "text-sm font-bold text-white leading-tight", "k3rs" }
+                            p { class: "text-[9px] font-medium text-slate-500 uppercase tracking-widest", "cluster" }
+                        }
+                    }
                 }
 
-                div { class: "px-3 py-3",
-                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mb-1.5", "Namespace" }
-                    select {
-                        class: "w-full bg-slate-800 border border-slate-700 rounded-md px-2.5 py-1.5 text-xs text-slate-300 outline-none focus:border-blue-500 transition-colors",
-                        value: "{namespace}",
-                        onchange: move |evt| namespace.set(evt.value()),
-                        option { value: "default", "default" }
-                        option { value: "k3rs-system", "k3rs-system" }
+                // Namespace selector
+                div { class: "px-3 py-3 border-b border-slate-800/60",
+                    label { class: "text-[9px] font-semibold uppercase tracking-widest text-slate-600 px-1 mb-1.5 block",
+                        "Namespace"
+                    }
+                    div { class: "flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700/60 hover:border-slate-600/60 transition-colors",
+                        div { class: "w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0 shadow-sm shadow-emerald-400/50" }
+                        select {
+                            class: "flex-1 bg-transparent text-xs text-slate-300 outline-none cursor-pointer",
+                            value: "{namespace}",
+                            onchange: move |evt| namespace.set(evt.value()),
+                            option { value: "default", "default" }
+                            option { value: "k3rs-system", "k3rs-system" }
+                        }
                     }
                 }
 
-                div { class: "flex-1 px-3 py-1 space-y-0.5 overflow-y-auto",
-                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mb-1.5", "Menu" }
-                    Link { class: link_cls(&Route::Dashboard {}), to: Route::Dashboard {},
-                        Icon { width: 16, height: 16, icon: LdLayoutDashboard }
-                        span { "Dashboard" }
+                // Navigation
+                div { class: "flex-1 px-2 py-3 overflow-y-auto space-y-0.5",
+
+                    p { class: "text-[9px] font-bold uppercase tracking-[0.15em] text-slate-600 px-3 py-1 mt-0.5",
+                        "Overview"
                     }
-                    Link { class: link_cls(&Route::Nodes {}), to: Route::Nodes {},
-                        Icon { width: 16, height: 16, icon: LdServer }
-                        span { "Nodes" }
+                    Link { class: nav_cls(&Route::Dashboard {}), to: Route::Dashboard {},
+                        Icon { width: 14, height: 14, icon: LdLayoutDashboard }
+                        "Dashboard"
+                    }
+                    Link { class: nav_cls(&Route::Nodes {}), to: Route::Nodes {},
+                        Icon { width: 14, height: 14, icon: LdServer }
+                        "Nodes"
                     }
 
-                    // Workloads group
-                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mt-4 mb-1.5", "Workloads" }
-                    Link { class: sub_link_cls(&Route::Deployments {}), to: Route::Deployments {},
-                        Icon { width: 14, height: 14, icon: LdRocket }
-                        span { "Deployments" }
+                    p { class: "text-[9px] font-bold uppercase tracking-[0.15em] text-slate-600 px-3 py-1 mt-3",
+                        "Workloads"
                     }
-                    Link { class: sub_link_cls(&Route::Services {}), to: Route::Services {},
-                        Icon { width: 14, height: 14, icon: LdNetwork }
-                        span { "Services" }
+                    Link { class: sub_cls(&Route::Deployments {}), to: Route::Deployments {},
+                        Icon { width: 13, height: 13, icon: LdRocket }
+                        "Deployments"
                     }
-                    Link { class: sub_link_cls(&Route::Pods {}), to: Route::Pods {},
-                        Icon { width: 14, height: 14, icon: LdBox }
-                        span { "Pods" }
-                    }
-                    Link { class: sub_link_cls(&Route::ConfigMaps {}), to: Route::ConfigMaps {},
-                        Icon { width: 14, height: 14, icon: LdFileText }
-                        span { "ConfigMaps" }
-                    }
-                    Link { class: sub_link_cls(&Route::Secrets {}), to: Route::Secrets {},
-                        Icon { width: 14, height: 14, icon: LdKeyRound }
-                        span { "Secrets" }
+                    Link { class: sub_cls(&Route::Pods {}), to: Route::Pods {},
+                        Icon { width: 13, height: 13, icon: LdBox }
+                        "Pods"
                     }
 
-                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mt-4 mb-1.5", "Networking" }
-                    Link { class: sub_link_cls(&Route::Ingress {}), to: Route::Ingress {},
-                        Icon { width: 14, height: 14, icon: LdGlobe }
-                        span { "Ingress" }
+                    p { class: "text-[9px] font-bold uppercase tracking-[0.15em] text-slate-600 px-3 py-1 mt-3",
+                        "Config"
                     }
-                    Link { class: sub_link_cls(&Route::NetworkPolicies {}), to: Route::NetworkPolicies {},
-                        Icon { width: 14, height: 14, icon: LdShield }
-                        span { "Network Policies" }
+                    Link { class: sub_cls(&Route::ConfigMaps {}), to: Route::ConfigMaps {},
+                        Icon { width: 13, height: 13, icon: LdFileText }
+                        "ConfigMaps"
                     }
-
-                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mt-4 mb-1.5", "Policies" }
-                    Link { class: sub_link_cls(&Route::Quotas {}), to: Route::Quotas {},
-                        Icon { width: 14, height: 14, icon: LdGauge }
-                        span { "Resource Quotas" }
+                    Link { class: sub_cls(&Route::Secrets {}), to: Route::Secrets {},
+                        Icon { width: 13, height: 13, icon: LdKeyRound }
+                        "Secrets"
                     }
 
-                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mt-4 mb-1.5", "Storage" }
-                    Link { class: sub_link_cls(&Route::Volumes {}), to: Route::Volumes {},
-                        Icon { width: 14, height: 14, icon: LdHardDrive }
-                        span { "Volumes" }
+                    p { class: "text-[9px] font-bold uppercase tracking-[0.15em] text-slate-600 px-3 py-1 mt-3",
+                        "Networking"
+                    }
+                    Link { class: sub_cls(&Route::Services {}), to: Route::Services {},
+                        Icon { width: 13, height: 13, icon: LdNetwork }
+                        "Services"
+                    }
+                    Link { class: sub_cls(&Route::Ingress {}), to: Route::Ingress {},
+                        Icon { width: 13, height: 13, icon: LdGlobe }
+                        "Ingress"
+                    }
+                    Link { class: sub_cls(&Route::NetworkPolicies {}), to: Route::NetworkPolicies {},
+                        Icon { width: 13, height: 13, icon: LdShield }
+                        "Network Policies"
                     }
 
-                    p { class: "text-[10px] text-slate-500 uppercase tracking-widest px-2 mt-4 mb-1.5", "Cluster" }
-                    Link { class: sub_link_cls(&Route::ProcessList {}), to: Route::ProcessList {},
-                        Icon { width: 14, height: 14, icon: LdCpu }
-                        span { "Processes" }
+                    p { class: "text-[9px] font-bold uppercase tracking-[0.15em] text-slate-600 px-3 py-1 mt-3",
+                        "Storage"
                     }
-                    Link { class: sub_link_cls(&Route::Events {}), to: Route::Events {},
-                        Icon { width: 14, height: 14, icon: LdActivity }
-                        span { "Events" }
+                    Link { class: sub_cls(&Route::Volumes {}), to: Route::Volumes {},
+                        Icon { width: 13, height: 13, icon: LdHardDrive }
+                        "Volumes"
                     }
-                    Link { class: sub_link_cls(&Route::Images {}), to: Route::Images {},
-                        Icon { width: 14, height: 14, icon: LdPackage }
-                        span { "Images" }
+                    Link { class: sub_cls(&Route::Quotas {}), to: Route::Quotas {},
+                        Icon { width: 13, height: 13, icon: LdGauge }
+                        "Resource Quotas"
                     }
+
+                    p { class: "text-[9px] font-bold uppercase tracking-[0.15em] text-slate-600 px-3 py-1 mt-3",
+                        "Cluster"
+                    }
+                    Link { class: sub_cls(&Route::ProcessList {}), to: Route::ProcessList {},
+                        Icon { width: 13, height: 13, icon: LdCpu }
+                        "Processes"
+                    }
+                    Link { class: sub_cls(&Route::Events {}), to: Route::Events {},
+                        Icon { width: 13, height: 13, icon: LdActivity }
+                        "Events"
+                    }
+                    Link { class: sub_cls(&Route::Images {}), to: Route::Images {},
+                        Icon { width: 13, height: 13, icon: LdPackage }
+                        "Images"
+                    }
+                }
+
+                // Footer
+                div { class: "px-4 py-3 border-t border-slate-800/60",
+                    p { class: "text-[10px] text-slate-700 font-mono", "v0.1.0+k3rs" }
                 }
             }
 
-            // Main
-            main { class: "ml-56 flex-1 p-8 min-h-screen",
-                Outlet::<Route> {}
+            // ── Main ─────────────────────────────────────────────
+            main { class: "ml-56 flex-1 min-h-screen",
+                div { class: "max-w-screen-xl mx-auto px-8 py-8",
+                    Outlet::<Route> {}
+                }
             }
         }
     }
