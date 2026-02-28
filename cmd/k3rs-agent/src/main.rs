@@ -8,7 +8,7 @@ use pkg_types::node::NodeRegistrationRequest;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
 #[command(name = "k3rs-agent", about = "k3rs node agent (data plane)")]
@@ -143,38 +143,47 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 2. Start heartbeat immediately after registration (before any heavy init)
+    //    Uses a dedicated OS thread + runtime because Pingora's run_forever()
+    //    starves the main tokio runtime's task queue.
     let server_base = server.clone();
     let heartbeat_node_name = node_name.clone();
-    let heartbeat_client = client.clone();
-    let token_clone = token.clone();
+    let heartbeat_token = token.clone();
 
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
-        loop {
-            interval.tick().await;
-            let url = format!(
-                "{}/api/v1/nodes/{}/heartbeat",
-                server_base.trim_end_matches('/'),
-                heartbeat_node_name
-            );
-            match heartbeat_client
-                .put(&url)
-                .header("Authorization", format!("Bearer {}", token_clone))
-                .send()
-                .await
-            {
-                Ok(resp) => {
-                    debug!(
-                        "Heartbeat sent for {} (status={})",
-                        heartbeat_node_name,
-                        resp.status()
-                    );
-                }
-                Err(e) => {
-                    warn!("Heartbeat failed: {}", e);
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("heartbeat runtime");
+        rt.block_on(async move {
+            let client = reqwest::Client::new();
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                let url = format!(
+                    "{}/api/v1/nodes/{}/heartbeat",
+                    server_base.trim_end_matches('/'),
+                    heartbeat_node_name
+                );
+                match client
+                    .put(&url)
+                    .header("Authorization", format!("Bearer {}", heartbeat_token))
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => {
+                        info!(
+                            "Heartbeat OK for {} (status={})",
+                            heartbeat_node_name,
+                            resp.status()
+                        );
+                    }
+                    Err(e) => {
+                        warn!("Heartbeat failed for {}: {}", heartbeat_node_name, e);
+                    }
                 }
             }
-        }
+        });
     });
     info!("Heartbeat loop started (every 10s)");
 
@@ -194,255 +203,302 @@ async fn main() -> anyhow::Result<()> {
     let dns_server = Arc::new(DnsServer::new(dns_addr));
     dns_server.start().await?;
 
-    // 5. Pod Sync and Route Sync loops
-    info!("Starting node controllers (pod-sync, route-sync)");
+    // 5. Agent controller loops — run in a dedicated thread with its own tokio runtime
+    //    because Pingora's run_forever() starves the main runtime's task queue.
+    info!("Starting node controllers (pod-sync, image-report, route-sync)");
 
-    // Image report loop — report cached images to server every 30s
-    let img_server = server.clone();
-    let img_node_name = node_name.clone();
-    let img_client = client.clone();
-    let img_token = token.clone();
+    let ctrl_server = server.clone();
+    let ctrl_token = token.clone();
+    let ctrl_node_id = my_node_id.clone();
+    let ctrl_service_proxy = service_proxy.clone();
+    let ctrl_dns_server = dns_server.clone();
 
-    // Pod Sync loop
-    let runtime = match ContainerRuntime::new(None::<&str>).await {
-        Ok(rt) => Some(Arc::new(rt)),
-        Err(e) => {
-            warn!(
-                "Container runtime not available: {}. Pod scheduling will fail but node stays Ready.",
-                e
-            );
-            None
-        }
-    };
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("controller runtime");
 
-    let img_runtime = runtime.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            let Some(ref rt) = img_runtime else {
-                continue;
-            };
-            match rt.list_images().await {
-                Ok(images) => {
+        rt.block_on(async move {
+            let client = reqwest::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .build()
+                .unwrap();
+
+            // Init container runtime (may download youki/crun)
+            let runtime: Option<Arc<ContainerRuntime>> =
+                match ContainerRuntime::new(None::<&str>).await {
+                    Ok(rt) => {
+                        info!("Container runtime ready: {}", rt.backend_name());
+                        Some(Arc::new(rt))
+                    }
+                    Err(e) => {
+                        warn!("Container runtime not available: {}. Pods will fail.", e);
+                        None
+                    }
+                };
+
+            // Image report loop
+            let img_runtime = runtime.clone();
+            let img_client = client.clone();
+            let img_server = ctrl_server.clone();
+            let img_token = ctrl_token.clone();
+            let img_node = ctrl_node_id.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    let Some(ref rt) = img_runtime else { continue };
+                    match rt.list_images().await {
+                        Ok(images) => {
+                            let url = format!(
+                                "{}/api/v1/nodes/{}/images",
+                                img_server.trim_end_matches('/'),
+                                img_node
+                            );
+                            let _ = img_client
+                                .put(&url)
+                                .header("Authorization", format!("Bearer {}", img_token))
+                                .json(&images)
+                                .send()
+                                .await;
+                        }
+                        Err(e) => warn!("Failed to list images: {}", e),
+                    }
+                }
+            });
+
+            // Pod sync loop
+            let sync_client = client.clone();
+            let sync_server = ctrl_server.clone();
+            let sync_token = ctrl_token.clone();
+            let sync_node_id = ctrl_node_id.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+                loop {
+                    interval.tick().await;
+
+                    let ns = "default";
                     let url = format!(
-                        "{}/api/v1/nodes/{}/images",
-                        img_server.trim_end_matches('/'),
-                        img_node_name
+                        "{}/api/v1/namespaces/{}/pods",
+                        sync_server.trim_end_matches('/'),
+                        ns
                     );
-                    match img_client
-                        .put(&url)
-                        .header("Authorization", format!("Bearer {}", img_token))
-                        .json(&images)
+
+                    let resp = match sync_client
+                        .get(&url)
+                        .header("Authorization", format!("Bearer {}", sync_token))
                         .send()
                         .await
                     {
-                        Ok(_) => info!("Reported {} images for {}", images.len(), img_node_name),
-                        Err(e) => warn!("Image report failed: {}", e),
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!("Pod sync failed to fetch pods: {}", e);
+                            continue;
+                        }
+                    };
+
+                    if let Ok(pods) = resp.json::<Vec<pkg_types::pod::Pod>>().await {
+                        for pod in pods {
+                            if pod.node_name.as_deref() == Some(sync_node_id.as_str())
+                                && (pod.status == pkg_types::pod::PodStatus::Scheduled
+                                    || pod.status
+                                        == pkg_types::pod::PodStatus::ContainerCreating)
+                            {
+                                info!(
+                                    "Found scheduled pod: {} (image: {})",
+                                    pod.name,
+                                    pod.spec
+                                        .containers
+                                        .first()
+                                        .map(|c| c.image.as_str())
+                                        .unwrap_or("unknown")
+                                );
+
+                                let status_url = format!(
+                                    "{}/api/v1/namespaces/{}/pods/{}/status",
+                                    sync_server.trim_end_matches('/'),
+                                    ns,
+                                    pod.id
+                                );
+
+                                // Check runtime availability
+                                let Some(ref runtime) = runtime else {
+                                    error!("[pod:{}] No container runtime available!", pod.name);
+                                    let _ = sync_client
+                                        .put(&status_url)
+                                        .header(
+                                            "Authorization",
+                                            format!("Bearer {}", sync_token),
+                                        )
+                                        .json(&serde_json::json!({
+                                            "status": "Failed",
+                                            "status_message": "No container runtime (youki/crun) available on this node"
+                                        }))
+                                        .send()
+                                        .await;
+                                    continue;
+                                };
+
+                                let container_spec = pod.spec.containers.first();
+                                let image = container_spec
+                                    .map(|c| c.image.as_str())
+                                    .unwrap_or("alpine:latest");
+                                let command: Vec<String> = container_spec
+                                    .map(|c| {
+                                        let mut cmd = c.command.clone();
+                                        cmd.extend(c.args.clone());
+                                        cmd
+                                    })
+                                    .unwrap_or_default();
+                                let env = container_spec
+                                    .map(|c| c.env.clone())
+                                    .unwrap_or_default();
+
+                                // 1. Pull Image
+                                info!("[pod:{}] Pulling image: {}", pod.name, image);
+                                if let Err(e) = runtime.pull_image(image).await {
+                                    error!("[pod:{}] Image pull failed: {}", pod.name, e);
+                                    let _ = sync_client
+                                        .put(&status_url)
+                                        .header(
+                                            "Authorization",
+                                            format!("Bearer {}", sync_token),
+                                        )
+                                        .json(&serde_json::json!({
+                                            "status": "Failed",
+                                            "status_message": format!("ImagePullError: {}", e)
+                                        }))
+                                        .send()
+                                        .await;
+                                    continue;
+                                }
+
+                                // 2. Create Container
+                                info!(
+                                    "[pod:{}] Creating container: {}",
+                                    pod.name, pod.id
+                                );
+                                if let Err(e) = runtime
+                                    .create_container(&pod.id, image, &command, &env)
+                                    .await
+                                {
+                                    error!(
+                                        "[pod:{}] Container creation failed: {}",
+                                        pod.name, e
+                                    );
+                                    let _ = sync_client
+                                        .put(&status_url)
+                                        .header(
+                                            "Authorization",
+                                            format!("Bearer {}", sync_token),
+                                        )
+                                        .json(&serde_json::json!({
+                                            "status": "Failed",
+                                            "status_message": format!("ContainerCreateError: {}", e)
+                                        }))
+                                        .send()
+                                        .await;
+                                    continue;
+                                }
+
+                                // 3. Start Container
+                                info!(
+                                    "[pod:{}] Starting container: {}",
+                                    pod.name, pod.id
+                                );
+                                if let Err(e) = runtime.start_container(&pod.id).await {
+                                    error!(
+                                        "[pod:{}] Container start failed: {}",
+                                        pod.name, e
+                                    );
+                                    let _ = runtime.cleanup_container(&pod.id).await;
+                                    let _ = sync_client
+                                        .put(&status_url)
+                                        .header(
+                                            "Authorization",
+                                            format!("Bearer {}", sync_token),
+                                        )
+                                        .json(&serde_json::json!({
+                                            "status": "Failed",
+                                            "status_message": format!("ContainerStartError: {}", e)
+                                        }))
+                                        .send()
+                                        .await;
+                                    continue;
+                                }
+
+                                // 4. Success
+                                info!(
+                                    "[pod:{}] Container running via {}",
+                                    pod.name,
+                                    runtime.backend_name()
+                                );
+                                let _ = sync_client
+                                    .put(&status_url)
+                                    .header(
+                                        "Authorization",
+                                        format!("Bearer {}", sync_token),
+                                    )
+                                    .json(&pkg_types::pod::PodStatus::Running)
+                                    .send()
+                                    .await;
+                            }
+                        }
                     }
                 }
-                Err(e) => warn!("Failed to list images: {}", e),
-            }
-        }
-    });
-    let sync_client = client.clone();
-    let sync_server_base = server.clone();
-    let sync_token = token.clone();
+            });
 
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
-        loop {
-            interval.tick().await;
+            // Route sync loop
+            let route_client = client.clone();
+            let route_server = ctrl_server.clone();
+            let route_token = ctrl_token.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+                loop {
+                    interval.tick().await;
 
-            let Some(ref runtime) = runtime else {
-                continue;
-            };
+                    let ns = "default";
+                    let base = route_server.trim_end_matches('/');
+                    let auth = format!("Bearer {}", route_token);
 
-            // For now, poll default namespace
-            let ns = "default";
-            let url = format!(
-                "{}/api/v1/namespaces/{}/pods",
-                sync_server_base.trim_end_matches('/'),
-                ns
-            );
-
-            let resp = match sync_client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", sync_token))
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("Pod sync failed to fetch pods: {}", e);
-                    continue;
-                }
-            };
-
-            if let Ok(pods) = resp.json::<Vec<pkg_types::pod::Pod>>().await {
-                for pod in pods {
-                    // Only process pods assigned to this node and not yet running
-                    if pod.node_name.as_deref() == Some(my_node_id.as_str())
-                        && (pod.status == pkg_types::pod::PodStatus::Scheduled
-                            || pod.status == pkg_types::pod::PodStatus::ContainerCreating)
+                    let services: Vec<pkg_types::service::Service> = match route_client
+                        .get(&format!("{}/api/v1/namespaces/{}/services", base, ns))
+                        .header("Authorization", &auth)
+                        .send()
+                        .await
                     {
-                        info!(
-                            "Found new scheduled pod: {} (image: {})",
-                            pod.name,
-                            pod.spec
-                                .containers
-                                .first()
-                                .map(|c| c.image.as_str())
-                                .unwrap_or("unknown")
-                        );
-
-                        let status_url = format!(
-                            "{}/api/v1/namespaces/{}/pods/{}/status",
-                            sync_server_base.trim_end_matches('/'),
-                            ns,
-                            pod.id
-                        );
-
-                        // Extract container spec from pod
-                        let container_spec = pod.spec.containers.first();
-                        let image = container_spec
-                            .map(|c| c.image.as_str())
-                            .unwrap_or("alpine:latest");
-                        let command: Vec<String> = container_spec
-                            .map(|c| {
-                                let mut cmd = c.command.clone();
-                                cmd.extend(c.args.clone());
-                                cmd
-                            })
-                            .unwrap_or_default();
-                        let env = container_spec.map(|c| c.env.clone()).unwrap_or_default();
-
-                        // 1. Pull Image
-                        info!("[pod:{}] Pulling image: {}", pod.name, image);
-                        if let Err(e) = runtime.pull_image(image).await {
-                            error!("[pod:{}] Image pull failed: {}", pod.name, e);
-                            let _ = sync_client
-                                .put(&status_url)
-                                .header("Authorization", format!("Bearer {}", sync_token))
-                                .json(&serde_json::json!({
-                                    "status": "Failed",
-                                    "status_message": format!("ImagePullError: {}", e)
-                                }))
-                                .send()
-                                .await;
+                        Ok(r) => r.json().await.unwrap_or_default(),
+                        Err(e) => {
+                            warn!("Route sync: failed to fetch services: {}", e);
                             continue;
                         }
+                    };
 
-                        // 2. Create Container
-                        info!("[pod:{}] Creating container: {}", pod.name, pod.id);
-                        if let Err(e) = runtime
-                            .create_container(&pod.id, image, &command, &env)
-                            .await
-                        {
-                            error!("[pod:{}] Container creation failed: {}", pod.name, e);
-                            let _ = sync_client
-                                .put(&status_url)
-                                .header("Authorization", format!("Bearer {}", sync_token))
-                                .json(&serde_json::json!({
-                                    "status": "Failed",
-                                    "status_message": format!("ContainerCreateError: {}", e)
-                                }))
-                                .send()
-                                .await;
+                    let endpoints: Vec<pkg_types::endpoint::Endpoint> = match route_client
+                        .get(&format!("{}/api/v1/namespaces/{}/endpoints", base, ns))
+                        .header("Authorization", &auth)
+                        .send()
+                        .await
+                    {
+                        Ok(r) => r.json().await.unwrap_or_default(),
+                        Err(e) => {
+                            warn!("Route sync: failed to fetch endpoints: {}", e);
                             continue;
                         }
+                    };
 
-                        // 3. Start Container
-                        info!("[pod:{}] Starting container: {}", pod.name, pod.id);
-                        if let Err(e) = runtime.start_container(&pod.id).await {
-                            error!("[pod:{}] Container start failed: {}", pod.name, e);
-                            // Clean up the created-but-failed container
-                            let _ = runtime.cleanup_container(&pod.id).await;
-                            let _ = sync_client
-                                .put(&status_url)
-                                .header("Authorization", format!("Bearer {}", sync_token))
-                                .json(&serde_json::json!({
-                                    "status": "Failed",
-                                    "status_message": format!("ContainerStartError: {}", e)
-                                }))
-                                .send()
-                                .await;
-                            continue;
-                        }
-
-                        // 4. Success — Update Status to Running
-                        info!(
-                            "[pod:{}] Container running via {}",
-                            pod.name,
-                            runtime.backend_name()
-                        );
-                        let new_status = pkg_types::pod::PodStatus::Running;
-                        let _ = sync_client
-                            .put(&status_url)
-                            .header("Authorization", format!("Bearer {}", sync_token))
-                            .json(&new_status)
-                            .send()
-                            .await;
-                    }
+                    ctrl_service_proxy
+                        .update_routes(&services, &endpoints)
+                        .await;
+                    ctrl_dns_server.update_records(&services).await;
                 }
-            }
-        }
-    });
+            });
 
-    // Route Sync loop (Phase 3) — synchronize Service Proxy and DNS with cluster state
-    let route_sync_client = client.clone();
-    let route_sync_server = server.clone();
-    let route_sync_token = token.clone();
-    let route_service_proxy = service_proxy.clone();
-    let route_dns_server = dns_server.clone();
-
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
-        loop {
-            interval.tick().await;
-
-            let ns = "default";
-            let base = route_sync_server.trim_end_matches('/');
-            let auth_header = format!("Bearer {}", route_sync_token);
-
-            // Fetch services
-            let services_url = format!("{}/api/v1/namespaces/{}/services", base, ns);
-            let services: Vec<pkg_types::service::Service> = match route_sync_client
-                .get(&services_url)
-                .header("Authorization", &auth_header)
-                .send()
-                .await
-            {
-                Ok(r) => r.json().await.unwrap_or_default(),
-                Err(e) => {
-                    warn!("Route sync: failed to fetch services: {}", e);
-                    continue;
-                }
-            };
-
-            // Fetch endpoints
-            let endpoints_url = format!("{}/api/v1/namespaces/{}/endpoints", base, ns);
-            let endpoints: Vec<pkg_types::endpoint::Endpoint> = match route_sync_client
-                .get(&endpoints_url)
-                .header("Authorization", &auth_header)
-                .send()
-                .await
-            {
-                Ok(r) => r.json().await.unwrap_or_default(),
-                Err(e) => {
-                    warn!("Route sync: failed to fetch endpoints: {}", e);
-                    continue;
-                }
-            };
-
-            // Update Service Proxy routing table
-            route_service_proxy
-                .update_routes(&services, &endpoints)
-                .await;
-
-            // Update DNS records
-            route_dns_server.update_records(&services).await;
-        }
+            // Keep this thread alive forever
+            tokio::signal::ctrl_c().await.ok();
+        });
     });
 
     // Block until Ctrl-C
