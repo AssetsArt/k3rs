@@ -244,8 +244,8 @@ async fn handle_tty(
 
     let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
 
-    // Task: PTY master → channel → WebSocket
-    let read_task = tokio::spawn(async move {
+    // Task: PTY master → channel (does NOT own ws_sender so we can send Close on exit).
+    let mut read_task = tokio::spawn(async move {
         let mut buf = [0u8; 1024];
         loop {
             match master_read.read(&mut buf).await {
@@ -259,16 +259,8 @@ async fn handle_tty(
         }
     });
 
-    let ws_send_task = tokio::spawn(async move {
-        while let Some(bytes) = output_rx.recv().await {
-            if ws_sender.send(Message::Binary(bytes.into())).await.is_err() {
-                break;
-            }
-        }
-    });
-
     // Task: WebSocket → PTY master
-    let write_task = tokio::spawn(async move {
+    let mut write_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 Message::Binary(bytes) => {
@@ -282,14 +274,53 @@ async fn handle_tty(
         }
     });
 
-    tokio::select! {
-        _ = read_task => {},
-        _ = ws_send_task => {},
-        _ = write_task => {},
-        _ = child.wait() => {
-            info!("PTY exec process exited for {}", container_id);
-        },
+    // Task: wait for child exit
+    let mut child_task = tokio::spawn(async move { child.wait().await });
+
+    // Main loop: ws_sender stays in scope so we can send Close when the session ends.
+    loop {
+        tokio::select! {
+            bytes = output_rx.recv() => {
+                match bytes {
+                    Some(b) => {
+                        if ws_sender.send(Message::Binary(b.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break, // read_task finished (EIO after child exit)
+                }
+            }
+            _ = &mut write_task => break, // client disconnected
+            _ = &mut child_task => {
+                info!("PTY exec process exited for {}", container_id);
+                break;
+            }
+        }
     }
+
+    child_task.abort();
+    write_task.abort();
+
+    // Give read_task a moment to get EIO and flush any remaining PTY output.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        &mut read_task,
+    )
+    .await;
+    read_task.abort();
+
+    // Drain output buffered before the sender was dropped.
+    while let Ok(Some(b)) = tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        output_rx.recv(),
+    )
+    .await
+    {
+        ws_sender.send(Message::Binary(b.into())).await.ok();
+    }
+
+    // Signal the client that the session is over.
+    let _ = ws_sender.send(Message::Close(None)).await;
 }
 
 // ─── Pipe / non-interactive mode ─────────────────────────────────────────────
