@@ -5,7 +5,7 @@ use axum::{
     response::Response,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 use crate::AppState;
 // Removed: use std::sync::Arc;

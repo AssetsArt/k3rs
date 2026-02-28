@@ -281,7 +281,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         .route("/metrics", get(metrics_handler))
         .merge(api_routes)
         .fallback(|req: axum::http::Request<axum::body::Body>| async move {
-            warn!("No route matched for {} {}", req.method(), req.uri().path());
+            info!("No route matched for {} {}", req.method(), req.uri().path());
             axum::http::StatusCode::NOT_FOUND
         })
         .layer(middleware::from_fn(request_id_middleware))
