@@ -129,6 +129,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         // Node-scoped pod listing (all namespaces)
         .route("/api/v1/nodes/{name}/pods", get(resources::list_node_pods))
         .route("/api/v1/watch", get(watch::watch_events))
+        .route("/api/v1/events", get(watch::list_events))
         // Phase 7: exec into pod (Moved up for priority)
         .route(
             "/api/v1/namespaces/{ns}/pods/{pod_name}/exec",

@@ -186,6 +186,22 @@ pub async fn get_pvcs(ns: String) -> Result<Vec<PVC>> {
     Ok(items)
 }
 
+#[get("/api/ui/events")]
+pub async fn get_events() -> Result<Vec<WatchEvent>> {
+    let url = format!("{}/api/v1/events", K3RS_API);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", K3RS_TOKEN))
+        .send()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let events: Vec<WatchEvent> = resp
+        .json()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(events)
+}
+
 #[get("/api/ui/metrics")]
 pub async fn get_metrics() -> Result<String> {
     let url = format!("{}/metrics", K3RS_API);

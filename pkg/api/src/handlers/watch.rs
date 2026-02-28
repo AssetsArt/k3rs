@@ -1,7 +1,9 @@
 use axum::{
+    Json,
     extract::{Query, State},
-    response::sse::{Event, KeepAlive, Sse},
+    response::{IntoResponse, sse::{Event, KeepAlive, Sse}},
 };
+use pkg_state::watch::WatchEvent;
 use serde::Deserialize;
 use std::convert::Infallible;
 use tokio_stream::StreamExt;
@@ -66,4 +68,25 @@ pub async fn watch_events(
     let combined = buffered_stream.chain(live_stream);
 
     Sse::new(combined).keep_alive(KeepAlive::default())
+}
+
+/// GET /api/v1/events — Returns recent buffered events as JSON (no streaming).
+/// Used by the UI to poll for the latest cluster activity.
+pub async fn list_events(
+    State(state): State<AppState>,
+    Query(query): Query<WatchQuery>,
+) -> impl IntoResponse {
+    let from_seq = query.seq.unwrap_or(0);
+    let prefix = query.prefix.unwrap_or_default();
+
+    let events: Vec<WatchEvent> = state
+        .store
+        .event_log
+        .events_since(from_seq)
+        .await
+        .into_iter()
+        .filter(|e| prefix.is_empty() || e.key.starts_with(&prefix))
+        .collect();
+
+    Json(events)
 }
