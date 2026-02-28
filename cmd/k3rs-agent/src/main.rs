@@ -8,7 +8,7 @@ use pkg_types::node::NodeRegistrationRequest;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Parser, Debug)]
 #[command(name = "k3rs-agent", about = "k3rs node agent (data plane)")]
@@ -142,26 +142,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 2. Start the Pingora tunnel proxy
-    let server_host = server
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    let proxy = TunnelProxy::new(server_host, proxy_port);
-    proxy.start().await?;
-
-    // 3. Start the Pingora Service Proxy (Phase 3)
-    let service_proxy = Arc::new(ServiceProxy::new(service_proxy_port));
-    service_proxy.start().await?;
-
-    // 4. Start the embedded DNS server (Phase 3)
-    let dns_addr: SocketAddr = format!("0.0.0.0:{}", dns_port).parse()?;
-    let dns_server = Arc::new(DnsServer::new(dns_addr));
-    dns_server.start().await?;
-
-    // 5. Heartbeat and Pod Sync loops
-    info!("Starting node controllers (heartbeat, pod-sync, route-sync)");
-
-    // Heartbeat loop
+    // 2. Start heartbeat immediately after registration (before any heavy init)
     let server_base = server.clone();
     let heartbeat_node_name = node_name.clone();
     let heartbeat_client = client.clone();
@@ -182,8 +163,12 @@ async fn main() -> anyhow::Result<()> {
                 .send()
                 .await
             {
-                Ok(_) => {
-                    info!("Heartbeat sent for {}", heartbeat_node_name);
+                Ok(resp) => {
+                    debug!(
+                        "Heartbeat sent for {} (status={})",
+                        heartbeat_node_name,
+                        resp.status()
+                    );
                 }
                 Err(e) => {
                     warn!("Heartbeat failed: {}", e);
@@ -191,6 +176,26 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+    info!("Heartbeat loop started (every 10s)");
+
+    // 3. Start the Pingora tunnel proxy
+    let server_host = server
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let proxy = TunnelProxy::new(server_host, proxy_port);
+    proxy.start().await?;
+
+    // 3. Start the Pingora Service Proxy (Phase 3)
+    let service_proxy = Arc::new(ServiceProxy::new(service_proxy_port));
+    service_proxy.start().await?;
+
+    // 4. Start the embedded DNS server (Phase 3)
+    let dns_addr: SocketAddr = format!("0.0.0.0:{}", dns_port).parse()?;
+    let dns_server = Arc::new(DnsServer::new(dns_addr));
+    dns_server.start().await?;
+
+    // 5. Pod Sync and Route Sync loops
+    info!("Starting node controllers (pod-sync, route-sync)");
 
     // Image report loop — report cached images to server every 30s
     let img_server = server.clone();
