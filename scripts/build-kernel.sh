@@ -218,9 +218,11 @@ fi
 echo "[build-kernel] Linux detected — building natively..."
 
 # Check dependencies
-for cmd in make gcc curl cpio; do
+for cmd in make gcc curl cpio flex bison bc; do
     if ! command -v "$cmd" &>/dev/null; then
         echo "[build-kernel] ERROR: '$cmd' is required. Install it first." >&2
+        echo "[build-kernel] On Debian/Ubuntu: sudo apt-get install build-essential bc flex bison libelf-dev libssl-dev curl cpio" >&2
+        echo "[build-kernel] On Fedora/RHEL:   sudo dnf install gcc make bc flex bison elfutils-libelf-devel openssl-devel curl cpio" >&2
         exit 1
     fi
 done

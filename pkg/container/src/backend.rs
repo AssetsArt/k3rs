@@ -193,6 +193,13 @@ impl RuntimeBackend for OciBackend {
         })?;
 
         let pid_file = self.container_pid_file(id);
+        let log_path = self.container_log_path(id);
+
+        // Ensure the log file exists for runtime output capture
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::File::create(&log_path)?;
 
         let output = self
             .cmd()
@@ -202,6 +209,8 @@ impl RuntimeBackend for OciBackend {
                 &bundle.to_string_lossy(),
                 "--pid-file",
                 &pid_file.to_string_lossy(),
+                "--log",
+                &log_path.to_string_lossy(),
                 id,
             ])
             .output()?;
@@ -217,10 +226,11 @@ impl RuntimeBackend for OciBackend {
         }
 
         tracing::info!(
-            "[{}] container {} created (pid-file: {})",
+            "[{}] container {} created (pid-file: {}, log: {})",
             self.runtime_name,
             id,
-            pid_file.display()
+            pid_file.display(),
+            log_path.display()
         );
         Ok(())
     }

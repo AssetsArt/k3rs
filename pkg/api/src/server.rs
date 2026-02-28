@@ -324,7 +324,11 @@ async fn seed_master_node(store: &StateStore, name: &str) -> anyhow::Result<()> 
                     "true".to_string(),
                 ),
             ]),
-            taints: vec![],
+            taints: vec![pkg_types::node::Taint {
+                key: "node-role.kubernetes.io/control-plane".to_string(),
+                value: String::new(),
+                effect: pkg_types::pod::TaintEffect::NoSchedule,
+            }],
             capacity: pkg_types::pod::ResourceRequirements::default(),
             allocated: pkg_types::pod::ResourceRequirements::default(),
             unschedulable: false,

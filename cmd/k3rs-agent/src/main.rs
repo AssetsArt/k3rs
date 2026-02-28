@@ -199,14 +199,26 @@ async fn main() -> anyhow::Result<()> {
     let img_token = token.clone();
 
     // Pod Sync loop
-    let runtime = Arc::new(ContainerRuntime::new(None::<&str>).await?);
+    let runtime = match ContainerRuntime::new(None::<&str>).await {
+        Ok(rt) => Some(Arc::new(rt)),
+        Err(e) => {
+            warn!(
+                "Container runtime not available: {}. Pod scheduling will fail but node stays Ready.",
+                e
+            );
+            None
+        }
+    };
 
     let img_runtime = runtime.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            match img_runtime.list_images().await {
+            let Some(ref rt) = img_runtime else {
+                continue;
+            };
+            match rt.list_images().await {
                 Ok(images) => {
                     let url = format!(
                         "{}/api/v1/nodes/{}/images",
@@ -236,6 +248,10 @@ async fn main() -> anyhow::Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
+
+            let Some(ref runtime) = runtime else {
+                continue;
+            };
 
             // For now, poll default namespace
             let ns = "default";

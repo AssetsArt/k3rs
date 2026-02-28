@@ -194,9 +194,11 @@ impl RootfsManager {
             "linux": {
                 "namespaces": [
                     { "type": "pid" },
+                    { "type": "network" },
                     { "type": "ipc" },
                     { "type": "uts" },
                     { "type": "mount" },
+                    { "type": "cgroup" },
                     { "type": "user" }
                 ],
                 "uidMappings": [

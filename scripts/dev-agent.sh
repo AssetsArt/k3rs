@@ -27,7 +27,7 @@ if ! command -v cargo-watch &>/dev/null; then
     cargo install cargo-watch
 fi
 
-cargo watch \
+RUST_LOG=debug cargo watch \
     -x "run --bin k3rs-agent -- --server $SERVER --token $TOKEN --node-name $NODE_NAME --proxy-port $PROXY_PORT --service-proxy-port $SERVICE_PROXY_PORT --dns-port $DNS_PORT" \
     -w pkg/ \
     -w cmd/k3rs-agent \

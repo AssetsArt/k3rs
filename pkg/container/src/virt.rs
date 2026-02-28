@@ -113,52 +113,57 @@ impl VirtualizationBackend {
     /// Validates that:
     /// - Running on macOS
     /// - A guest kernel is available (or can be downloaded)
-    pub async fn new(data_dir: &Path) -> Result<Self> {
+    pub async fn new(_data_dir: &Path) -> Result<Self> {
         #[cfg(not(target_os = "macos"))]
         {
             anyhow::bail!("VirtualizationBackend requires macOS");
         }
 
-        let vm_dir = data_dir.join("vms");
-        tokio::fs::create_dir_all(&vm_dir).await?;
+        #[cfg(target_os = "macos")]
+        {
+            let data_dir = _data_dir;
 
-        // Initialize kernel manager and check for kernel availability
-        let kernel_manager = KernelManager::with_dir(&data_dir.join("kernel"));
-        let (kernel_path, initrd_path) =
-            kernel_manager.ensure_available().await.unwrap_or_else(|e| {
-                tracing::warn!("Kernel provisioning failed: {}. Using default paths.", e);
-                (PathBuf::from("/var/lib/k3rs/vmlinux"), None)
-            });
+            let vm_dir = data_dir.join("vms");
+            tokio::fs::create_dir_all(&vm_dir).await?;
 
-        let kernel_exists = tokio::fs::metadata(&kernel_path).await.is_ok();
-        if !kernel_exists {
-            tracing::warn!(
-                "Guest kernel not found at {}. VM boot will require a kernel.",
-                kernel_path.display()
+            // Initialize kernel manager and check for kernel availability
+            let kernel_manager = KernelManager::with_dir(&data_dir.join("kernel"));
+            let (kernel_path, initrd_path) =
+                kernel_manager.ensure_available().await.unwrap_or_else(|e| {
+                    tracing::warn!("Kernel provisioning failed: {}. Using default paths.", e);
+                    (PathBuf::from("/var/lib/k3rs/vmlinux"), None)
+                });
+
+            let kernel_exists = tokio::fs::metadata(&kernel_path).await.is_ok();
+            if !kernel_exists {
+                tracing::warn!(
+                    "Guest kernel not found at {}. VM boot will require a kernel.",
+                    kernel_path.display()
+                );
+            }
+
+            tracing::info!(
+                "VirtualizationBackend initialized: data_dir={}, kernel={}{}, cpus={}, memory={}MB",
+                vm_dir.display(),
+                kernel_path.display(),
+                if kernel_exists {
+                    " ✓"
+                } else {
+                    " ✗ (missing)"
+                },
+                DEFAULT_CPU_COUNT,
+                DEFAULT_MEMORY_MB
             );
+
+            Ok(Self {
+                data_dir: vm_dir,
+                kernel_path,
+                initrd_path,
+                vm_config: VmConfig::default(),
+                instances: Arc::new(RwLock::new(HashMap::new())),
+                kernel_manager,
+            })
         }
-
-        tracing::info!(
-            "VirtualizationBackend initialized: data_dir={}, kernel={}{}, cpus={}, memory={}MB",
-            vm_dir.display(),
-            kernel_path.display(),
-            if kernel_exists {
-                " ✓"
-            } else {
-                " ✗ (missing)"
-            },
-            DEFAULT_CPU_COUNT,
-            DEFAULT_MEMORY_MB
-        );
-
-        Ok(Self {
-            data_dir: vm_dir,
-            kernel_path,
-            initrd_path,
-            vm_config: VmConfig::default(),
-            instances: Arc::new(RwLock::new(HashMap::new())),
-            kernel_manager,
-        })
     }
 
     /// Create with custom VM resource configuration.
@@ -606,6 +611,7 @@ async fn which_vmm() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
     use std::path::PathBuf;
 
     #[test]
@@ -615,6 +621,7 @@ mod tests {
         assert_eq!(config.memory_mb, 128);
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn test_virtualization_backend_create_and_lifecycle() {
         let tmp_dir = PathBuf::from("/tmp/k3rs-virt-test");
@@ -634,6 +641,7 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn test_create_uses_virtiofs_not_disk_image() {
         let tmp_dir = PathBuf::from("/tmp/k3rs-virt-test-create");
@@ -678,6 +686,7 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn test_create_from_image_generates_config() {
         let tmp_dir = PathBuf::from("/tmp/k3rs-virt-test-image");
@@ -708,6 +717,7 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn test_delete_cleans_up_rootfs_dir() {
         let tmp_dir = PathBuf::from("/tmp/k3rs-virt-test-delete");

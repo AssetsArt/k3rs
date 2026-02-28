@@ -5393,7 +5393,6 @@ dependencies = [
  "dashmap",
  "flate2",
  "oci-client",
- "oci-spec",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
