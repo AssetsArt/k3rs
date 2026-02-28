@@ -1,12 +1,10 @@
 use clap::Parser;
 use pkg_container::ContainerRuntime;
-use pkg_network::dns::DnsServer;
 use pkg_proxy::service_proxy::ServiceProxy;
 use pkg_proxy::tunnel::TunnelProxy;
 use pkg_types::config::{AgentConfigFile, load_config_file};
 use pkg_types::node::NodeRegistrationRequest;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -88,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
         .service_proxy_port
         .or(file_cfg.service_proxy_port)
         .unwrap_or(10256);
-    let dns_port = cli.dns_port.or(file_cfg.dns_port).unwrap_or(5353);
+    let _dns_port = cli.dns_port.or(file_cfg.dns_port).unwrap_or(5353);
 
     info!("Starting k3rs-agent for node: {}", node_name);
 
@@ -571,7 +569,7 @@ async fn main() -> anyhow::Result<()> {
 
                     // Fetch all namespaces to sync routes across all of them
                     let namespaces: Vec<pkg_types::namespace::Namespace> = match route_client
-                        .get(&format!("{}/api/v1/namespaces", base))
+                        .get(format!("{}/api/v1/namespaces", base))
                         .header("Authorization", &auth)
                         .send()
                         .await
@@ -594,7 +592,7 @@ async fn main() -> anyhow::Result<()> {
 
                     for ns in &ns_names {
                         let services: Vec<pkg_types::service::Service> = match route_client
-                            .get(&format!("{}/api/v1/namespaces/{}/services", base, ns))
+                            .get(format!("{}/api/v1/namespaces/{}/services", base, ns))
                             .header("Authorization", &auth)
                             .send()
                             .await
@@ -607,7 +605,7 @@ async fn main() -> anyhow::Result<()> {
                         };
 
                         let endpoints: Vec<pkg_types::endpoint::Endpoint> = match route_client
-                            .get(&format!("{}/api/v1/namespaces/{}/endpoints", base, ns))
+                            .get(format!("{}/api/v1/namespaces/{}/endpoints", base, ns))
                             .header("Authorization", &auth)
                             .send()
                             .await

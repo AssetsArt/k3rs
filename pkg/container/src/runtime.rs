@@ -192,10 +192,14 @@ impl ContainerRuntime {
 
             let rootfs_path = RootfsManager::extract(&image_dir, &container_dir).await?;
             let config_json = RootfsManager::generate_config_full(
-                        id, &rootfs_path, command, env,
-                        Some(&image_dir), None,
-                        crate::rootfs::NetworkMode::default(),
-                    )?;
+                id,
+                &rootfs_path,
+                command,
+                env,
+                Some(&image_dir),
+                None,
+                crate::rootfs::NetworkMode::default(),
+            )?;
             tokio::fs::write(container_dir.join("config.json"), &config_json).await?;
 
             self.backend.create(id, &container_dir).await?;

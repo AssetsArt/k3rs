@@ -91,15 +91,16 @@ pub fn start_listener(id: &str, exec_handler: impl Fn(&[String]) -> String + Sen
                     let parts: Vec<String> = cmd_line.split('\0').map(|s| s.to_string()).collect();
                     info!("IPC exec request for VM {}: {:?}", id, parts);
 
-                    let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        exec_handler(&parts)
-                    })) {
-                        Ok(out) => out,
-                        Err(_) => {
-                            error!("IPC exec handler panicked for VM {}", id);
-                            "exec error: handler panicked\n".to_string()
-                        }
-                    };
+                    let output =
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            exec_handler(&parts)
+                        })) {
+                            Ok(out) => out,
+                            Err(_) => {
+                                error!("IPC exec handler panicked for VM {}", id);
+                                "exec error: handler panicked\n".to_string()
+                            }
+                        };
                     let _ = stream.write_all(output.as_bytes());
                 }
                 Err(e) => {

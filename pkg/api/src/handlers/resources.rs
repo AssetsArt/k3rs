@@ -431,15 +431,15 @@ async fn cascade_delete_owned_replicasets(state: &AppState, ns: &str, deploy_id:
     let rs_prefix = format!("/registry/replicasets/{}/", ns);
     if let Ok(entries) = state.store.list_prefix(&rs_prefix).await {
         for (rs_key, rs_value) in entries {
-            if let Ok(rs) = serde_json::from_slice::<pkg_types::replicaset::ReplicaSet>(&rs_value) {
-                if rs.owner_ref.as_deref() == Some(deploy_id) {
-                    // First cascade-delete pods owned by this RS
-                    count += cascade_delete_owned_pods(state, ns, &rs.id).await;
-                    // Then delete the RS itself
-                    if state.store.delete(&rs_key).await.is_ok() {
-                        info!("Cascade-deleted replicaset {}/{}", ns, rs.name);
-                        count += 1;
-                    }
+            if let Ok(rs) = serde_json::from_slice::<pkg_types::replicaset::ReplicaSet>(&rs_value)
+                && rs.owner_ref.as_deref() == Some(deploy_id)
+            {
+                // First cascade-delete pods owned by this RS
+                count += cascade_delete_owned_pods(state, ns, &rs.id).await;
+                // Then delete the RS itself
+                if state.store.delete(&rs_key).await.is_ok() {
+                    info!("Cascade-deleted replicaset {}/{}", ns, rs.name);
+                    count += 1;
                 }
             }
         }
@@ -453,13 +453,12 @@ async fn cascade_delete_owned_pods(state: &AppState, ns: &str, owner_id: &str) -
     let pod_prefix = format!("/registry/pods/{}/", ns);
     if let Ok(entries) = state.store.list_prefix(&pod_prefix).await {
         for (pod_key, pod_value) in entries {
-            if let Ok(pod) = serde_json::from_slice::<pkg_types::pod::Pod>(&pod_value) {
-                if pod.owner_ref.as_deref() == Some(owner_id) {
-                    if state.store.delete(&pod_key).await.is_ok() {
-                        info!("Cascade-deleted pod {}/{}", ns, pod.name);
-                        count += 1;
-                    }
-                }
+            if let Ok(pod) = serde_json::from_slice::<pkg_types::pod::Pod>(&pod_value)
+                && pod.owner_ref.as_deref() == Some(owner_id)
+                && state.store.delete(&pod_key).await.is_ok()
+            {
+                info!("Cascade-deleted pod {}/{}", ns, pod.name);
+                count += 1;
             }
         }
     }

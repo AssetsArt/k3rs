@@ -1,5 +1,3 @@
-use std::fs;
-
 fn main() {
     let json_str = r#"[{"id":"130812ab-a40a-4856-ab4c-f9b79946f3d0","name":"test-nginx-1284ca2c-130812ab","namespace":"default","spec":{"containers":[{"name":"nginx","image":"nginx:latest","command":[],"args":[],"env":{},"resources":{"cpu_millis":0,"memory_bytes":0},"volume_mounts":[]}],"node_affinity":{},"tolerations":[],"volumes":[]},"status":"Scheduled","status_message":null,"container_id":null,"node_name":"2539686e-d40c-4436-b049-35dc8d21db99","labels":{},"owner_ref":"f28d75ac-301a-479f-93a6-4dfe06c798cd","restart_count":0,"runtime_info":null,"created_at":"2026-02-28T07:52:54.118167508Z"}]"#;
 
