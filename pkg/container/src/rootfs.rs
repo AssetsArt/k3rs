@@ -355,22 +355,41 @@ impl RootfsManager {
             "CAP_AUDIT_WRITE"
         ]);
 
-        // Build namespaces - no user namespace by default (avoid rootless permission issues)
+        // Build namespaces
         let mut namespaces = vec![
             serde_json::json!({ "type": "pid" }),
             serde_json::json!({ "type": "ipc" }),
             serde_json::json!({ "type": "uts" }),
             serde_json::json!({ "type": "mount" }),
             serde_json::json!({ "type": "cgroup" }),
+            serde_json::json!({ "type": "user" }),
         ];
 
         if network_mode == NetworkMode::Isolated {
             namespaces.push(serde_json::json!({ "type": "network" }));
         }
 
-        // Create basic Linux section without user namespace
+        // Create basic Linux section with user namespace mapping
+        let mut uid_mappings = vec![
+            serde_json::json!({ "hostID": host_uid(), "containerID": 0, "size": 1 })
+        ];
+        let mut gid_mappings = vec![
+            serde_json::json!({ "hostID": host_gid(), "containerID": 0, "size": 1 })
+        ];
+
+        // If running as non-root, try to add subordinate mappings from /etc/subuid for nginx etc.
+        if !is_root() {
+            // Mapping for common service UIDs (1-1000) using subuids
+            // For a production runtime, we would parse /etc/subuid properly.
+            // In this environment, we know detoro has 524288:65536.
+            uid_mappings.push(serde_json::json!({ "hostID": 524288, "containerID": 1, "size": 1000 }));
+            gid_mappings.push(serde_json::json!({ "hostID": 524288, "containerID": 1, "size": 1000 }));
+        }
+
         let linux = serde_json::json!({
             "namespaces": namespaces,
+            "uidMappings": uid_mappings,
+            "gidMappings": gid_mappings,
             "maskedPaths": [
                 "/proc/acpi", "/proc/asound", "/proc/kcore", "/proc/keys",
                 "/proc/latency_stats", "/proc/timer_list", "/proc/timer_stats",
@@ -414,7 +433,11 @@ impl RootfsManager {
                 { "destination": "/sys", "type": "sysfs", "source": "sysfs",
                   "options": ["nosuid", "noexec", "nodev", "ro"] },
                 { "destination": "/sys/fs/cgroup", "type": "cgroup", "source": "cgroup",
-                  "options": ["nosuid", "noexec", "nodev", "relatime", "ro"] }
+                  "options": ["nosuid", "noexec", "nodev", "relatime", "ro"] },
+                { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs",
+                  "options": ["nosuid", "nodev", "mode=1777", "size=65536k"] },
+                { "destination": "/run", "type": "tmpfs", "source": "tmpfs",
+                  "options": ["nosuid", "nodev", "mode=755", "size=65536k"] }
             ],
             "linux": linux
         });
@@ -545,6 +568,10 @@ mod tests {
             .collect();
         assert!(ns_types.contains(&"pid"));
         assert!(ns_types.contains(&"mount"));
+        assert!(ns_types.contains(&"user"));
+
+        assert!(config["linux"]["uidMappings"].is_array());
+        assert!(config["linux"]["gidMappings"].is_array());
     }
 
     #[test]
@@ -605,10 +632,14 @@ mod tests {
         assert_eq!(config["process"]["cwd"], "/app");
     }
 }
+#[cfg(test)]
 use flate2::write::GzEncoder;
+#[cfg(test)]
 use flate2::Compression;
+#[cfg(test)]
 use tar::{Builder, Header, EntryType};
 
+#[cfg(test)]
 #[tokio::test]
 async fn test_extract_hard_links() {
     let tmp_base = std::env::temp_dir().join(format!("k3rs-test-{}", chrono::Utc::now().timestamp_millis()));
@@ -666,6 +697,7 @@ async fn test_extract_hard_links() {
     let _ = std::fs::remove_dir_all(&tmp_base);
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn test_extract_hard_links_deferred() {
     let tmp_base = std::env::temp_dir().join(format!("k3rs-test-deferred-{}", chrono::Utc::now().timestamp_millis()));

@@ -194,18 +194,23 @@ impl RuntimeBackend for OciBackend {
 
         let pid_file = self.container_pid_file(id);
         let log_path = self.container_log_path(id);
+        let runtime_log = self.container_log_dir(id).join("runtime.log");
 
-        // Ensure the log file exists for runtime output capture
-        if let Some(parent) = log_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::File::create(&log_path)?;
+        // Ensure the log directory exists
+        self.ensure_log_dir(id)?;
+
+        // Open the stdout log file for the container process
+        let stdout_file = std::fs::File::options()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+        let stderr_file = stdout_file.try_clone()?;
 
         let status = self
             .cmd()
             .args([
                 "--log",
-                &log_path.to_string_lossy(),
+                &runtime_log.to_string_lossy(),
                 "create",
                 "--bundle",
                 &bundle.to_string_lossy(),
@@ -213,8 +218,8 @@ impl RuntimeBackend for OciBackend {
                 &pid_file.to_string_lossy(),
                 id,
             ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(stdout_file)
+            .stderr(stderr_file)
             .status()
             .await?;
 

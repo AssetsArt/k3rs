@@ -358,6 +358,14 @@ async fn main() -> anyhow::Result<()> {
                                     match runtime.container_state(&pod.id).await {
                                         Ok(state) if state.status == "stopped" || state.status == "exited" => {
                                             warn!("[pod:{}] Container stopped unexpectedly", pod.name);
+
+                                            // Log container output to help debugging
+                                            if let Ok(logs) = runtime.container_logs(&pod.id, 20).await {
+                                                for line in logs {
+                                                    warn!("[pod:{}]   > {}", pod.name, line);
+                                                }
+                                            }
+
                                             let status_url = format!(
                                                 "{}/api/v1/namespaces/{}/pods/{}/status",
                                                 sync_server.trim_end_matches('/'),
