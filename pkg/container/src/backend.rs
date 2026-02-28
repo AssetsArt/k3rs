@@ -122,8 +122,11 @@ impl OciBackend {
         ))
     }
 
-    /// Create an OciBackend for a specific runtime name (e.g. "youki", "crun")
+    /// Create an OciBackend for a specific runtime name (e.g. "youki", "crun").
+    /// Searches PATH first, then the installer's known directories (~/.k3rs/bin,
+    /// /usr/local/bin/k3rs-runtime) so auto-downloaded runtimes are found.
     pub fn with_name(name: &str, data_dir: &std::path::Path) -> Result<Self> {
+        // 1. Try PATH via `which`
         if let Ok(output) = std::process::Command::new("which").arg(name).output()
             && output.status.success()
         {
@@ -138,7 +141,43 @@ impl OciBackend {
                 state_dir: data_dir.join("state"),
             });
         }
-        Err(anyhow::anyhow!("OCI runtime {} not found in PATH", name))
+
+        // 2. Search installer directories for auto-downloaded runtimes.
+        let mut search_dirs: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from(
+            pkg_constants::paths::RUNTIME_INSTALL_DIR,
+        )];
+        if let Ok(home) = std::env::var("HOME") {
+            search_dirs.push(
+                std::path::PathBuf::from(home).join(pkg_constants::paths::RUNTIME_FALLBACK_DIR),
+            );
+        }
+
+        for dir in &search_dirs {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                let path = candidate.to_string_lossy().to_string();
+                let version = Self::get_version(&path);
+                tracing::info!(
+                    "Using auto-downloaded OCI runtime: {} at {} ({})",
+                    name,
+                    path,
+                    version
+                );
+                return Ok(Self {
+                    runtime_path: path,
+                    runtime_name: name.to_string(),
+                    runtime_version: version,
+                    log_dir: data_dir.join("logs"),
+                    state_dir: data_dir.join("state"),
+                });
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "OCI runtime {} not found in PATH or {:?}",
+            name,
+            search_dirs
+        ))
     }
 
     /// Create with an explicit runtime path.
