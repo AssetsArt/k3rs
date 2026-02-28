@@ -164,8 +164,8 @@ impl OciBackend {
             .unwrap_or_else(|| "unknown".to_string())
     }
 
-    fn cmd(&self) -> std::process::Command {
-        let mut cmd = std::process::Command::new(&self.runtime_path);
+    fn cmd(&self) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new(&self.runtime_path);
         // Use a custom root directory for state — avoids permission issues
         cmd.arg("--root").arg(&self.state_dir);
         cmd
@@ -201,22 +201,27 @@ impl RuntimeBackend for OciBackend {
         }
         std::fs::File::create(&log_path)?;
 
-        let output = self
+        let status = self
             .cmd()
             .args([
+                "--log",
+                &log_path.to_string_lossy(),
                 "create",
                 "--bundle",
                 &bundle.to_string_lossy(),
                 "--pid-file",
                 &pid_file.to_string_lossy(),
-                "--log",
-                &log_path.to_string_lossy(),
                 id,
             ])
-            .output()?;
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if !status.success() {
+            let stderr = tokio::fs::read_to_string(&log_path)
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             anyhow::bail!(
                 "[{}] create failed for {}: {}",
                 self.runtime_name,
@@ -237,7 +242,7 @@ impl RuntimeBackend for OciBackend {
 
     async fn start(&self, id: &str) -> Result<()> {
         tracing::info!("[{}] start container: {}", self.runtime_name, id);
-        let output = self.cmd().args(["start", id]).output()?;
+        let output = self.cmd().args(["start", id]).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -266,18 +271,18 @@ impl RuntimeBackend for OciBackend {
         tracing::info!("[{}] stop container: {}", self.runtime_name, id);
 
         // Send SIGTERM first
-        let _ = self.cmd().args(["kill", id, "SIGTERM"]).output();
+        let _ = self.cmd().args(["kill", id, "SIGTERM"]).output().await;
 
         // Wait briefly then force kill
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        let _ = self.cmd().args(["kill", id, "SIGKILL"]).output();
+        let _ = self.cmd().args(["kill", id, "SIGKILL"]).output().await;
 
         Ok(())
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
         tracing::info!("[{}] delete container: {}", self.runtime_name, id);
-        let output = self.cmd().args(["delete", "--force", id]).output()?;
+        let output = self.cmd().args(["delete", "--force", id]).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -299,7 +304,7 @@ impl RuntimeBackend for OciBackend {
     }
 
     async fn list(&self) -> Result<Vec<String>> {
-        let output = self.cmd().args(["list", "-q"]).output()?;
+        let output = self.cmd().args(["list", "-q"]).output().await?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let ids: Vec<String> = stdout
             .lines()
@@ -345,7 +350,7 @@ impl RuntimeBackend for OciBackend {
         let mut args = vec!["exec", id];
         args.extend_from_slice(command);
 
-        let output = self.cmd().args(&args).output()?;
+        let output = self.cmd().args(&args).output().await?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
@@ -363,7 +368,7 @@ impl RuntimeBackend for OciBackend {
     }
 
     async fn state(&self, id: &str) -> Result<ContainerStateInfo> {
-        let output = self.cmd().args(["state", id]).output()?;
+        let output = self.cmd().args(["state", id]).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

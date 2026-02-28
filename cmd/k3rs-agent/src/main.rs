@@ -231,6 +231,52 @@ async fn main() -> anyhow::Result<()> {
                 match ContainerRuntime::new(None::<&str>).await {
                     Ok(rt) => {
                         info!("Container runtime ready: {}", rt.backend_name());
+
+                        // --- Agent Recovery ---
+                        info!("Starting agent recovery procedure...");
+                        let discovered = rt.discover_running_containers().await.unwrap_or_default();
+                        
+                        let ns = "default";
+                        // Using ctrl_server, ctrl_token, ctrl_node_id here
+                        let url = format!("{}/api/v1/namespaces/{}/pods", ctrl_server.trim_end_matches('/'), ns);
+                        let desired_pods: Vec<pkg_types::pod::Pod> = match client
+                            .get(&url)
+                            .header("Authorization", format!("Bearer {}", ctrl_token))
+                            .send()
+                            .await
+                        {
+                            Ok(resp) => resp.json().await.unwrap_or_default(),
+                            Err(e) => {
+                                warn!("Agent recovery: failed to fetch desired pods: {}", e);
+                                vec![]
+                            }
+                        };
+                        
+                        let mut desired_running_ids = std::collections::HashMap::new();
+                        for pod in desired_pods {
+                            if pod.node_name.as_deref() == Some(ctrl_node_id.as_str()) {
+                                desired_running_ids.insert(pod.id.clone(), pod.name.clone());
+                            }
+                        }
+
+                        for cid in discovered {
+                            if let Some(pod_name) = desired_running_ids.get(&cid) {
+                                info!("Agent recovery: adopting desired container {}", cid);
+                                let status_url = format!("{}/api/v1/namespaces/{}/pods/{}/status", ctrl_server.trim_end_matches('/'), ns, pod_name);
+                                let _ = client
+                                    .put(&status_url)
+                                    .header("Authorization", format!("Bearer {}", ctrl_token))
+                                    .json(&pkg_types::pod::PodStatus::Running)
+                                    .send()
+                                    .await;
+                            } else {
+                                info!("Agent recovery: stopping orphaned container {}", cid);
+                                let _ = rt.cleanup_container(&cid).await;
+                            }
+                        }
+                        info!("Agent recovery complete.");
+                        // ----------------------
+
                         Some(Arc::new(rt))
                     }
                     Err(e) => {
@@ -320,7 +366,7 @@ async fn main() -> anyhow::Result<()> {
                                     "{}/api/v1/namespaces/{}/pods/{}/status",
                                     sync_server.trim_end_matches('/'),
                                     ns,
-                                    pod.id
+                                    pod.name
                                 );
 
                                 // Check runtime availability

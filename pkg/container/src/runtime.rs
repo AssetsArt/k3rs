@@ -241,6 +241,53 @@ impl ContainerRuntime {
         self.backend.list().await
     }
 
+    /// Discover running containers from the backend and populate the state store.
+    pub async fn discover_running_containers(&self) -> Result<Vec<String>> {
+        info!(
+            "Discovering running containers from {} backend...",
+            self.backend.name()
+        );
+        let mut discovered = Vec::new();
+
+        let ids = self.backend.list().await.unwrap_or_default();
+        for id in ids {
+            match self.backend.state(&id).await {
+                Ok(state_info) => {
+                    if state_info.status == "running" || state_info.status == "created" {
+                        info!(
+                            "Discovered container: {} (status: {})",
+                            id, state_info.status
+                        );
+
+                        let bundle_path = state_info.bundle.clone();
+                        let log_path = self.data_dir.join("logs").join(&id).join("stdout.log");
+
+                        self.store.track(
+                            &id,
+                            "recovered",
+                            &bundle_path,
+                            &log_path.to_string_lossy(),
+                        );
+
+                        if state_info.status == "running" {
+                            self.store.update_state(&id, ContainerState::Running);
+                            if state_info.pid > 0 {
+                                self.store.set_pid(&id, state_info.pid);
+                            }
+                        }
+                        discovered.push(id.clone());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to get state for discovered container {}: {}", id, e);
+                }
+            }
+        }
+
+        info!("Discovered {} running/created containers", discovered.len());
+        Ok(discovered)
+    }
+
     /// Get logs from a container.
     pub async fn container_logs(&self, id: &str, tail: usize) -> Result<Vec<String>> {
         self.backend.logs(id, tail).await
