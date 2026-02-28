@@ -403,13 +403,9 @@ impl RuntimeBackend for OciBackend {
         // CAP_SYS_PTRACE, so it works in rootless mode where youki exec fails.
         if let Some(pid) = self.read_pid(id) {
             tracing::info!("[{}] using nsenter (pid={}) for exec in {}", self.runtime_name, pid, id);
-            // --pid is intentionally omitted: nsenter forks when crossing PID
-            // namespace boundaries, which orphans the setsid()/TIOCSCTTY session
-            // set up in the agent's pre_exec hook and causes tcsetpgrp() to fail
-            // with ESRCH when the shell exits. mount+net+uts+ipc+user is enough
-            // for container exec (filesystem, networking, hostname, UID mapping).
             let mut args: Vec<String> = vec![
                 "--target".to_string(), pid.to_string(),
+                "--pid".to_string(),
                 "--uts".to_string(),
                 "--ipc".to_string(),
                 "--net".to_string(),
@@ -473,11 +469,11 @@ impl RuntimeBackend for OciBackend {
         );
 
         // Prefer nsenter for the same reason as exec() — avoids EPERM in rootless mode.
-        // --pid omitted for the same reason as in exec() above.
         if let Some(pid) = self.read_pid(id) {
             tracing::info!("[{}] using nsenter (pid={}) for spawn_exec in {}", self.runtime_name, pid, id);
             let mut args: Vec<String> = vec![
                 "--target".to_string(), pid.to_string(),
+                "--pid".to_string(),
                 "--uts".to_string(),
                 "--ipc".to_string(),
                 "--net".to_string(),

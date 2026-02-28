@@ -171,6 +171,13 @@ async fn proxy_to_agent(mut client_socket: WebSocket, agent_url: String) {
                 tokio_tungstenite::tungstenite::Message::Binary(b) => Message::Binary(b.into()),
                 tokio_tungstenite::tungstenite::Message::Ping(p) => Message::Ping(p.into()),
                 tokio_tungstenite::tungstenite::Message::Pong(p) => Message::Pong(p.into()),
+                // Forward Close so the client's read loop exits cleanly.
+                // Without this the proxy drops the sender half while the
+                // receiver half stays open, leaving the client blocked forever.
+                tokio_tungstenite::tungstenite::Message::Close(_) => {
+                    let _ = client_sender.send(Message::Close(None)).await;
+                    break;
+                }
                 _ => break,
             };
             if client_sender.send(a_msg).await.is_err() {

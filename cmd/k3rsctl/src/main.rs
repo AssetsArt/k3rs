@@ -841,12 +841,27 @@ async fn main() -> anyhow::Result<()> {
                 });
 
                 // Bidirectional raw tunnel.
+                // Double Ctrl+C (0x03) within 1 second exits the session.
+                // The first Ctrl+C is still forwarded so running commands are cancelled.
+                let mut last_ctrl_c: Option<std::time::Instant> = None;
                 loop {
                     tokio::select! {
                         // Keystrokes from local terminal → container
                         bytes = stdin_rx.recv() => {
                             match bytes {
                                 Some(b) => {
+                                    if b.contains(&0x03) {
+                                        if last_ctrl_c
+                                            .map(|t| t.elapsed() < std::time::Duration::from_secs(1))
+                                            .unwrap_or(false)
+                                        {
+                                            // Second Ctrl+C within 1s — exit the session.
+                                            break;
+                                        }
+                                        last_ctrl_c = Some(std::time::Instant::now());
+                                    } else {
+                                        last_ctrl_c = None;
+                                    }
                                     if write
                                         .send(tokio_tungstenite::tungstenite::Message::Binary(
                                             b.into(),
