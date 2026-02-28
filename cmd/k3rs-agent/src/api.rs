@@ -220,12 +220,20 @@ async fn handle_tty(
         }
     };
 
-    // Wrap master fd as a tokio async file for non-blocking I/O.
-    let master_file = unsafe {
+    // tokio::fs::File has a single internal state machine: while a blocking read
+    // is in-flight (Busy state), poll_write waits for the read to finish before
+    // it can issue a write. On a PTY this is a deadlock — the read waits for
+    // output that only appears after a write carries the keystroke in.
+    // Fix: dup the master fd so reads and writes use independent File objects
+    // with independent state machines that never block each other.
+    let mut master_read = unsafe {
         use std::os::unix::io::FromRawFd;
         tokio::fs::File::from_raw_fd(master_fd)
     };
-    let (mut master_read, mut master_write) = tokio::io::split(master_file);
+    let mut master_write = unsafe {
+        use std::os::unix::io::FromRawFd;
+        tokio::fs::File::from_raw_fd(libc::dup(master_fd))
+    };
 
     let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
 
