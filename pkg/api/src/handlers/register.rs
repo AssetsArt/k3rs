@@ -56,16 +56,22 @@ pub async fn register_node(
         uuid::Uuid::new_v4().to_string()
     };
 
+    let agent_api_port = 10250; // Default kubelet-like port
+
     let node = if let Some(mut existing) = existing_node {
         info!("Updating existing node: {}", payload.node_name);
         existing.status = NodeStatus::Ready;
         existing.last_heartbeat = now;
+        existing.address = payload.address.clone();
+        existing.agent_api_port = agent_api_port;
         existing.labels.extend(payload.labels.clone());
         existing
     } else {
         Node {
             id: node_id.clone(),
             name: payload.node_name.clone(),
+            address: payload.address.clone(),
+            agent_api_port,
             status: NodeStatus::Ready,
             registered_at: now,
             last_heartbeat: now,
@@ -98,6 +104,7 @@ pub async fn register_node(
         certificate: cert_pem,
         private_key: key_pem,
         server_ca: state.ca.ca_cert_pem().to_string(),
+        agent_api_port: 10250, // Default kubelet-like port
     };
 
     (StatusCode::OK, Json(response)).into_response()

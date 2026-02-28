@@ -10,9 +10,10 @@ use crate::pod::ResourceRequirements;
 pub struct NodeRegistrationRequest {
     pub token: String,
     pub node_name: String,
+    /// The address (IP or hostname) where the agent's API is listening.
+    pub address: String,
     #[serde(default)]
     pub labels: HashMap<String, String>,
-    /// Real CPU/memory capacity reported by the agent at registration time.
     #[serde(default)]
     pub capacity: Option<ResourceRequirements>,
 }
@@ -24,6 +25,8 @@ pub struct NodeRegistrationResponse {
     pub certificate: String,
     pub private_key: String,
     pub server_ca: String,
+    /// Port for the agent to listen on for its API (assigned by server)
+    pub agent_api_port: u16,
 }
 
 // --- Node status ---
@@ -60,6 +63,10 @@ pub struct Taint {
 pub struct Node {
     pub id: String,
     pub name: String,
+    /// Agent API address (host:port)
+    pub address: String,
+    /// Port for the agent to listen on for its API
+    pub agent_api_port: u16,
     pub status: NodeStatus,
     pub registered_at: DateTime<Utc>,
     pub last_heartbeat: DateTime<Utc>,

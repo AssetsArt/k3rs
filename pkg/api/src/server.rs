@@ -317,6 +317,8 @@ async fn seed_master_node(store: &StateStore, name: &str) -> anyhow::Result<()> 
         let node = pkg_types::node::Node {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
+            address: "127.0.0.1".to_string(),
+            agent_api_port: 10250,
             status: pkg_types::node::NodeStatus::Ready,
             registered_at: Utc::now(),
             last_heartbeat: Utc::now(),

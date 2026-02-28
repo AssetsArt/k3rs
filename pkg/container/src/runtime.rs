@@ -315,6 +315,15 @@ impl ContainerRuntime {
         self.backend.exec(id, command).await
     }
 
+    /// Spawn an interactive command inside a running container.
+    pub async fn spawn_exec_in_container(
+        &self,
+        id: &str,
+        command: &[&str],
+    ) -> Result<tokio::process::Child> {
+        self.backend.spawn_exec(id, command).await
+    }
+
     /// Query the real OCI runtime state of a container.
     pub async fn container_state(&self, id: &str) -> Result<ContainerStateInfo> {
         self.backend.state(id).await

@@ -574,6 +574,11 @@ impl RuntimeBackend for VirtualizationBackend {
         // Exec via k3rs-vmm IPC → vsock → guest
         self.exec_via_vmm(id, command).await
     }
+
+    async fn spawn_exec(&self, id: &str, command: &[&str]) -> Result<tokio::process::Child> {
+        let _ = (id, command);
+        anyhow::bail!("Streaming exec is not yet supported for microVMs")
+    }
 }
 
 /// Find the k3rs-vmm helper binary path.

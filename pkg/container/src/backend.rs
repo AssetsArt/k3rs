@@ -44,6 +44,10 @@ pub trait RuntimeBackend: Send + Sync {
     /// Execute a command inside a running container.
     async fn exec(&self, id: &str, command: &[&str]) -> Result<String>;
 
+    /// Spawn a command inside a running container and return the child process handle.
+    /// Used for interactive WebSocket sessions.
+    async fn spawn_exec(&self, id: &str, command: &[&str]) -> Result<tokio::process::Child>;
+
     /// Query the real OCI runtime state of a container.
     /// Runs `<runtime> state <id>` and parses the JSON output.
     async fn state(&self, id: &str) -> Result<ContainerStateInfo> {
@@ -370,6 +374,32 @@ impl RuntimeBackend for OciBackend {
                 stderr
             )
         }
+    }
+
+    async fn spawn_exec(&self, id: &str, command: &[&str]) -> Result<tokio::process::Child> {
+        tracing::info!(
+            "[{}] spawning interactive exec in container {}: {:?}",
+            self.runtime_name,
+            id,
+            command
+        );
+
+        let mut args = vec!["exec", id];
+        if command.is_empty() {
+            args.push("/bin/sh");
+        } else {
+            args.extend_from_slice(command);
+        }
+
+        let child = self
+            .cmd()
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+
+        Ok(child)
     }
 
     async fn state(&self, id: &str) -> Result<ContainerStateInfo> {

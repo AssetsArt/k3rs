@@ -3672,7 +3672,9 @@ name = "k3rs-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum 0.8.8",
  "clap",
+ "futures-util",
  "pkg-container",
  "pkg-network",
  "pkg-proxy",
@@ -3680,6 +3682,7 @@ dependencies = [
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sysinfo 0.38.0",
  "tokio",
  "tracing",
@@ -5363,6 +5366,7 @@ dependencies = [
  "anyhow",
  "axum 0.8.8",
  "chrono",
+ "futures-util",
  "pkg-controllers",
  "pkg-metrics",
  "pkg-pki",
@@ -5374,6 +5378,7 @@ dependencies = [
  "sysinfo 0.38.0",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite 0.28.0",
  "tracing",
  "uuid",
 ]

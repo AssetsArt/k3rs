@@ -1,3 +1,5 @@
+mod api;
+
 use clap::Parser;
 use pkg_container::ContainerRuntime;
 use pkg_proxy::service_proxy::ServiceProxy;
@@ -117,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
     let req = NodeRegistrationRequest {
         token: token.clone(),
         node_name: node_name.clone(),
+        address: "127.0.0.1".to_string(), // In dev we use localhost
         labels: HashMap::new(),
         capacity: Some(capacity),
     };
@@ -125,12 +128,17 @@ async fn main() -> anyhow::Result<()> {
     info!("Registering with server at {}", url);
 
     let my_node_id: String;
+    let agent_api_port: u16;
     match client.post(&url).json(&req).send().await {
         Ok(resp) => {
             if resp.status().is_success() {
                 let reg_resp: pkg_types::node::NodeRegistrationResponse = resp.json().await?;
                 my_node_id = reg_resp.node_id.clone();
-                info!("Successfully registered as node_id={}", my_node_id);
+                agent_api_port = reg_resp.agent_api_port;
+                info!(
+                    "Successfully registered as node_id={}, assigned API port {}",
+                    my_node_id, agent_api_port
+                );
                 info!(
                     "Certificate length: {} bytes, Key length: {} bytes",
                     reg_resp.certificate.len(),
@@ -231,6 +239,7 @@ async fn main() -> anyhow::Result<()> {
     let ctrl_token = token.clone();
     let ctrl_node_id = my_node_id.clone();
     let ctrl_service_proxy = service_proxy.clone();
+    let ctrl_agent_api_port = agent_api_port;
     // let ctrl_dns_server = dns_server.clone();
 
     std::thread::spawn(move || {
@@ -250,11 +259,25 @@ async fn main() -> anyhow::Result<()> {
             let runtime: Option<Arc<ContainerRuntime>> =
                 match ContainerRuntime::new(None::<&str>).await {
                     Ok(rt) => {
-                        info!("Container runtime ready: {}", rt.backend_name());
+                        let rt_arc = Arc::new(rt);
+                        info!("Container runtime ready: {}", rt_arc.backend_name());
+
+                        // Start Agent API server for exec/logs
+                        let agent_state = api::AgentState {
+                            runtime: rt_arc.clone(),
+                        };
+                        let agent_router = api::create_agent_router(agent_state);
+                        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", ctrl_agent_api_port))
+                            .await
+                            .expect("Failed to bind agent API port");
+                        info!("Agent API listening on 0.0.0.0:{}", ctrl_agent_api_port);
+                        tokio::spawn(async move {
+                            axum::serve(listener, agent_router).await.ok();
+                        });
 
                         // --- Agent Recovery ---
                         info!("Starting agent recovery procedure...");
-                        let discovered = rt.discover_running_containers().await.unwrap_or_default();
+                        let discovered = rt_arc.discover_running_containers().await.unwrap_or_default();
 
                         // Using ctrl_server, ctrl_token, ctrl_node_id here
                         let url = format!(
@@ -298,13 +321,13 @@ async fn main() -> anyhow::Result<()> {
                                     .await;
                             } else {
                                 info!("Agent recovery: stopping orphaned container {}", cid);
-                                let _ = rt.cleanup_container(&cid).await;
+                                let _ = rt_arc.cleanup_container(&cid).await;
                             }
                         }
                         info!("Agent recovery complete.");
                         // ----------------------
 
-                        Some(Arc::new(rt))
+                        Some(rt_arc)
                     }
                     Err(e) => {
                         warn!("Container runtime not available: {}. Pods will fail.", e);

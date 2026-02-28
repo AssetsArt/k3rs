@@ -20,3 +20,5 @@ pkg-scheduler = { path = "../scheduler" }
 pkg-controllers = { path = "../controllers" }
 pkg-metrics = { path = "../metrics" }
 sysinfo = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
