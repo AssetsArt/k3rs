@@ -277,7 +277,8 @@ async fn main() -> anyhow::Result<()> {
 
                         let mut desired_running_ids = std::collections::HashMap::new();
                         for pod in &desired_pods {
-                            desired_running_ids.insert(pod.id.clone(), (pod.name.clone(), pod.namespace.clone()));
+                            desired_running_ids
+                                .insert(pod.id.clone(), (pod.name.clone(), pod.namespace.clone()));
                         }
 
                         for cid in discovered {
@@ -374,13 +375,24 @@ async fn main() -> anyhow::Result<()> {
                         Ok(pods) => {
                             // --- Health monitoring: check Running pods ---
                             if let Some(ref runtime) = runtime {
-                                for pod in pods.iter().filter(|p| p.status == pkg_types::pod::PodStatus::Running) {
+                                for pod in pods
+                                    .iter()
+                                    .filter(|p| p.status == pkg_types::pod::PodStatus::Running)
+                                {
                                     match runtime.container_state(&pod.id).await {
-                                        Ok(state) if state.status == "stopped" || state.status == "exited" => {
-                                            warn!("[pod:{}] Container stopped unexpectedly", pod.name);
+                                        Ok(state)
+                                            if state.status == "stopped"
+                                                || state.status == "exited" =>
+                                        {
+                                            warn!(
+                                                "[pod:{}] Container stopped unexpectedly",
+                                                pod.name
+                                            );
 
                                             // Log container output to help debugging
-                                            if let Ok(logs) = runtime.container_logs(&pod.id, 20).await {
+                                            if let Ok(logs) =
+                                                runtime.container_logs(&pod.id, 20).await
+                                            {
                                                 for line in logs {
                                                     warn!("[pod:{}]   > {}", pod.name, line);
                                                 }
@@ -394,14 +406,20 @@ async fn main() -> anyhow::Result<()> {
                                             );
                                             let _ = sync_client
                                                 .put(&status_url)
-                                                .header("Authorization", format!("Bearer {}", sync_token))
+                                                .header(
+                                                    "Authorization",
+                                                    format!("Bearer {}", sync_token),
+                                                )
                                                 .json(&pkg_types::pod::PodStatus::Failed)
                                                 .send()
                                                 .await;
                                         }
                                         Err(_) => {
                                             // Container not found by runtime - likely crashed
-                                            warn!("[pod:{}] Container not found in runtime", pod.name);
+                                            warn!(
+                                                "[pod:{}] Container not found in runtime",
+                                                pod.name
+                                            );
                                             let status_url = format!(
                                                 "{}/api/v1/namespaces/{}/pods/{}/status",
                                                 sync_server.trim_end_matches('/'),
@@ -410,7 +428,10 @@ async fn main() -> anyhow::Result<()> {
                                             );
                                             let _ = sync_client
                                                 .put(&status_url)
-                                                .header("Authorization", format!("Bearer {}", sync_token))
+                                                .header(
+                                                    "Authorization",
+                                                    format!("Bearer {}", sync_token),
+                                                )
                                                 .json(&pkg_types::pod::PodStatus::Failed)
                                                 .send()
                                                 .await;
@@ -435,17 +456,16 @@ async fn main() -> anyhow::Result<()> {
                                             .unwrap_or("unknown")
                                     );
 
-                                    let status_url = format!(
-                                        "{}/api/v1/namespaces/{}/pods/{}/status",
-                                        sync_server.trim_end_matches('/'),
-                                        pod.namespace,
-                                        pod.name
-                                    );
-
-                                    // Check runtime availability
-                                    let Some(ref runtime) = runtime else {
+                                    // Check runtime availability before spawning.
+                                    let Some(ref rt_arc) = runtime else {
                                         error!(
                                             "[pod:{}] No container runtime available!",
+                                            pod.name
+                                        );
+                                        let status_url = format!(
+                                            "{}/api/v1/namespaces/{}/pods/{}/status",
+                                            sync_server.trim_end_matches('/'),
+                                            pod.namespace,
                                             pod.name
                                         );
                                         let _ = sync_client
@@ -460,119 +480,111 @@ async fn main() -> anyhow::Result<()> {
                                         continue;
                                     };
 
-                                    let container_spec = pod.spec.containers.first();
-                                    let image = container_spec
-                                        .map(|c| c.image.as_str())
-                                        .unwrap_or("alpine:latest");
-                                    let command: Vec<String> = container_spec
-                                        .map(|c| {
-                                            let mut cmd = c.command.clone();
-                                            cmd.extend(c.args.clone());
-                                            cmd
-                                        })
-                                        .unwrap_or_default();
-                                    let env =
-                                        container_spec.map(|c| c.env.clone()).unwrap_or_default();
+                                    // Spawn each pod concurrently — image extraction is slow
+                                    // (7+ layers) and serialising pods would make pod 2 wait
+                                    // the full duration of pod 1's pull before even starting.
+                                    let pod_runtime = rt_arc.clone();
+                                    let pod_client = sync_client.clone();
+                                    let pod_server = sync_server.clone();
+                                    let pod_token = sync_token.clone();
 
-                                    // 1. Pull Image
-                                    info!("[pod:{}] Pulling image: {}", pod.name, image);
-                                    if let Err(e) = runtime.pull_image(image).await {
-                                        error!("[pod:{}] Image pull failed: {}", pod.name, e);
-                                        match sync_client
-                                            .put(&status_url)
-                                            .header(
-                                                "Authorization",
-                                                format!("Bearer {}", sync_token),
-                                            )
-                                            .json(&pkg_types::pod::PodStatus::Failed)
-                                            .send()
-                                            .await
-                                        {
-                                            Ok(resp) => {
-                                                info!("[pod:{}] Status update to Failed (pull error): {}", pod.name, resp.status());
-                                            }
-                                            Err(e) => {
-                                                error!("[pod:{}] Failed to update status: {}", pod.name, e);
-                                            }
-                                        }
-                                        continue;
-                                    }
-
-                                    // 2. Create Container
-                                    info!("[pod:{}] Creating container: {}", pod.name, pod.id);
-                                    if let Err(e) = runtime
-                                        .create_container(&pod.id, image, &command, &env)
-                                        .await
-                                    {
-                                        error!(
-                                            "[pod:{}] Container creation failed: {}",
-                                            pod.name, e
+                                    tokio::spawn(async move {
+                                        let status_url = format!(
+                                            "{}/api/v1/namespaces/{}/pods/{}/status",
+                                            pod_server.trim_end_matches('/'),
+                                            pod.namespace,
+                                            pod.name
                                         );
-                                        match sync_client
+
+                                        let container_spec = pod.spec.containers.first();
+                                        let image = container_spec
+                                            .map(|c| c.image.clone())
+                                            .unwrap_or_else(|| "alpine:latest".to_string());
+                                        let command: Vec<String> = container_spec
+                                            .map(|c| {
+                                                let mut cmd = c.command.clone();
+                                                cmd.extend(c.args.clone());
+                                                cmd
+                                            })
+                                            .unwrap_or_default();
+                                        let env = container_spec
+                                            .map(|c| c.env.clone())
+                                            .unwrap_or_default();
+
+                                        // 1. Pull Image
+                                        info!("[pod:{}] Pulling image: {}", pod.name, image);
+                                        if let Err(e) = pod_runtime.pull_image(&image).await {
+                                            error!("[pod:{}] Image pull failed: {}", pod.name, e);
+                                            let _ = pod_client
+                                                .put(&status_url)
+                                                .header(
+                                                    "Authorization",
+                                                    format!("Bearer {}", pod_token),
+                                                )
+                                                .json(&pkg_types::pod::PodStatus::Failed)
+                                                .send()
+                                                .await;
+                                            return;
+                                        }
+
+                                        // 2. Create Container
+                                        info!("[pod:{}] Creating container: {}", pod.name, pod.id);
+                                        if let Err(e) = pod_runtime
+                                            .create_container(&pod.id, &image, &command, &env)
+                                            .await
+                                        {
+                                            error!(
+                                                "[pod:{}] Container creation failed: {}",
+                                                pod.name, e
+                                            );
+                                            let _ = pod_client
+                                                .put(&status_url)
+                                                .header(
+                                                    "Authorization",
+                                                    format!("Bearer {}", pod_token),
+                                                )
+                                                .json(&pkg_types::pod::PodStatus::Failed)
+                                                .send()
+                                                .await;
+                                            return;
+                                        }
+
+                                        // 3. Start Container
+                                        info!("[pod:{}] Starting container: {}", pod.name, pod.id);
+                                        if let Err(e) = pod_runtime.start_container(&pod.id).await {
+                                            error!(
+                                                "[pod:{}] Container start failed: {}",
+                                                pod.name, e
+                                            );
+                                            let _ = pod_runtime.cleanup_container(&pod.id).await;
+                                            let _ = pod_client
+                                                .put(&status_url)
+                                                .header(
+                                                    "Authorization",
+                                                    format!("Bearer {}", pod_token),
+                                                )
+                                                .json(&pkg_types::pod::PodStatus::Failed)
+                                                .send()
+                                                .await;
+                                            return;
+                                        }
+
+                                        // 4. Success
+                                        info!(
+                                            "[pod:{}] Container running via {}",
+                                            pod.name,
+                                            pod_runtime.backend_name()
+                                        );
+                                        let _ = pod_client
                                             .put(&status_url)
                                             .header(
                                                 "Authorization",
-                                                format!("Bearer {}", sync_token),
+                                                format!("Bearer {}", pod_token),
                                             )
-                                            .json(&pkg_types::pod::PodStatus::Failed)
+                                            .json(&pkg_types::pod::PodStatus::Running)
                                             .send()
-                                            .await
-                                        {
-                                            Ok(resp) => {
-                                                info!("[pod:{}] Status update to Failed (create error): {}", pod.name, resp.status());
-                                            }
-                                            Err(e) => {
-                                                error!("[pod:{}] Failed to update status: {}", pod.name, e);
-                                            }
-                                        }
-                                        continue;
-                                    }
-
-                                    // 3. Start Container
-                                    info!("[pod:{}] Starting container: {}", pod.name, pod.id);
-                                    if let Err(e) = runtime.start_container(&pod.id).await {
-                                        error!("[pod:{}] Container start failed: {}", pod.name, e);
-                                        let _ = runtime.cleanup_container(&pod.id).await;
-                                        match sync_client
-                                            .put(&status_url)
-                                            .header(
-                                                "Authorization",
-                                                format!("Bearer {}", sync_token),
-                                            )
-                                            .json(&pkg_types::pod::PodStatus::Failed)
-                                            .send()
-                                            .await
-                                        {
-                                            Ok(resp) => {
-                                                info!("[pod:{}] Status update to Failed (start error): {}", pod.name, resp.status());
-                                            }
-                                            Err(e) => {
-                                                error!("[pod:{}] Failed to update status: {}", pod.name, e);
-                                            }
-                                        }
-                                        continue;
-                                    }
-
-                                    // 4. Success
-                                    info!(
-                                        "[pod:{}] Container running via {}",
-                                        pod.name,
-                                        runtime.backend_name()
-                                    );
-                                    match sync_client
-                                        .put(&status_url)
-                                        .header("Authorization", format!("Bearer {}", sync_token))
-                                        .json(&pkg_types::pod::PodStatus::Running)
-                                        .send()
-                                        .await
-                                    {
-                                        Ok(resp) => {
-                                            info!("[pod:{}] Status update to Running: {}", pod.name, resp.status());
-                                        }
-                                        Err(e) => {
-                                            error!("[pod:{}] Failed to update status: {}", pod.name, e);
-                                        }
-                                    }
+                                            .await;
+                                    });
                                 }
                             }
                         }
