@@ -179,24 +179,23 @@ async fn handle_tty(
         bin_args = cmd_args_owned.clone();
     }
 
+    // Each Stdio must own a distinct fd — passing the same raw fd to from_raw_fd
+    // three times creates three owners, causing a triple-close (IO safety abort).
+    // Dup slave_fd for stdout and stderr; stdin takes ownership of the original.
+    // All three are closed automatically when Command::spawn() drops the Stdio
+    // objects, so the parent holds no slave-side reference after spawn() returns
+    // (which is what lets reads on the master return EOF when the child exits).
     let child = unsafe {
         use std::os::unix::io::FromRawFd;
         use std::process::Stdio;
         tokio::process::Command::new(bin)
             .args(&bin_args)
             .env("TERM", "xterm-256color")
-            // Give the slave side to the child as its controlling terminal.
             .stdin(Stdio::from_raw_fd(slave_fd))
-            .stdout(Stdio::from_raw_fd(slave_fd))
-            .stderr(Stdio::from_raw_fd(slave_fd))
+            .stdout(Stdio::from_raw_fd(libc::dup(slave_fd)))
+            .stderr(Stdio::from_raw_fd(libc::dup(slave_fd)))
             .spawn()
     };
-
-    // The parent doesn't need the slave fd anymore; close it so the child holds
-    // the last reference — when the child exits, reads on master get EOF.
-    unsafe {
-        libc::close(slave_fd);
-    }
 
     let mut child = match child {
         Ok(c) => c,
