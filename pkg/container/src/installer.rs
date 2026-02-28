@@ -26,45 +26,58 @@ impl RuntimeInstaller {
     pub async fn ensure_runtime(preferred: Option<&str>) -> Result<PathBuf> {
         let preferred = preferred.unwrap_or(runtime::DEFAULT_RUNTIME);
 
-        // Build search order: preferred first, then others
-        let search_order: Vec<&str> = std::iter::once(preferred)
-            .chain(
-                runtime::SUPPORTED_RUNTIMES
-                    .iter()
-                    .copied()
-                    .filter(|r| *r != preferred),
-            )
-            .collect();
-
-        // 1. Check $PATH
-        for name in &search_order {
-            if let Ok(output) = std::process::Command::new("which").arg(name).output()
-                && output.status.success()
-            {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                info!("Found {} in PATH: {}", name, path);
-                return Ok(PathBuf::from(path));
-            }
+        // 1. Try to find the preferred runtime in all known locations
+        if let Ok(path) = Self::find_in_path(preferred) {
+            return Ok(path);
+        }
+        let install_dir = Self::install_dir();
+        let path = install_dir.join(preferred);
+        if path.exists() {
+            info!("Found {} at {}", preferred, path.display());
+            return Ok(path);
         }
 
-        // 2. Check our install directory
-        let install_dir = Self::install_dir();
-        for name in &search_order {
-            let path = install_dir.join(name);
-            if path.exists() {
-                info!("Found {} at {}", name, path.display());
+        // 2. Not found? Try auto-downloading the preferred one
+        info!(
+            "OCI runtime {} not found in PATH or install dir — attempting auto-download...",
+            preferred
+        );
+        if let Ok(path) = Self::download_runtime(&install_dir, preferred).await {
+            return Ok(path);
+        }
+
+        // 3. Last resort: check if ANY other supported runtime is in PATH
+        for name in runtime::SUPPORTED_RUNTIMES {
+            if *name == preferred {
+                continue;
+            }
+            if let Ok(path) = Self::find_in_path(name) {
+                warn!("Preferred runtime {} failed, falling back to {} in PATH", preferred, name);
                 return Ok(path);
             }
         }
 
-        // 3. Auto-download preferred runtime has no prebuilt binary
-        info!("No OCI runtime found — auto-downloading {}...", preferred);
-        Self::download_runtime(&install_dir, preferred).await
+        Err(anyhow::anyhow!(
+            "Failed to find or download OCI runtime {}. Fallbacks also failed.",
+            preferred
+        ))
+    }
+
+    fn find_in_path(name: &str) -> Result<PathBuf> {
+        if let Ok(output) = std::process::Command::new("which").arg(name).output()
+            && output.status.success()
+        {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            info!("Found {} in PATH: {}", name, path);
+            Ok(PathBuf::from(path))
+        } else {
+            Err(anyhow::anyhow!("{} not in PATH", name))
+        }
     }
 
     /// Get the install directory — prefers /usr/local/bin/k3rs-runtime,
     /// falls back to $HOME/.k3rs/bin/ if no write access.
-    fn install_dir() -> PathBuf {
+    pub fn install_dir() -> PathBuf {
         let system_dir = PathBuf::from(paths::RUNTIME_INSTALL_DIR);
         if std::fs::create_dir_all(&system_dir).is_ok() {
             // Test write access

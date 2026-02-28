@@ -99,7 +99,7 @@ impl ContainerRuntime {
                     }
                     Err(_) => {
                         // Try auto-download
-                        info!("No OCI runtime in PATH — attempting auto-download...");
+                        info!("No OCI runtime found — attempting auto-download...");
                         match crate::installer::RuntimeInstaller::ensure_runtime(None).await {
                             Ok(path) => {
                                 let oci = OciBackend::new(&path.to_string_lossy(), &data_dir);
@@ -135,6 +135,12 @@ impl ContainerRuntime {
     /// The name of the active runtime backend.
     pub fn backend_name(&self) -> &str {
         self.backend.name()
+    }
+
+    /// Returns the path to the OCI runtime binary (e.g. `/usr/local/bin/youki`),
+    /// or None for VM backends. Used by the agent for PTY-based exec.
+    pub fn oci_runtime_path(&self) -> Option<String> {
+        self.backend.oci_runtime_path()
     }
 
     /// Get full runtime info for pod tracking.
@@ -205,7 +211,7 @@ impl ContainerRuntime {
                     Ok(b) => Arc::new(b) as Arc<dyn RuntimeBackend>,
                     Err(_) => {
                         info!(
-                            "OCI runtime {} not in PATH — attempting auto-download...",
+                            "OCI runtime {} not found in PATH or install dir — attempting auto-download...",
                             name
                         );
                         let downloaded = crate::installer::RuntimeInstaller::ensure_runtime(None)

@@ -45,14 +45,22 @@ pub trait RuntimeBackend: Send + Sync {
     async fn exec(&self, id: &str, command: &[&str]) -> Result<String>;
 
     /// Spawn a command inside a running container and return the child process handle.
-    /// Used for interactive WebSocket sessions.
-    /// `tty` — allocate a pseudo-terminal inside the container (like `docker exec -t`).
+    /// Used for non-interactive WebSocket sessions.
     async fn spawn_exec(
         &self,
         id: &str,
         command: &[&str],
         tty: bool,
     ) -> Result<tokio::process::Child>;
+
+    /// Return the path to the OCI runtime binary (e.g. `/usr/local/bin/youki`), if
+    /// this backend wraps one. Returns `None` for VM backends.
+    ///
+    /// The agent uses this to spawn the runtime with a real PTY fd pair instead of
+    /// a plain pipe, enabling SSH-like interactive sessions.
+    fn oci_runtime_path(&self) -> Option<String> {
+        None
+    }
 
     /// Query the real OCI runtime state of a container.
     /// Runs `<runtime> state <id>` and parses the JSON output.
@@ -88,16 +96,29 @@ pub struct OciBackend {
 }
 
 impl OciBackend {
-    /// Auto-detect an OCI runtime in $PATH.
+    /// Auto-detect an OCI runtime in $PATH or install directory.
     /// Priority: youki or crun
     pub fn detect(data_dir: &std::path::Path) -> Result<Self> {
+        // Try youki then crun
         for name in &["youki", "crun"] {
-            if let Ok(oci) = Self::with_name(name, data_dir) {
-                return Ok(oci);
+            // 1. Check PATH
+            if let Ok(output) = std::process::Command::new("which").arg(name).output()
+                && output.status.success()
+            {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                return Ok(Self::new(&path, data_dir));
+            }
+
+            // 2. Check k3rs install directories
+            let install_dir = crate::installer::RuntimeInstaller::install_dir();
+            let path = install_dir.join(name);
+            if path.exists() {
+                return Ok(Self::new(&path.to_string_lossy(), data_dir));
             }
         }
+
         Err(anyhow::anyhow!(
-            "No OCI runtime found in PATH. Install youki or crun.",
+            "No OCI runtime found. Install youki or crun.",
         ))
     }
 
@@ -404,13 +425,7 @@ impl RuntimeBackend for OciBackend {
             tty
         );
 
-        let mut args = vec!["exec"];
-        // --tty allocates a pseudo-terminal inside the container so the shell
-        // gets a proper terminal (shows prompts, handles Ctrl+C, etc.).
-        if tty {
-            args.push("--tty");
-        }
-        args.push(id);
+        let mut args = vec!["exec", id];
         if command.is_empty() {
             args.push("/bin/sh");
         } else {
@@ -426,6 +441,10 @@ impl RuntimeBackend for OciBackend {
             .spawn()?;
 
         Ok(child)
+    }
+
+    fn oci_runtime_path(&self) -> Option<String> {
+        Some(self.runtime_path.clone())
     }
 
     async fn state(&self, id: &str) -> Result<ContainerStateInfo> {
