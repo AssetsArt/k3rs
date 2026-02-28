@@ -177,17 +177,17 @@ impl RootfsManager {
                     // when extracting to a nested rootfs. We also need to ensure the source
                     // file exists, so we collect them and link them in a second pass using
                     // absolute paths.
-                    if entry.header().entry_type() == tar::EntryType::Link {
-                        if let Some(link_name) = entry.header().link_name()? {
-                            let mut link_src = rootfs_clone.to_path_buf();
-                            for component in link_name.components() {
-                                if let std::path::Component::Normal(c) = component {
-                                    link_src.push(c);
-                                }
+                    if entry.header().entry_type() == tar::EntryType::Link
+                        && let Some(link_name) = entry.header().link_name()?
+                    {
+                        let mut link_src = rootfs_clone.to_path_buf();
+                        for component in link_name.components() {
+                            if let std::path::Component::Normal(c) = component {
+                                link_src.push(c);
                             }
-                            deferred_hard_links.push((link_src, dest));
-                            continue;
                         }
+                        deferred_hard_links.push((link_src, dest));
+                        continue;
                     }
 
                     // If an existing non-directory file blocks the unpack, remove it first.
@@ -376,18 +376,18 @@ impl RootfsManager {
         }
 
         // Create basic Linux section with user namespace mapping and sysctls
-        let mut uid_mappings = vec![
-            serde_json::json!({ "hostID": host_uid(), "containerID": 0, "size": 1 })
-        ];
-        let mut gid_mappings = vec![
-            serde_json::json!({ "hostID": host_gid(), "containerID": 0, "size": 1 })
-        ];
+        let mut uid_mappings =
+            vec![serde_json::json!({ "hostID": host_uid(), "containerID": 0, "size": 1 })];
+        let mut gid_mappings =
+            vec![serde_json::json!({ "hostID": host_gid(), "containerID": 0, "size": 1 })];
 
         // If running as non-root, try to add subordinate mappings from /etc/subuid for nginx etc.
         if !is_root() {
             // Mapping for common service UIDs (1-1000) using subuids
-            uid_mappings.push(serde_json::json!({ "hostID": 524288, "containerID": 1, "size": 1000 }));
-            gid_mappings.push(serde_json::json!({ "hostID": 524288, "containerID": 1, "size": 1000 }));
+            uid_mappings
+                .push(serde_json::json!({ "hostID": 524288, "containerID": 1, "size": 1000 }));
+            gid_mappings
+                .push(serde_json::json!({ "hostID": 524288, "containerID": 1, "size": 1000 }));
         }
 
         let linux = serde_json::json!({
@@ -589,7 +589,10 @@ mod tests {
 
         assert!(config["linux"]["uidMappings"].is_array());
         assert!(config["linux"]["gidMappings"].is_array());
-        assert_eq!(config["linux"]["sysctl"]["net.ipv4.ip_unprivileged_port_start"], "0");
+        assert_eq!(
+            config["linux"]["sysctl"]["net.ipv4.ip_unprivileged_port_start"],
+            "0"
+        );
     }
 
     #[test]
@@ -652,22 +655,25 @@ mod tests {
     }
 }
 #[cfg(test)]
-use flate2::write::GzEncoder;
-#[cfg(test)]
 use flate2::Compression;
 #[cfg(test)]
-use tar::{Builder, Header, EntryType};
+use flate2::write::GzEncoder;
+#[cfg(test)]
+use tar::{Builder, EntryType, Header};
 
 #[cfg(test)]
 #[tokio::test]
 async fn test_extract_hard_links() {
-    let tmp_base = std::env::temp_dir().join(format!("k3rs-test-{}", chrono::Utc::now().timestamp_millis()));
+    let tmp_base = std::env::temp_dir().join(format!(
+        "k3rs-test-{}",
+        chrono::Utc::now().timestamp_millis()
+    ));
     let _ = std::fs::remove_dir_all(&tmp_base);
     std::fs::create_dir_all(&tmp_base).unwrap();
     let image_dir = tmp_base.join("image");
     let layers_dir = image_dir.join("layers");
     std::fs::create_dir_all(&layers_dir).unwrap();
-    
+
     let container_dir = tmp_base.join("container");
     std::fs::create_dir_all(&container_dir).unwrap();
 
@@ -682,14 +688,16 @@ async fn test_extract_hard_links() {
     let data = b"perl-binary-content";
     header.set_size(data.len() as u64);
     header.set_mode(0o755);
-    tar.append_data(&mut header, "usr/bin/perl5.40.1", &data[..]).unwrap();
+    tar.append_data(&mut header, "usr/bin/perl5.40.1", &data[..])
+        .unwrap();
 
     // 2. Hard link: usr/bin/perl -> usr/bin/perl5.40.1
     let mut header = Header::new_gnu();
     header.set_entry_type(EntryType::Link);
     header.set_link_name("usr/bin/perl5.40.1").unwrap();
     header.set_size(0);
-    tar.append_data(&mut header, "usr/bin/perl", &[][..]).unwrap();
+    tar.append_data(&mut header, "usr/bin/perl", &[][..])
+        .unwrap();
 
     tar.into_inner().unwrap().finish().unwrap();
 
@@ -703,11 +711,11 @@ async fn test_extract_hard_links() {
     let rootfs = result.unwrap();
     assert!(rootfs.join("usr/bin/perl5.40.1").exists());
     assert!(rootfs.join("usr/bin/perl").exists());
-    
+
     // Verify it's a hard link (same inode)
     let meta1 = std::fs::metadata(rootfs.join("usr/bin/perl5.40.1")).unwrap();
     let meta2 = std::fs::metadata(rootfs.join("usr/bin/perl")).unwrap();
-    
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -719,13 +727,16 @@ async fn test_extract_hard_links() {
 #[cfg(test)]
 #[tokio::test]
 async fn test_extract_hard_links_deferred() {
-    let tmp_base = std::env::temp_dir().join(format!("k3rs-test-deferred-{}", chrono::Utc::now().timestamp_millis()));
+    let tmp_base = std::env::temp_dir().join(format!(
+        "k3rs-test-deferred-{}",
+        chrono::Utc::now().timestamp_millis()
+    ));
     let _ = std::fs::remove_dir_all(&tmp_base);
     std::fs::create_dir_all(&tmp_base).unwrap();
     let image_dir = tmp_base.join("image");
     let layers_dir = image_dir.join("layers");
     std::fs::create_dir_all(&layers_dir).unwrap();
-    
+
     let container_dir = tmp_base.join("container");
     std::fs::create_dir_all(&container_dir).unwrap();
 
@@ -740,14 +751,16 @@ async fn test_extract_hard_links_deferred() {
     header.set_entry_type(EntryType::Link);
     header.set_link_name("usr/bin/perl5.40.1").unwrap();
     header.set_size(0);
-    tar.append_data(&mut header, "usr/bin/perl", &[][..]).unwrap();
+    tar.append_data(&mut header, "usr/bin/perl", &[][..])
+        .unwrap();
 
     // 2. Regular file: usr/bin/perl5.40.1
     let mut header = Header::new_gnu();
     let data = b"perl-binary-content";
     header.set_size(data.len() as u64);
     header.set_mode(0o755);
-    tar.append_data(&mut header, "usr/bin/perl5.40.1", &data[..]).unwrap();
+    tar.append_data(&mut header, "usr/bin/perl5.40.1", &data[..])
+        .unwrap();
 
     tar.into_inner().unwrap().finish().unwrap();
     std::fs::write(image_dir.join("config.json"), "{}").unwrap();
@@ -759,11 +772,11 @@ async fn test_extract_hard_links_deferred() {
     let rootfs = result.unwrap();
     assert!(rootfs.join("usr/bin/perl5.40.1").exists());
     assert!(rootfs.join("usr/bin/perl").exists());
-    
+
     // Verify it's a hard link (same inode)
     let meta1 = std::fs::metadata(rootfs.join("usr/bin/perl5.40.1")).unwrap();
     let meta2 = std::fs::metadata(rootfs.join("usr/bin/perl")).unwrap();
-    
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;

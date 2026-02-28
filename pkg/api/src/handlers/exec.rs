@@ -149,9 +149,9 @@ async fn proxy_to_agent(mut client_socket: WebSocket, agent_url: String) {
                 Message::Text(t) => {
                     tokio_tungstenite::tungstenite::Message::Text(t.as_str().into())
                 }
-                Message::Binary(b) => tokio_tungstenite::tungstenite::Message::Binary(b.into()),
-                Message::Ping(p) => tokio_tungstenite::tungstenite::Message::Ping(p.into()),
-                Message::Pong(p) => tokio_tungstenite::tungstenite::Message::Pong(p.into()),
+                Message::Binary(b) => tokio_tungstenite::tungstenite::Message::Binary(b),
+                Message::Ping(p) => tokio_tungstenite::tungstenite::Message::Ping(p),
+                Message::Pong(p) => tokio_tungstenite::tungstenite::Message::Pong(p),
                 Message::Close(_) => break,
             };
             if agent_sender.send(t_msg).await.is_err() {
@@ -168,9 +168,9 @@ async fn proxy_to_agent(mut client_socket: WebSocket, agent_url: String) {
                 tokio_tungstenite::tungstenite::Message::Text(t) => {
                     Message::Text(t.as_str().into())
                 }
-                tokio_tungstenite::tungstenite::Message::Binary(b) => Message::Binary(b.into()),
-                tokio_tungstenite::tungstenite::Message::Ping(p) => Message::Ping(p.into()),
-                tokio_tungstenite::tungstenite::Message::Pong(p) => Message::Pong(p.into()),
+                tokio_tungstenite::tungstenite::Message::Binary(b) => Message::Binary(b),
+                tokio_tungstenite::tungstenite::Message::Ping(p) => Message::Ping(p),
+                tokio_tungstenite::tungstenite::Message::Pong(p) => Message::Pong(p),
                 // Forward Close so the client's read loop exits cleanly.
                 // Without this the proxy drops the sender half while the
                 // receiver half stays open, leaving the client blocked forever.

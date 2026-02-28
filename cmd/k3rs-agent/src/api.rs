@@ -71,7 +71,7 @@ async fn handle_socket(
 ) {
     info!("WebSocket exec: container={} tty={}", container_id, tty);
 
-    let (mut ws_sender, mut ws_receiver) = socket.split();
+    let (mut ws_sender, ws_receiver) = socket.split();
 
     // Initial "connecting" text frame — client drains this before entering raw mode.
     let _ = ws_sender
@@ -189,7 +189,6 @@ async fn handle_tty(
     // (which is what lets reads on the master return EOF when the child exits).
     let child = unsafe {
         use std::os::unix::io::FromRawFd;
-        use std::os::unix::process::CommandExt;
         use std::process::Stdio;
         tokio::process::Command::new(bin)
             .args(&bin_args)
@@ -302,19 +301,12 @@ async fn handle_tty(
     write_task.abort();
 
     // Give read_task a moment to get EIO and flush any remaining PTY output.
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_millis(200),
-        &mut read_task,
-    )
-    .await;
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(200), &mut read_task).await;
     read_task.abort();
 
     // Drain output buffered before the sender was dropped.
-    while let Ok(Some(b)) = tokio::time::timeout(
-        std::time::Duration::from_millis(50),
-        output_rx.recv(),
-    )
-    .await
+    while let Ok(Some(b)) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), output_rx.recv()).await
     {
         ws_sender.send(Message::Binary(b.into())).await.ok();
     }

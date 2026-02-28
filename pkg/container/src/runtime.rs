@@ -249,14 +249,14 @@ impl ContainerRuntime {
 
         // Best-effort cleanup in case old state exists (e.g. from a previous failed run)
         // to avoid "container already exists" errors.
-        if let Ok(state) = backend.state(id).await {
-            if state.status == "stopped" || state.status == "exited" {
-                info!(
-                    "Container {} exists in stopped/exited state, cleaning up first...",
-                    id
-                );
-                let _ = backend.delete(id).await;
-            }
+        if let Ok(state) = backend.state(id).await
+            && (state.status == "stopped" || state.status == "exited")
+        {
+            info!(
+                "Container {} exists in stopped/exited state, cleaning up first...",
+                id
+            );
+            let _ = backend.delete(id).await;
         }
 
         if backend.handles_images() {
@@ -323,10 +323,10 @@ impl ContainerRuntime {
                         ));
                     }
                 }
-            } else if entry.runtime_name == "youki" || entry.runtime_name == "crun" {
-                if let Ok(oci) = OciBackend::with_name(&entry.runtime_name, &self.data_dir) {
-                    return Arc::new(oci);
-                }
+            } else if (entry.runtime_name == "youki" || entry.runtime_name == "crun")
+                && let Ok(oci) = OciBackend::with_name(&entry.runtime_name, &self.data_dir)
+            {
+                return Arc::new(oci);
             }
         }
         // Fallback to default backend

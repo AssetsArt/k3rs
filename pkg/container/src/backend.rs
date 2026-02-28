@@ -255,18 +255,19 @@ impl RuntimeBackend for OciBackend {
         let stderr_file = stdout_file.try_clone()?;
 
         let mut command = self.cmd();
-        command.args([
-            "--log",
-            &runtime_log.to_string_lossy(),
-            "create",
-            "--bundle",
-            &bundle.to_string_lossy(),
-            "--pid-file",
-            &pid_file.to_string_lossy(),
-            id,
-        ])
-        .stdout(stdout_file)
-        .stderr(stderr_file);
+        command
+            .args([
+                "--log",
+                &runtime_log.to_string_lossy(),
+                "create",
+                "--bundle",
+                &bundle.to_string_lossy(),
+                "--pid-file",
+                &pid_file.to_string_lossy(),
+                id,
+            ])
+            .stdout(stdout_file)
+            .stderr(stderr_file);
 
         let status = command.status().await?;
 
@@ -402,9 +403,15 @@ impl RuntimeBackend for OciBackend {
         // Prefer nsenter — joins container namespaces via PID without requiring
         // CAP_SYS_PTRACE, so it works in rootless mode where youki exec fails.
         if let Some(pid) = self.read_pid(id) {
-            tracing::info!("[{}] using nsenter (pid={}) for exec in {}", self.runtime_name, pid, id);
+            tracing::info!(
+                "[{}] using nsenter (pid={}) for exec in {}",
+                self.runtime_name,
+                pid,
+                id
+            );
             let mut args: Vec<String> = vec![
-                "--target".to_string(), pid.to_string(),
+                "--target".to_string(),
+                pid.to_string(),
                 "--pid".to_string(),
                 "--uts".to_string(),
                 "--ipc".to_string(),
@@ -470,9 +477,15 @@ impl RuntimeBackend for OciBackend {
 
         // Prefer nsenter for the same reason as exec() — avoids EPERM in rootless mode.
         if let Some(pid) = self.read_pid(id) {
-            tracing::info!("[{}] using nsenter (pid={}) for spawn_exec in {}", self.runtime_name, pid, id);
+            tracing::info!(
+                "[{}] using nsenter (pid={}) for spawn_exec in {}",
+                self.runtime_name,
+                pid,
+                id
+            );
             let mut args: Vec<String> = vec![
-                "--target".to_string(), pid.to_string(),
+                "--target".to_string(),
+                pid.to_string(),
                 "--pid".to_string(),
                 "--uts".to_string(),
                 "--ipc".to_string(),

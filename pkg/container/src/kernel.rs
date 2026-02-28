@@ -70,6 +70,12 @@ pub struct KernelManager {
     download_url: Option<String>,
 }
 
+impl Default for KernelManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KernelManager {
     /// Create a KernelManager with the default directory (`/var/lib/k3rs`).
     pub fn new() -> Self {

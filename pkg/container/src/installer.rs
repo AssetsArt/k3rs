@@ -52,7 +52,10 @@ impl RuntimeInstaller {
                 continue;
             }
             if let Ok(path) = Self::find_in_path(name) {
-                warn!("Preferred runtime {} failed, falling back to {} in PATH", preferred, name);
+                warn!(
+                    "Preferred runtime {} failed, falling back to {} in PATH",
+                    preferred, name
+                );
                 return Ok(path);
             }
         }
