@@ -149,9 +149,13 @@ impl RootfsManager {
                 archive.set_preserve_permissions(true);
                 archive.set_overwrite(true);
 
+                // Hard link entries (EntryType::Link) can appear before the file they point to
+                // within the same tar. Collect them and retry after all regular entries are done.
+                let mut deferred_hard_links: Vec<(PathBuf, PathBuf)> = Vec::new();
+
                 for entry in archive.entries()? {
                     let mut entry = entry?;
-                    let entry_path = entry.path()?;
+                    let entry_path = entry.path()?.into_owned();
 
                     // Skip whiteout files (OCI layer deletion markers) — they start with ".wh."
                     if let Some(name) = entry_path.file_name().and_then(|n| n.to_str())
@@ -161,6 +165,19 @@ impl RootfsManager {
                     }
 
                     let dest = rootfs_clone.join(&entry_path);
+
+                    // Defer hard links whose target hasn't been extracted yet.
+                    // The tar crate's unpack() calls hard_link(link_src, dest); if link_src
+                    // doesn't exist yet we get ENOENT, so we defer and retry below.
+                    if entry.header().entry_type() == tar::EntryType::Link {
+                        if let Some(link_name) = entry.header().link_name()? {
+                            let link_src = rootfs_clone.join(&*link_name);
+                            if !link_src.exists() {
+                                deferred_hard_links.push((link_src, dest));
+                                continue;
+                            }
+                        }
+                    }
 
                     // If an existing non-directory file blocks the unpack, remove it first.
                     // This handles the case where a previous layer wrote a file with
@@ -186,6 +203,24 @@ impl RootfsManager {
                         ));
                     }
                 }
+
+                // Retry deferred hard links now that all regular files are on disk.
+                for (link_src, dest) in deferred_hard_links {
+                    if dest.exists() {
+                        continue; // a later layer or earlier iteration already wrote it
+                    }
+                    if link_src.exists() {
+                        std::fs::hard_link(&link_src, &dest).map_err(|e| {
+                            anyhow::anyhow!(
+                                "failed to hard link `{}` -> `{}`: {e}",
+                                link_src.display(),
+                                dest.display()
+                            )
+                        })?;
+                    }
+                    // If link_src still doesn't exist it wasn't in this layer set — skip.
+                }
+
                 Ok(())
             })
             .await??;
