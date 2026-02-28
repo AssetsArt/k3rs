@@ -46,7 +46,13 @@ pub trait RuntimeBackend: Send + Sync {
 
     /// Spawn a command inside a running container and return the child process handle.
     /// Used for interactive WebSocket sessions.
-    async fn spawn_exec(&self, id: &str, command: &[&str]) -> Result<tokio::process::Child>;
+    /// `tty` — allocate a pseudo-terminal inside the container (like `docker exec -t`).
+    async fn spawn_exec(
+        &self,
+        id: &str,
+        command: &[&str],
+        tty: bool,
+    ) -> Result<tokio::process::Child>;
 
     /// Query the real OCI runtime state of a container.
     /// Runs `<runtime> state <id>` and parses the JSON output.
@@ -384,15 +390,27 @@ impl RuntimeBackend for OciBackend {
         }
     }
 
-    async fn spawn_exec(&self, id: &str, command: &[&str]) -> Result<tokio::process::Child> {
+    async fn spawn_exec(
+        &self,
+        id: &str,
+        command: &[&str],
+        tty: bool,
+    ) -> Result<tokio::process::Child> {
         tracing::info!(
-            "[{}] spawning interactive exec in container {}: {:?}",
+            "[{}] spawning interactive exec in container {}: {:?} (tty={})",
             self.runtime_name,
             id,
-            command
+            command,
+            tty
         );
 
-        let mut args = vec!["exec", id];
+        let mut args = vec!["exec"];
+        // --tty allocates a pseudo-terminal inside the container so the shell
+        // gets a proper terminal (shows prompts, handles Ctrl+C, etc.).
+        if tty {
+            args.push("--tty");
+        }
+        args.push(id);
         if command.is_empty() {
             args.push("/bin/sh");
         } else {

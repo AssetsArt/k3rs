@@ -750,27 +750,37 @@ async fn main() -> anyhow::Result<()> {
                 .replace("http://", "ws://")
                 .replace("https://", "wss://");
 
-            let url = if command.is_empty() {
+            let cmd_str = command.join(" ");
+            let encoded_cmd: String = cmd_str
+                .chars()
+                .map(|c| match c {
+                    'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' => {
+                        c.to_string()
+                    }
+                    ' ' => "%20".to_string(),
+                    c => format!("%{:02X}", c as u32),
+                })
+                .collect();
+
+            let mut params = Vec::new();
+            if !encoded_cmd.is_empty() {
+                params.push(format!("cmd={}", encoded_cmd));
+            }
+            if is_interactive {
+                params.push("tty=true".to_string());
+            }
+            let url = if params.is_empty() {
                 format!(
                     "{}/api/v1/namespaces/{}/pods/{}/exec",
                     ws_url, namespace, pod_id
                 )
             } else {
-                let cmd_str = command.join(" ");
-                // Simple percent-encoding for query param value.
-                let encoded: String = cmd_str
-                    .chars()
-                    .map(|c| match c {
-                        'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' => {
-                            c.to_string()
-                        }
-                        ' ' => "%20".to_string(),
-                        c => format!("%{:02X}", c as u32),
-                    })
-                    .collect();
                 format!(
-                    "{}/api/v1/namespaces/{}/pods/{}/exec?cmd={}",
-                    ws_url, namespace, pod_id, encoded
+                    "{}/api/v1/namespaces/{}/pods/{}/exec?{}",
+                    ws_url,
+                    namespace,
+                    pod_id,
+                    params.join("&")
                 )
             };
 
@@ -799,57 +809,81 @@ async fn main() -> anyhow::Result<()> {
             let (mut write, mut read) = ws_stream.split();
 
             if is_interactive {
-                // Interactive mode — stdin lines → WebSocket, WebSocket → stdout.
-                eprintln!("Entering interactive exec session. Type 'exit' to quit.");
+                // ── Interactive / PTY mode ────────────────────────────────────────────
+                // Enable raw mode: keystrokes sent immediately, no local echo.
+                // The container shell (after youki --tty) provides all echo/prompts.
+                crossterm::terminal::enable_raw_mode().expect("Failed to enable raw terminal mode");
 
-                // Drain the welcome/connecting message from the agent.
+                // Drain the "Connecting to …" welcome text frame → print to stderr
+                // so it doesn't corrupt the raw terminal output stream.
                 if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
                     read.next().await
                 {
                     eprint!("{}", text);
                 }
 
-                let stdin = tokio::io::stdin();
-                let reader = tokio::io::BufReader::new(stdin);
-                let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
+                // Spawn a blocking thread to read raw stdin bytes.
+                // In raw mode std::io::Read gives us bytes immediately.
+                let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+                std::thread::spawn(move || {
+                    use std::io::Read as _;
+                    let mut buf = [0u8; 256];
+                    loop {
+                        match std::io::stdin().read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
 
+                // Bidirectional raw tunnel.
                 loop {
                     tokio::select! {
-                        // User typed a line
-                        line_result = lines.next_line() => {
-                            match line_result {
-                                Ok(Some(line)) => {
-                                    if line.trim() == "exit" {
-                                        let _ = write
-                                            .send(tokio_tungstenite::tungstenite::Message::Text("exit".into()))
-                                            .await;
-                                        break;
-                                    }
+                        // Keystrokes from local terminal → container
+                        bytes = stdin_rx.recv() => {
+                            match bytes {
+                                Some(b) => {
                                     if write
-                                        .send(tokio_tungstenite::tungstenite::Message::Text(line.into()))
+                                        .send(tokio_tungstenite::tungstenite::Message::Binary(
+                                            b.into(),
+                                        ))
                                         .await
                                         .is_err()
                                     {
                                         break;
                                     }
                                 }
-                                _ => break,
+                                None => break,
                             }
                         }
-                        // Output from container
+                        // Output from container → local terminal
                         msg = read.next() => {
                             match msg {
-                                Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
-                                    print!("{}", text);
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(b))) => {
                                     use std::io::Write as _;
-                                    let _ = std::io::stdout().flush();
+                                    std::io::stdout().write_all(&b).ok();
+                                    std::io::stdout().flush().ok();
                                 }
-                                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => break,
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => {
+                                    // Diagnostic text from server/agent — print to stderr.
+                                    eprint!("{}", t);
+                                }
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+                                | None => break,
                                 _ => {}
                             }
                         }
                     }
                 }
+
+                // Restore the terminal before exiting.
+                crossterm::terminal::disable_raw_mode().ok();
+                // In raw mode \n alone doesn't move to column 0; emit \r\n.
+                eprintln!("\r\nSession closed.");
             } else {
                 // Non-interactive: the agent already spawned the command via ?cmd=.
                 // Just skip the welcome message then stream all output until WS closes.

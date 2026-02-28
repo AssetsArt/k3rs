@@ -419,13 +419,15 @@ impl ContainerRuntime {
     }
 
     /// Spawn an interactive command inside a running container.
+    /// `tty` — allocate a pseudo-terminal inside the container.
     pub async fn spawn_exec_in_container(
         &self,
         id: &str,
         command: &[&str],
+        tty: bool,
     ) -> Result<tokio::process::Child> {
         let backend = self.get_backend_for_container(id).await;
-        backend.spawn_exec(id, command).await
+        backend.spawn_exec(id, command, tty).await
     }
 
     /// Query the real OCI runtime state of a container.

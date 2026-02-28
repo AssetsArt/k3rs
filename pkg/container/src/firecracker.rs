@@ -1,8 +1,8 @@
+use crate::backend::RuntimeBackend;
+use crate::state::ContainerStateInfo;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::Path;
-use crate::backend::RuntimeBackend;
-use crate::state::ContainerStateInfo;
 
 /// Firecracker microVM backend for Linux.
 ///
@@ -58,11 +58,19 @@ impl RuntimeBackend for FirecrackerBackend {
         anyhow::bail!("Firecracker exec not implemented")
     }
 
-    async fn spawn_exec(&self, _id: &str, _command: &[&str]) -> Result<tokio::process::Child> {
+    async fn spawn_exec(
+        &self,
+        _id: &str,
+        _command: &[&str],
+        _tty: bool,
+    ) -> Result<tokio::process::Child> {
         anyhow::bail!("Firecracker spawn_exec not implemented")
     }
 
     async fn state(&self, id: &str) -> Result<ContainerStateInfo> {
-        Err(anyhow::anyhow!("Firecracker state not implemented for {}", id))
+        Err(anyhow::anyhow!(
+            "Firecracker state not implemented for {}",
+            id
+        ))
     }
 }

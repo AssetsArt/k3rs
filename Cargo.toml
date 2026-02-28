@@ -62,3 +62,4 @@ sysinfo = "0.38"
 tokio-tungstenite = { version = "0.28", features = ["connect"] }
 futures-util = "0.3"
 pkg-constants = { path = "pkg/constants" }
+crossterm = "0.28"

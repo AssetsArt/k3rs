@@ -18,6 +18,9 @@ use crate::AppState;
 pub struct ExecQuery {
     #[serde(default)]
     pub cmd: String,
+    /// If true, request a PTY on the agent side (raw byte tunnel).
+    #[serde(default)]
+    pub tty: bool,
 }
 
 /// WebSocket-based exec endpoint for attaching to containers.
@@ -81,26 +84,36 @@ pub async fn exec_into_pod(
         }
     };
 
-    // Append cmd query param so the agent runs the right command.
-    let agent_url = if query.cmd.is_empty() {
+    // Build agent URL with cmd and tty query params.
+    let encoded_cmd: String = query
+        .cmd
+        .chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' => c.to_string(),
+            ' ' => "%20".to_string(),
+            c => format!("%{:02X}", c as u32),
+        })
+        .collect();
+
+    let mut params = Vec::new();
+    if !encoded_cmd.is_empty() {
+        params.push(format!("cmd={}", encoded_cmd));
+    }
+    if query.tty {
+        params.push("tty=true".to_string());
+    }
+    let agent_url = if params.is_empty() {
         format!(
             "ws://{}:{}/exec/{}",
             node.address, node.agent_api_port, pod.id
         )
     } else {
-        // Percent-encode the cmd value for safe query-string embedding.
-        let encoded: String = query
-            .cmd
-            .chars()
-            .map(|c| match c {
-                'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' => c.to_string(),
-                ' ' => "%20".to_string(),
-                c => format!("%{:02X}", c as u32),
-            })
-            .collect();
         format!(
-            "ws://{}:{}/exec/{}?cmd={}",
-            node.address, node.agent_api_port, pod.id, encoded,
+            "ws://{}:{}/exec/{}?{}",
+            node.address,
+            node.agent_api_port,
+            pod.id,
+            params.join("&")
         )
     };
 

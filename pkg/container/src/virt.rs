@@ -574,7 +574,12 @@ impl RuntimeBackend for VirtualizationBackend {
         self.exec_via_vmm(id, command).await
     }
 
-    async fn spawn_exec(&self, id: &str, command: &[&str]) -> Result<tokio::process::Child> {
+    async fn spawn_exec(
+        &self,
+        id: &str,
+        command: &[&str],
+        tty: bool,
+    ) -> Result<tokio::process::Child> {
         let _ = (id, command);
         anyhow::bail!("Streaming exec is not yet supported for microVMs")
     }
