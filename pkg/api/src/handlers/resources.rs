@@ -116,6 +116,20 @@ pub async fn list_pods(
     (StatusCode::OK, Json(pods)).into_response()
 }
 
+/// GET /api/v1/nodes/:name/pods — list all pods assigned to a specific node (across all namespaces).
+pub async fn list_node_pods(
+    State(state): State<AppState>,
+    AxumPath(node_name): AxumPath<String>,
+) -> impl IntoResponse {
+    let entries = state.store.list_prefix("/registry/pods/").await.unwrap_or_default();
+    let pods: Vec<pkg_types::pod::Pod> = entries
+        .into_iter()
+        .filter_map(|(_, v)| serde_json::from_slice::<pkg_types::pod::Pod>(&v).ok())
+        .filter(|p| p.node_name.as_deref() == Some(node_name.as_str()))
+        .collect();
+    (StatusCode::OK, Json(pods)).into_response()
+}
+
 pub async fn get_pod(
     State(state): State<AppState>,
     AxumPath((ns, pod_name)): AxumPath<(String, String)>,

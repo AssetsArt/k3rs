@@ -126,6 +126,11 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             put(heartbeat::node_heartbeat),
         )
         // Phase 2: watch stream
+        // Node-scoped pod listing (all namespaces)
+        .route(
+            "/api/v1/nodes/{name}/pods",
+            get(resources::list_node_pods),
+        )
         .route("/api/v1/watch", get(watch::watch_events))
         // Phase 2: namespaces
         .route(

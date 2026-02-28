@@ -236,12 +236,11 @@ async fn main() -> anyhow::Result<()> {
                         info!("Starting agent recovery procedure...");
                         let discovered = rt.discover_running_containers().await.unwrap_or_default();
 
-                        let ns = "default";
                         // Using ctrl_server, ctrl_token, ctrl_node_id here
                         let url = format!(
-                            "{}/api/v1/namespaces/{}/pods",
+                            "{}/api/v1/nodes/{}/pods",
                             ctrl_server.trim_end_matches('/'),
-                            ns
+                            ctrl_node_id
                         );
                         let desired_pods: Vec<pkg_types::pod::Pod> = match client
                             .get(&url)
@@ -257,19 +256,17 @@ async fn main() -> anyhow::Result<()> {
                         };
 
                         let mut desired_running_ids = std::collections::HashMap::new();
-                        for pod in desired_pods {
-                            if pod.node_name.as_deref() == Some(ctrl_node_id.as_str()) {
-                                desired_running_ids.insert(pod.id.clone(), pod.name.clone());
-                            }
+                        for pod in &desired_pods {
+                            desired_running_ids.insert(pod.id.clone(), (pod.name.clone(), pod.namespace.clone()));
                         }
 
                         for cid in discovered {
-                            if let Some(pod_name) = desired_running_ids.get(&cid) {
+                            if let Some((pod_name, pod_ns)) = desired_running_ids.get(&cid) {
                                 info!("Agent recovery: adopting desired container {}", cid);
                                 let status_url = format!(
                                     "{}/api/v1/namespaces/{}/pods/{}/status",
                                     ctrl_server.trim_end_matches('/'),
-                                    ns,
+                                    pod_ns,
                                     pod_name
                                 );
                                 let _ = client
@@ -334,11 +331,10 @@ async fn main() -> anyhow::Result<()> {
                 loop {
                     interval.tick().await;
 
-                    let ns = "default";
                     let url = format!(
-                        "{}/api/v1/namespaces/{}/pods",
+                        "{}/api/v1/nodes/{}/pods",
                         sync_server.trim_end_matches('/'),
-                        ns
+                        sync_node_id
                     );
 
                     let resp = match sync_client
@@ -356,11 +352,50 @@ async fn main() -> anyhow::Result<()> {
 
                     match resp.json::<Vec<pkg_types::pod::Pod>>().await {
                         Ok(pods) => {
+                            // --- Health monitoring: check Running pods ---
+                            if let Some(ref runtime) = runtime {
+                                for pod in pods.iter().filter(|p| p.status == pkg_types::pod::PodStatus::Running) {
+                                    match runtime.container_state(&pod.id).await {
+                                        Ok(state) if state.status == "stopped" || state.status == "exited" => {
+                                            warn!("[pod:{}] Container stopped unexpectedly", pod.name);
+                                            let status_url = format!(
+                                                "{}/api/v1/namespaces/{}/pods/{}/status",
+                                                sync_server.trim_end_matches('/'),
+                                                pod.namespace,
+                                                pod.name
+                                            );
+                                            let _ = sync_client
+                                                .put(&status_url)
+                                                .header("Authorization", format!("Bearer {}", sync_token))
+                                                .json(&pkg_types::pod::PodStatus::Failed)
+                                                .send()
+                                                .await;
+                                        }
+                                        Err(_) => {
+                                            // Container not found by runtime - likely crashed
+                                            warn!("[pod:{}] Container not found in runtime", pod.name);
+                                            let status_url = format!(
+                                                "{}/api/v1/namespaces/{}/pods/{}/status",
+                                                sync_server.trim_end_matches('/'),
+                                                pod.namespace,
+                                                pod.name
+                                            );
+                                            let _ = sync_client
+                                                .put(&status_url)
+                                                .header("Authorization", format!("Bearer {}", sync_token))
+                                                .json(&pkg_types::pod::PodStatus::Failed)
+                                                .send()
+                                                .await;
+                                        }
+                                        _ => {} // Still running, all good
+                                    }
+                                }
+                            }
+
+                            // --- Schedule new pods ---
                             for pod in pods {
-                                if pod.node_name.as_deref() == Some(sync_node_id.as_str())
-                                    && (pod.status == pkg_types::pod::PodStatus::Scheduled
-                                        || pod.status
-                                            == pkg_types::pod::PodStatus::ContainerCreating)
+                                if pod.status == pkg_types::pod::PodStatus::Scheduled
+                                    || pod.status == pkg_types::pod::PodStatus::ContainerCreating
                                 {
                                     info!(
                                         "Found scheduled pod: {} (image: {})",
@@ -375,7 +410,7 @@ async fn main() -> anyhow::Result<()> {
                                     let status_url = format!(
                                         "{}/api/v1/namespaces/{}/pods/{}/status",
                                         sync_server.trim_end_matches('/'),
-                                        ns,
+                                        pod.namespace,
                                         pod.name
                                     );
 
@@ -497,40 +532,67 @@ async fn main() -> anyhow::Result<()> {
                 loop {
                     interval.tick().await;
 
-                    let ns = "default";
                     let base = route_server.trim_end_matches('/');
                     let auth = format!("Bearer {}", route_token);
 
-                    let services: Vec<pkg_types::service::Service> = match route_client
-                        .get(&format!("{}/api/v1/namespaces/{}/services", base, ns))
+                    // Fetch all namespaces to sync routes across all of them
+                    let namespaces: Vec<pkg_types::namespace::Namespace> = match route_client
+                        .get(&format!("{}/api/v1/namespaces", base))
                         .header("Authorization", &auth)
                         .send()
                         .await
                     {
                         Ok(r) => r.json().await.unwrap_or_default(),
                         Err(e) => {
-                            warn!("Route sync: failed to fetch services: {}", e);
+                            warn!("Route sync: failed to fetch namespaces: {}", e);
                             continue;
                         }
                     };
 
-                    let endpoints: Vec<pkg_types::endpoint::Endpoint> = match route_client
-                        .get(&format!("{}/api/v1/namespaces/{}/endpoints", base, ns))
-                        .header("Authorization", &auth)
-                        .send()
-                        .await
-                    {
-                        Ok(r) => r.json().await.unwrap_or_default(),
-                        Err(e) => {
-                            warn!("Route sync: failed to fetch endpoints: {}", e);
-                            continue;
-                        }
+                    let ns_names: Vec<String> = if namespaces.is_empty() {
+                        vec!["default".to_string()]
+                    } else {
+                        namespaces.iter().map(|n| n.name.clone()).collect()
                     };
+
+                    let mut all_services = Vec::new();
+                    let mut all_endpoints = Vec::new();
+
+                    for ns in &ns_names {
+                        let services: Vec<pkg_types::service::Service> = match route_client
+                            .get(&format!("{}/api/v1/namespaces/{}/services", base, ns))
+                            .header("Authorization", &auth)
+                            .send()
+                            .await
+                        {
+                            Ok(r) => r.json().await.unwrap_or_default(),
+                            Err(e) => {
+                                warn!("Route sync: failed to fetch services for ns {}: {}", ns, e);
+                                continue;
+                            }
+                        };
+
+                        let endpoints: Vec<pkg_types::endpoint::Endpoint> = match route_client
+                            .get(&format!("{}/api/v1/namespaces/{}/endpoints", base, ns))
+                            .header("Authorization", &auth)
+                            .send()
+                            .await
+                        {
+                            Ok(r) => r.json().await.unwrap_or_default(),
+                            Err(e) => {
+                                warn!("Route sync: failed to fetch endpoints for ns {}: {}", ns, e);
+                                continue;
+                            }
+                        };
+
+                        all_services.extend(services);
+                        all_endpoints.extend(endpoints);
+                    }
 
                     ctrl_service_proxy
-                        .update_routes(&services, &endpoints)
+                        .update_routes(&all_services, &all_endpoints)
                         .await;
-                    ctrl_dns_server.update_records(&services).await;
+                    ctrl_dns_server.update_records(&all_services).await;
                 }
             });
 
