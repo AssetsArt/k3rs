@@ -280,6 +280,10 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         // Phase 6: Prometheus metrics endpoint (unprotected)
         .route("/metrics", get(metrics_handler))
         .merge(api_routes)
+        .fallback(|req: axum::http::Request<axum::body::Body>| async move {
+            warn!("No route matched for {} {}", req.method(), req.uri().path());
+            axum::http::StatusCode::NOT_FOUND
+        })
         .layer(middleware::from_fn(request_id_middleware))
         .with_state(state);
 

@@ -1,0 +1,12 @@
+kind: Deployment
+id: "test-alpine"
+name: "test-alpine"
+namespace: "default"
+created_at: "2024-02-25T00:00:00Z"
+spec:
+  replicas: 2
+  template:
+    containers:
+      - name: "alpine"
+        image: "alpine:latest"
+        command: ["sleep", "3600"]

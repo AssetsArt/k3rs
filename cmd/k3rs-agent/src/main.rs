@@ -199,9 +199,11 @@ async fn main() -> anyhow::Result<()> {
     service_proxy.start().await?;
 
     // 4. Start the embedded DNS server (Phase 3)
+    /*
     let dns_addr: SocketAddr = format!("0.0.0.0:{}", dns_port).parse()?;
     let dns_server = Arc::new(DnsServer::new(dns_addr));
     dns_server.start().await?;
+    */
 
     // 5. Agent controller loops — run in a dedicated thread with its own tokio runtime
     //    because Pingora's run_forever() starves the main runtime's task queue.
@@ -211,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
     let ctrl_token = token.clone();
     let ctrl_node_id = my_node_id.clone();
     let ctrl_service_proxy = service_proxy.clone();
-    let ctrl_dns_server = dns_server.clone();
+    // let ctrl_dns_server = dns_server.clone();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -450,7 +452,7 @@ async fn main() -> anyhow::Result<()> {
                                     info!("[pod:{}] Pulling image: {}", pod.name, image);
                                     if let Err(e) = runtime.pull_image(image).await {
                                         error!("[pod:{}] Image pull failed: {}", pod.name, e);
-                                        let _ = sync_client
+                                        match sync_client
                                             .put(&status_url)
                                             .header(
                                                 "Authorization",
@@ -458,7 +460,15 @@ async fn main() -> anyhow::Result<()> {
                                             )
                                             .json(&pkg_types::pod::PodStatus::Failed)
                                             .send()
-                                            .await;
+                                            .await
+                                        {
+                                            Ok(resp) => {
+                                                info!("[pod:{}] Status update to Failed (pull error): {}", pod.name, resp.status());
+                                            }
+                                            Err(e) => {
+                                                error!("[pod:{}] Failed to update status: {}", pod.name, e);
+                                            }
+                                        }
                                         continue;
                                     }
 
@@ -472,7 +482,7 @@ async fn main() -> anyhow::Result<()> {
                                             "[pod:{}] Container creation failed: {}",
                                             pod.name, e
                                         );
-                                        let _ = sync_client
+                                        match sync_client
                                             .put(&status_url)
                                             .header(
                                                 "Authorization",
@@ -480,7 +490,15 @@ async fn main() -> anyhow::Result<()> {
                                             )
                                             .json(&pkg_types::pod::PodStatus::Failed)
                                             .send()
-                                            .await;
+                                            .await
+                                        {
+                                            Ok(resp) => {
+                                                info!("[pod:{}] Status update to Failed (create error): {}", pod.name, resp.status());
+                                            }
+                                            Err(e) => {
+                                                error!("[pod:{}] Failed to update status: {}", pod.name, e);
+                                            }
+                                        }
                                         continue;
                                     }
 
@@ -489,7 +507,7 @@ async fn main() -> anyhow::Result<()> {
                                     if let Err(e) = runtime.start_container(&pod.id).await {
                                         error!("[pod:{}] Container start failed: {}", pod.name, e);
                                         let _ = runtime.cleanup_container(&pod.id).await;
-                                        let _ = sync_client
+                                        match sync_client
                                             .put(&status_url)
                                             .header(
                                                 "Authorization",
@@ -497,7 +515,15 @@ async fn main() -> anyhow::Result<()> {
                                             )
                                             .json(&pkg_types::pod::PodStatus::Failed)
                                             .send()
-                                            .await;
+                                            .await
+                                        {
+                                            Ok(resp) => {
+                                                info!("[pod:{}] Status update to Failed (start error): {}", pod.name, resp.status());
+                                            }
+                                            Err(e) => {
+                                                error!("[pod:{}] Failed to update status: {}", pod.name, e);
+                                            }
+                                        }
                                         continue;
                                     }
 
@@ -507,12 +533,20 @@ async fn main() -> anyhow::Result<()> {
                                         pod.name,
                                         runtime.backend_name()
                                     );
-                                    let _ = sync_client
+                                    match sync_client
                                         .put(&status_url)
                                         .header("Authorization", format!("Bearer {}", sync_token))
                                         .json(&pkg_types::pod::PodStatus::Running)
                                         .send()
-                                        .await;
+                                        .await
+                                    {
+                                        Ok(resp) => {
+                                            info!("[pod:{}] Status update to Running: {}", pod.name, resp.status());
+                                        }
+                                        Err(e) => {
+                                            error!("[pod:{}] Failed to update status: {}", pod.name, e);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -592,7 +626,7 @@ async fn main() -> anyhow::Result<()> {
                     ctrl_service_proxy
                         .update_routes(&all_services, &all_endpoints)
                         .await;
-                    ctrl_dns_server.update_records(&all_services).await;
+                    // ctrl_dns_server.update_records(&all_services).await;
                 }
             });
 

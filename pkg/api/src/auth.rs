@@ -98,7 +98,7 @@ pub async fn rbac_middleware(
     let action = action_from_method(method);
     let resource = resource_from_path(path);
 
-    debug!(
+    info!(
         "RBAC check: user={} action={} resource={} path={}",
         user.name, action, resource, path
     );

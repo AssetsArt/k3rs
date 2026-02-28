@@ -136,7 +136,8 @@ impl RootfsManager {
                 let file = std::fs::File::open(&layer_path)?;
                 let decoder = flate2::read::GzDecoder::new(file);
                 let mut archive = tar::Archive::new(decoder);
-                archive.set_preserve_permissions(true);
+                archive.set_preserve_permissions(false);
+                archive.set_unpack_xattrs(false);
                 archive.set_overwrite(true);
                 archive.unpack(&rootfs_clone)?;
                 Ok(())
