@@ -86,24 +86,32 @@ impl OciBackend {
     /// Priority: youki or crun
     pub fn detect(data_dir: &std::path::Path) -> Result<Self> {
         for name in &["youki", "crun"] {
-            if let Ok(output) = std::process::Command::new("which").arg(name).output()
-                && output.status.success()
-            {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let version = Self::get_version(&path);
-                tracing::info!("Detected OCI runtime: {} at {} ({})", name, path, version);
-                return Ok(Self {
-                    runtime_path: path,
-                    runtime_name: name.to_string(),
-                    runtime_version: version,
-                    log_dir: data_dir.join("logs"),
-                    state_dir: data_dir.join("state"),
-                });
+            if let Ok(oci) = Self::with_name(name, data_dir) {
+                return Ok(oci);
             }
         }
         Err(anyhow::anyhow!(
             "No OCI runtime found in PATH. Install youki or crun.",
         ))
+    }
+
+    /// Create an OciBackend for a specific runtime name (e.g. "youki", "crun")
+    pub fn with_name(name: &str, data_dir: &std::path::Path) -> Result<Self> {
+        if let Ok(output) = std::process::Command::new("which").arg(name).output()
+            && output.status.success()
+        {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let version = Self::get_version(&path);
+            tracing::info!("Using OCI runtime: {} at {} ({})", name, path, version);
+            return Ok(Self {
+                runtime_path: path,
+                runtime_name: name.to_string(),
+                runtime_version: version,
+                log_dir: data_dir.join("logs"),
+                state_dir: data_dir.join("state"),
+            });
+        }
+        Err(anyhow::anyhow!("OCI runtime {} not found in PATH", name))
     }
 
     /// Create with an explicit runtime path.

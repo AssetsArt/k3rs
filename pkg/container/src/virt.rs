@@ -343,7 +343,7 @@ impl VirtualizationBackend {
 #[async_trait]
 impl RuntimeBackend for VirtualizationBackend {
     fn name(&self) -> &str {
-        "virtualization"
+        "vm"
     }
 
     fn version(&self) -> &str {
@@ -633,7 +633,7 @@ mod tests {
 
         let backend = VirtualizationBackend::new(&tmp_dir).await.unwrap();
 
-        assert_eq!(backend.name(), "virtualization");
+        assert_eq!(backend.name(), "vm");
         assert_eq!(backend.version(), "macos-vz-2.0");
         assert!(!backend.handles_images());
 

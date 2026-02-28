@@ -84,37 +84,43 @@ impl ContainerRuntime {
                 }
             }
         } else {
-            // Linux: try OCI runtimes
-            match OciBackend::detect(&data_dir) {
-                Ok(oci) => {
-                    info!("Using OCI runtime: {} ({})", oci.name(), oci.version());
-                    Arc::new(oci)
-                }
-                Err(_) => {
-                    // Try auto-download
-                    info!("No OCI runtime in PATH — attempting auto-download...");
-                    match crate::installer::RuntimeInstaller::ensure_runtime(None).await {
-                        Ok(path) => {
-                            let oci = OciBackend::new(&path.to_string_lossy(), &data_dir);
-                            info!(
-                                "Using auto-downloaded runtime: {} ({})",
-                                oci.name(),
-                                oci.version()
-                            );
-                            Arc::new(oci)
-                        }
-                        Err(e) => {
-                            anyhow::bail!(
-                                "No container runtime available. \
-                                 OCI auto-download failed: {}",
-                                e
-                            );
+            // Linux: try Firecracker then OCI runtimes
+            // For now we check if /dev/kvm exists as a proxy for Firecracker readiness
+            let has_kvm = std::path::Path::new("/dev/kvm").exists();
+            if has_kvm {
+                info!("KVM detected, using Firecracker microVM runtime (vm)");
+                Arc::new(crate::firecracker::FirecrackerBackend::new(&data_dir))
+            } else {
+                match OciBackend::detect(&data_dir) {
+                    Ok(oci) => {
+                        info!("Using OCI runtime: {} ({})", oci.name(), oci.version());
+                        Arc::new(oci)
+                    }
+                    Err(_) => {
+                        // Try auto-download
+                        info!("No OCI runtime in PATH — attempting auto-download...");
+                        match crate::installer::RuntimeInstaller::ensure_runtime(None).await {
+                            Ok(path) => {
+                                let oci = OciBackend::new(&path.to_string_lossy(), &data_dir);
+                                info!(
+                                    "Using auto-downloaded runtime: {} ({})",
+                                    oci.name(),
+                                    oci.version()
+                                );
+                                Arc::new(oci)
+                            }
+                            Err(e) => {
+                                anyhow::bail!(
+                                    "No container runtime available. \
+                                     OCI auto-download failed: {}",
+                                    e
+                                );
+                            }
                         }
                     }
                 }
             }
         };
-
         let image_manager = ImageManager::new(&data_dir);
 
         Ok(Self {
@@ -170,12 +176,43 @@ impl ContainerRuntime {
         image: &str,
         command: &[String],
         env: &HashMap<String, String>,
+        runtime_name: Option<&str>,
     ) -> Result<()> {
+        let backend = if let Some(name) = runtime_name {
+            if name == "vm" {
+                if cfg!(target_os = "macos") {
+                    if self.backend.name() == "vm" {
+                        self.backend.clone()
+                    } else {
+                        Arc::new(crate::virt::VirtualizationBackend::new(&self.data_dir).await?)
+                            as Arc<dyn RuntimeBackend>
+                    }
+                } else if cfg!(target_os = "linux") {
+                    if self.backend.name() == "vm" {
+                        self.backend.clone()
+                    } else {
+                        Arc::new(crate::firecracker::FirecrackerBackend::new(&self.data_dir))
+                            as Arc<dyn RuntimeBackend>
+                    }
+                } else {
+                    info!("Requested vm runtime not supported on this platform, using default");
+                    self.backend.clone()
+                }
+            } else if name == "youki" || name == "crun" {
+                Arc::new(OciBackend::with_name(name, &self.data_dir)?) as Arc<dyn RuntimeBackend>
+            } else {
+                info!("Requested runtime {} not available, using default", name);
+                self.backend.clone()
+            }
+        } else {
+            self.backend.clone()
+        };
+
         info!(
             "Creating container: id={}, image={}, backend={}",
             id,
             image,
-            self.backend.name()
+            backend.name()
         );
 
         let container_dir = self.data_dir.join("containers").join(id);
@@ -183,16 +220,16 @@ impl ContainerRuntime {
 
         // Best-effort cleanup in case old state exists (e.g. from a previous failed run)
         // to avoid "container already exists" errors.
-        if let Ok(state) = self.backend.state(id).await {
+        if let Ok(state) = backend.state(id).await {
             if state.status == "stopped" || state.status == "exited" {
                 info!("Container {} exists in stopped/exited state, cleaning up first...", id);
-                let _ = self.backend.delete(id).await;
+                let _ = backend.delete(id).await;
             }
         }
 
-        if self.backend.handles_images() {
+        if backend.handles_images() {
             // Backend handles images internally (e.g. Docker)
-            self.backend.create_from_image(id, image, command).await?;
+            backend.create_from_image(id, image, command).await?;
         } else {
             // Pull image → extract rootfs → create bundle → create via backend
             let image_dir = self.image_manager.pull(image).await?;
@@ -211,12 +248,13 @@ impl ContainerRuntime {
             )?;
             tokio::fs::write(container_dir.join("config.json"), &config_json).await?;
 
-            self.backend.create(id, &container_dir).await?;
+            backend.create(id, &container_dir).await?;
         }
 
         self.store.track(
             id,
             image,
+            backend.name(),
             &container_dir.to_string_lossy(),
             &log_path.to_string_lossy(),
         );
@@ -224,25 +262,57 @@ impl ContainerRuntime {
         info!(
             "Container {} created successfully via {}",
             id,
-            self.backend.name()
+            backend.name()
         );
         Ok(())
     }
 
+    /// Helper to get the correct backend for a specific container.
+    async fn get_backend_for_container(&self, id: &str) -> Arc<dyn RuntimeBackend> {
+        if let Some(entry) = self.store.get(id) {
+            if entry.runtime_name == "vm" {
+                if cfg!(target_os = "macos") {
+                    if self.backend.name() == "vm" {
+                        return self.backend.clone();
+                    } else {
+                        // This shouldn't happen often, but handle fallback
+                        if let Ok(virt) = crate::virt::VirtualizationBackend::new(&self.data_dir).await {
+                            return Arc::new(virt);
+                        }
+                    }
+                } else if cfg!(target_os = "linux") {
+                    if self.backend.name() == "vm" {
+                        return self.backend.clone();
+                    } else {
+                        return Arc::new(crate::firecracker::FirecrackerBackend::new(&self.data_dir));
+                    }
+                }
+            } else if entry.runtime_name == "youki" || entry.runtime_name == "crun" {
+                if let Ok(oci) = OciBackend::with_name(&entry.runtime_name, &self.data_dir) {
+                    return Arc::new(oci);
+                }
+            }
+        }
+        // Fallback to default backend
+        self.backend.clone()
+    }
+
     /// Start a created container.
     pub async fn start_container(&self, id: &str) -> Result<()> {
-        self.backend.start(id).await?;
+        let backend = self.get_backend_for_container(id).await;
+        backend.start(id).await?;
         self.store.update_state(id, ContainerState::Running);
-        info!("Container {} started", id);
+        info!("Container {} started via {}", id, backend.name());
         Ok(())
     }
 
     /// Stop and delete a container.
     pub async fn stop_container(&self, id: &str) -> Result<()> {
-        self.backend.stop(id).await?;
-        self.backend.delete(id).await?;
+        let backend = self.get_backend_for_container(id).await;
+        backend.stop(id).await?;
+        backend.delete(id).await?;
         self.store.update_state(id, ContainerState::Stopped);
-        info!("Container {} stopped and deleted", id);
+        info!("Container {} stopped and deleted via {}", id, backend.name());
         Ok(())
     }
 
@@ -282,6 +352,7 @@ impl ContainerRuntime {
                         self.store.track(
                             &id,
                             "recovered",
+                            self.backend.name(),
                             &bundle_path,
                             &log_path.to_string_lossy(),
                         );
@@ -307,12 +378,14 @@ impl ContainerRuntime {
 
     /// Get logs from a container.
     pub async fn container_logs(&self, id: &str, tail: usize) -> Result<Vec<String>> {
-        self.backend.logs(id, tail).await
+        let backend = self.get_backend_for_container(id).await;
+        backend.logs(id, tail).await
     }
 
     /// Execute a command inside a running container.
     pub async fn exec_in_container(&self, id: &str, command: &[&str]) -> Result<String> {
-        self.backend.exec(id, command).await
+        let backend = self.get_backend_for_container(id).await;
+        backend.exec(id, command).await
     }
 
     /// Spawn an interactive command inside a running container.
@@ -321,19 +394,22 @@ impl ContainerRuntime {
         id: &str,
         command: &[&str],
     ) -> Result<tokio::process::Child> {
-        self.backend.spawn_exec(id, command).await
+        let backend = self.get_backend_for_container(id).await;
+        backend.spawn_exec(id, command).await
     }
 
     /// Query the real OCI runtime state of a container.
     pub async fn container_state(&self, id: &str) -> Result<ContainerStateInfo> {
-        self.backend.state(id).await
+        let backend = self.get_backend_for_container(id).await;
+        backend.state(id).await
     }
 
     /// Full cleanup: stop + delete + remove from store + cleanup container dir.
     pub async fn cleanup_container(&self, id: &str) -> Result<()> {
+        let backend = self.get_backend_for_container(id).await;
         // Best-effort stop and delete
-        let _ = self.backend.stop(id).await;
-        let _ = self.backend.delete(id).await;
+        let _ = backend.stop(id).await;
+        let _ = backend.delete(id).await;
 
         // Remove from store
         self.store.remove(id);

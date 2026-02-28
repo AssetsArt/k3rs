@@ -1,6 +1,6 @@
 use axum::{
     extract::{
-        Path as AxumPath, State,
+        Path as AxumPath, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
@@ -9,9 +9,16 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use pkg_types::node::Node;
 use pkg_types::pod::Pod;
+use serde::Deserialize;
 use tracing::{error, info, warn};
 
 use crate::AppState;
+
+#[derive(Debug, Deserialize)]
+pub struct ExecQuery {
+    #[serde(default)]
+    pub cmd: String,
+}
 
 /// WebSocket-based exec endpoint for attaching to containers.
 ///
@@ -19,6 +26,7 @@ use crate::AppState;
 /// node where the pod is actually running.
 pub async fn exec_into_pod(
     AxumPath((ns, pod_name)): AxumPath<(String, String)>,
+    Query(query): Query<ExecQuery>,
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
@@ -73,10 +81,28 @@ pub async fn exec_into_pod(
         }
     };
 
-    let agent_url = format!(
-        "ws://{}:{}/exec/{}",
-        node.address, node.agent_api_port, pod.id
-    );
+    // Append cmd query param so the agent runs the right command.
+    let agent_url = if query.cmd.is_empty() {
+        format!(
+            "ws://{}:{}/exec/{}",
+            node.address, node.agent_api_port, pod.id
+        )
+    } else {
+        // Percent-encode the cmd value for safe query-string embedding.
+        let encoded: String = query
+            .cmd
+            .chars()
+            .map(|c| match c {
+                'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' => c.to_string(),
+                ' ' => "%20".to_string(),
+                c => format!("%{:02X}", c as u32),
+            })
+            .collect();
+        format!(
+            "ws://{}:{}/exec/{}?cmd={}",
+            node.address, node.agent_api_port, pod.id, encoded,
+        )
+    };
 
     // 3. Upgrade and proxy
     ws.on_upgrade(move |socket| proxy_to_agent(socket, agent_url))

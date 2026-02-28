@@ -91,6 +91,9 @@ enum Commands {
         /// Namespace
         #[arg(short, long, default_value = "default")]
         namespace: String,
+        /// Keep stdin open and allocate an interactive session
+        #[arg(short = 'i', long = "it", default_value_t = false)]
+        interactive: bool,
     },
     /// Manage container runtime
     Runtime {
@@ -735,16 +738,41 @@ async fn main() -> anyhow::Result<()> {
             pod_id,
             command,
             namespace,
+            interactive,
         } => {
-            // Connect via WebSocket to the exec endpoint
+            // --it / -i flag drives interactive mode.
+            let is_interactive = *interactive || command.is_empty();
+
+            // Build URL — encode and pass the command as a ?cmd= query param so
+            // the agent spawns it directly rather than piping it as stdin.
             let ws_url = cli
                 .server
                 .replace("http://", "ws://")
                 .replace("https://", "wss://");
-            let url = format!(
-                "{}/api/v1/namespaces/{}/pods/{}/exec",
-                ws_url, namespace, pod_id
-            );
+
+            let url = if command.is_empty() {
+                format!(
+                    "{}/api/v1/namespaces/{}/pods/{}/exec",
+                    ws_url, namespace, pod_id
+                )
+            } else {
+                let cmd_str = command.join(" ");
+                // Simple percent-encoding for query param value.
+                let encoded: String = cmd_str
+                    .chars()
+                    .map(|c| match c {
+                        'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' => {
+                            c.to_string()
+                        }
+                        ' ' => "%20".to_string(),
+                        c => format!("%{:02X}", c as u32),
+                    })
+                    .collect();
+                format!(
+                    "{}/api/v1/namespaces/{}/pods/{}/exec?cmd={}",
+                    ws_url, namespace, pod_id, encoded
+                )
+            };
 
             let request = tokio_tungstenite::tungstenite::http::Request::builder()
                 .uri(&url)
@@ -770,15 +798,15 @@ async fn main() -> anyhow::Result<()> {
 
             let (mut write, mut read) = ws_stream.split();
 
-            if command.is_empty() {
-                // Interactive mode
+            if is_interactive {
+                // Interactive mode — stdin lines → WebSocket, WebSocket → stdout.
                 eprintln!("Entering interactive exec session. Type 'exit' to quit.");
 
-                // Read the welcome message
+                // Drain the welcome/connecting message from the agent.
                 if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
                     read.next().await
                 {
-                    print!("{}", text);
+                    eprint!("{}", text);
                 }
 
                 let stdin = tokio::io::stdin();
@@ -786,61 +814,63 @@ async fn main() -> anyhow::Result<()> {
                 let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
 
                 loop {
-                    let line = match lines.next_line().await {
-                        Ok(Some(line)) => line,
-                        _ => break,
-                    };
-
-                    if line.trim() == "exit" {
-                        let _ = write
-                            .send(tokio_tungstenite::tungstenite::Message::Text("exit".into()))
-                            .await;
-                        break;
-                    }
-
-                    if write
-                        .send(tokio_tungstenite::tungstenite::Message::Text(line.into()))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-
-                    if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
-                        read.next().await
-                    {
-                        print!("{}", text);
+                    tokio::select! {
+                        // User typed a line
+                        line_result = lines.next_line() => {
+                            match line_result {
+                                Ok(Some(line)) => {
+                                    if line.trim() == "exit" {
+                                        let _ = write
+                                            .send(tokio_tungstenite::tungstenite::Message::Text("exit".into()))
+                                            .await;
+                                        break;
+                                    }
+                                    if write
+                                        .send(tokio_tungstenite::tungstenite::Message::Text(line.into()))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                _ => break,
+                            }
+                        }
+                        // Output from container
+                        msg = read.next() => {
+                            match msg {
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                                    print!("{}", text);
+                                    use std::io::Write as _;
+                                    let _ = std::io::stdout().flush();
+                                }
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => break,
+                                _ => {}
+                            }
+                        }
                     }
                 }
             } else {
-                // Non-interactive: send single command
-                let cmd = command.join(" ");
+                // Non-interactive: the agent already spawned the command via ?cmd=.
+                // Just skip the welcome message then stream all output until WS closes.
 
-                // Skip welcome message
-                let _ = read.next().await;
-
-                if write
-                    .send(tokio_tungstenite::tungstenite::Message::Text(cmd.into()))
-                    .await
-                    .is_err()
-                {
-                    eprintln!("Failed to send command");
-                    std::process::exit(1);
-                }
-
-                if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
+                // Drain the "Connecting to …" welcome message.
+                if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_))) =
                     read.next().await
-                {
-                    // Remove trailing prompt
-                    let output = text
-                        .trim_end()
-                        .trim_end_matches("$ ")
-                        .trim_end_matches("\r\n$ ");
-                    println!("{}", output);
+                {}
+
+                loop {
+                    match read.next().await {
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                            print!("{}", text);
+                        }
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => break,
+                        _ => {}
+                    }
                 }
 
                 let _ = write
-                    .send(tokio_tungstenite::tungstenite::Message::Text("exit".into()))
+                    .send(tokio_tungstenite::tungstenite::Message::Close(None))
                     .await;
             }
         }

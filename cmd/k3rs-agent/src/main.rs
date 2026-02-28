@@ -553,7 +553,13 @@ async fn main() -> anyhow::Result<()> {
                                         // 2. Create Container
                                         info!("[pod:{}] Creating container: {}", pod.name, pod.id);
                                         if let Err(e) = pod_runtime
-                                            .create_container(&pod.id, &image, &command, &env)
+                                            .create_container(
+                                                &pod.id,
+                                                &image,
+                                                &command,
+                                                &env,
+                                                pod.spec.runtime.as_deref(),
+                                            )
                                             .await
                                         {
                                             error!(

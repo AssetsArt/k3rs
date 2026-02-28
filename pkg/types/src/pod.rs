@@ -64,6 +64,9 @@ impl std::fmt::Display for PodStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PodSpec {
     pub containers: Vec<ContainerSpec>,
+    /// Explicit runtime selection: "youki", "crun", "vm" (Apple VZ on macOS / Firecracker on Linux)
+    #[serde(default)]
+    pub runtime: Option<String>,
     #[serde(default)]
     pub node_affinity: HashMap<String, String>,
     #[serde(default)]

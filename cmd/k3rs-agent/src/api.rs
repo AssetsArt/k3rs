@@ -1,11 +1,15 @@
 use axum::{
     Router,
-    extract::{Path, State, ws::{Message, WebSocket, WebSocketUpgrade}},
+    extract::{
+        Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     response::IntoResponse,
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
 use pkg_container::ContainerRuntime;
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info};
@@ -13,6 +17,14 @@ use tracing::{error, info};
 #[derive(Clone)]
 pub struct AgentState {
     pub runtime: Arc<ContainerRuntime>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExecQuery {
+    /// Space-separated command to run (e.g. "ls -la").
+    /// If absent or empty, defaults to /bin/sh.
+    #[serde(default)]
+    pub cmd: String,
 }
 
 pub fn create_agent_router(state: AgentState) -> Router {
@@ -24,23 +36,41 @@ pub fn create_agent_router(state: AgentState) -> Router {
 async fn exec_handler(
     ws: WebSocketUpgrade,
     Path(container_id): Path<String>,
+    Query(query): Query<ExecQuery>,
     State(state): State<AgentState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, container_id, state.runtime))
+    // Parse command from query param (space-split).
+    let command: Vec<String> = if query.cmd.is_empty() {
+        vec![]
+    } else {
+        query.cmd.split_whitespace().map(String::from).collect()
+    };
+    ws.on_upgrade(move |socket| handle_socket(socket, container_id, command, state.runtime))
 }
 
-async fn handle_socket(socket: WebSocket, container_id: String, runtime: Arc<ContainerRuntime>) {
+async fn handle_socket(
+    socket: WebSocket,
+    container_id: String,
+    command: Vec<String>,
+    runtime: Arc<ContainerRuntime>,
+) {
     info!("WebSocket upgrade for container exec: {}", container_id);
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // Initial message
     let _ = ws_sender
-        .send(Message::Text(format!("Connecting to {}...\r\n", container_id).into()))
+        .send(Message::Text(
+            format!("Connecting to {}...\r\n", container_id).into(),
+        ))
         .await;
 
     // Spawn the command in the container
-    let mut child = match runtime.spawn_exec_in_container(&container_id, &[]).await {
+    let cmd_refs: Vec<&str> = command.iter().map(String::as_str).collect();
+    let mut child = match runtime
+        .spawn_exec_in_container(&container_id, &cmd_refs)
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to spawn exec: {}", e);
@@ -62,9 +92,13 @@ async fn handle_socket(socket: WebSocket, container_id: String, runtime: Arc<Con
     let stdout_task = tokio::spawn(async move {
         let mut buf = [0u8; 1024];
         while let Ok(n) = stdout.read(&mut buf).await {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             let text = String::from_utf8_lossy(&buf[..n]).to_string();
-            if tx_out.send(text).await.is_err() { break; }
+            if tx_out.send(text).await.is_err() {
+                break;
+            }
         }
     });
 
@@ -72,9 +106,13 @@ async fn handle_socket(socket: WebSocket, container_id: String, runtime: Arc<Con
     let stderr_task = tokio::spawn(async move {
         let mut buf = [0u8; 1024];
         while let Ok(n) = stderr.read(&mut buf).await {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             let text = String::from_utf8_lossy(&buf[..n]).to_string();
-            if tx_err.send(text).await.is_err() { break; }
+            if tx_err.send(text).await.is_err() {
+                break;
+            }
         }
     });
 
@@ -92,7 +130,9 @@ async fn handle_socket(socket: WebSocket, container_id: String, runtime: Arc<Con
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 Message::Text(text) => {
-                    if text == "exit" { break; }
+                    if text == "exit" {
+                        break;
+                    }
                     if stdin.write_all(text.as_bytes()).await.is_err() {
                         break;
                     }

@@ -38,6 +38,8 @@ pub struct ContainerEntry {
     pub id: String,
     /// OCI image reference used to create this container.
     pub image: String,
+    /// Backend name used for this container.
+    pub runtime_name: String,
     /// Current lifecycle state.
     pub state: ContainerState,
     /// Container PID (from the OCI runtime), if running.
@@ -74,10 +76,11 @@ impl ContainerStore {
     }
 
     /// Register a new container after `backend.create()` succeeds.
-    pub fn track(&self, id: &str, image: &str, bundle_path: &str, log_path: &str) {
+    pub fn track(&self, id: &str, image: &str, runtime_name: &str, bundle_path: &str, log_path: &str) {
         let entry = ContainerEntry {
             id: id.to_string(),
             image: image.to_string(),
+            runtime_name: runtime_name.to_string(),
             state: ContainerState::Created,
             pid: None,
             exit_code: None,
@@ -182,11 +185,12 @@ mod tests {
     #[test]
     fn test_track_and_get() {
         let store = ContainerStore::new();
-        store.track("c1", "alpine:latest", "/tmp/bundle/c1", "/tmp/logs/c1.log");
+        store.track("c1", "alpine:latest", "youki", "/tmp/bundle/c1", "/tmp/logs/c1.log");
 
         let entry = store.get("c1").expect("should find container");
         assert_eq!(entry.id, "c1");
         assert_eq!(entry.image, "alpine:latest");
+        assert_eq!(entry.runtime_name, "youki");
         assert_eq!(entry.state, ContainerState::Created);
         assert!(entry.pid.is_none());
         assert!(entry.started_at.is_none());
@@ -195,7 +199,7 @@ mod tests {
     #[test]
     fn test_state_transitions() {
         let store = ContainerStore::new();
-        store.track("c2", "nginx:latest", "/tmp/bundle/c2", "/tmp/logs/c2.log");
+        store.track("c2", "nginx:latest", "crun", "/tmp/bundle/c2", "/tmp/logs/c2.log");
 
         // Created → Running
         assert!(store.update_state("c2", ContainerState::Running));
@@ -213,7 +217,7 @@ mod tests {
     #[test]
     fn test_failed_state() {
         let store = ContainerStore::new();
-        store.track("c3", "bad:image", "/tmp/bundle/c3", "/tmp/logs/c3.log");
+        store.track("c3", "bad:image", "youki", "/tmp/bundle/c3", "/tmp/logs/c3.log");
 
         let reason = "OCI runtime error: exec format error".to_string();
         assert!(store.update_state("c3", ContainerState::Failed(reason.clone())));
@@ -226,7 +230,7 @@ mod tests {
     #[test]
     fn test_pid_and_exit_code() {
         let store = ContainerStore::new();
-        store.track("c4", "alpine:latest", "/tmp/bundle/c4", "/tmp/logs/c4.log");
+        store.track("c4", "alpine:latest", "youki", "/tmp/bundle/c4", "/tmp/logs/c4.log");
 
         store.set_pid("c4", 12345);
         assert_eq!(store.get("c4").unwrap().pid, Some(12345));
@@ -238,7 +242,7 @@ mod tests {
     #[test]
     fn test_remove() {
         let store = ContainerStore::new();
-        store.track("c5", "alpine:latest", "/tmp/bundle/c5", "/tmp/logs/c5.log");
+        store.track("c5", "alpine:latest", "youki", "/tmp/bundle/c5", "/tmp/logs/c5.log");
         assert_eq!(store.len(), 1);
 
         let removed = store.remove("c5");
@@ -250,9 +254,9 @@ mod tests {
     #[test]
     fn test_list() {
         let store = ContainerStore::new();
-        store.track("a1", "img1", "/b/a1", "/l/a1");
-        store.track("a2", "img2", "/b/a2", "/l/a2");
-        store.track("a3", "img3", "/b/a3", "/l/a3");
+        store.track("a1", "img1", "youki", "/b/a1", "/l/a1");
+        store.track("a2", "img2", "crun", "/b/a2", "/l/a2");
+        store.track("a3", "img3", "youki", "/b/a3", "/l/a3");
 
         let all = store.list();
         assert_eq!(all.len(), 3);

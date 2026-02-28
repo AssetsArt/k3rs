@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod firecracker;
 pub mod image;
 pub mod installer;
 pub mod kernel;

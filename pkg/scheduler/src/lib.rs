@@ -155,6 +155,7 @@ mod tests {
             name: name.to_string(),
             namespace: "default".to_string(),
             spec: PodSpec {
+                runtime: None,
                 containers: vec![ContainerSpec {
                     name: "app".to_string(),
                     image: "nginx:latest".to_string(),
