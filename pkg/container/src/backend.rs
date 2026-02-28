@@ -399,6 +399,37 @@ impl RuntimeBackend for OciBackend {
             command
         );
 
+        // Prefer nsenter — joins container namespaces via PID without requiring
+        // CAP_SYS_PTRACE, so it works in rootless mode where youki exec fails.
+        if let Some(pid) = self.read_pid(id) {
+            tracing::info!("[{}] using nsenter (pid={}) for exec in {}", self.runtime_name, pid, id);
+            let mut args: Vec<String> = vec![
+                "--target".to_string(), pid.to_string(),
+                "--pid".to_string(),
+                "--uts".to_string(),
+                "--ipc".to_string(),
+                "--net".to_string(),
+                "--mount".to_string(),
+                "--user".to_string(),
+                "--".to_string(),
+            ];
+            args.extend(command.iter().map(|s| s.to_string()));
+
+            let output = tokio::process::Command::new("nsenter")
+                .args(&args)
+                .output()
+                .await?;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+            return if output.status.success() {
+                Ok(stdout)
+            } else {
+                anyhow::bail!("[nsenter] exec failed in {}: {}{}", id, stdout, stderr)
+            };
+        }
+
+        // Fallback: youki/crun exec (requires elevated privileges or root).
         let mut args = vec!["exec", id];
         args.extend_from_slice(command);
 
@@ -433,6 +464,36 @@ impl RuntimeBackend for OciBackend {
             tty
         );
 
+        // Prefer nsenter for the same reason as exec() — avoids EPERM in rootless mode.
+        if let Some(pid) = self.read_pid(id) {
+            tracing::info!("[{}] using nsenter (pid={}) for spawn_exec in {}", self.runtime_name, pid, id);
+            let mut args: Vec<String> = vec![
+                "--target".to_string(), pid.to_string(),
+                "--pid".to_string(),
+                "--uts".to_string(),
+                "--ipc".to_string(),
+                "--net".to_string(),
+                "--mount".to_string(),
+                "--user".to_string(),
+                "--".to_string(),
+            ];
+            if command.is_empty() {
+                args.push("/bin/sh".to_string());
+            } else {
+                args.extend(command.iter().map(|s| s.to_string()));
+            }
+
+            let child = tokio::process::Command::new("nsenter")
+                .args(&args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+
+            return Ok(child);
+        }
+
+        // Fallback: youki/crun exec.
         let mut args = vec!["exec", id];
         if command.is_empty() {
             args.push("/bin/sh");
