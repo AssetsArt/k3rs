@@ -144,6 +144,8 @@ mod tests {
             },
             allocated: ResourceRequirements::default(),
             unschedulable: false,
+            address: "127.0.0.1".to_string(),
+            agent_api_port: 10250,
         }
     }
 
