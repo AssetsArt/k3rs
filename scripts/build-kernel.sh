@@ -138,10 +138,10 @@ RUN cargo install cargo-zigbuild
 WORKDIR /build
 DOCKERFILE
 
-    mkdir -p "${PROJECT_ROOT}/${OUTPUT_DIR}"
+    mkdir -p "${OUTPUT_DIR}"
     docker run --rm \
         -v "${PROJECT_ROOT}:/src:ro" \
-        -v "${PROJECT_ROOT}/${OUTPUT_DIR}:/output" \
+        -v "${OUTPUT_DIR}:/output" \
         -e KERNEL_VERSION="${KERNEL_VERSION}" \
         -e TARGET_ARCH="${TARGET_ARCH}" \
         k3rs-kernel-builder \
@@ -185,7 +185,7 @@ make ARCH="$KERNEL_ARCH" defconfig
 scripts/config \
     -e VIRTIO -e VIRTIO_PCI -e VIRTIO_MMIO \
     -e VIRTIO_BLK -e VIRTIO_NET -e VIRTIO_CONSOLE \
-    -e FUSE_FS -e VIRTIO_FS \
+    -e DAX -e FS_DAX -e FUSE_FS -e VIRTIO_FS \
     -e VIRTIO_VSOCKETS -e VSOCKETS -e VHOST_VSOCK \
     -e NET -e INET -e EXT4_FS -e TMPFS \
     -e DEVTMPFS -e DEVTMPFS_MOUNT \
@@ -271,7 +271,7 @@ make ARCH="$KERNEL_ARCH" defconfig
 scripts/config \
     -e VIRTIO -e VIRTIO_PCI -e VIRTIO_MMIO \
     -e VIRTIO_BLK -e VIRTIO_NET -e VIRTIO_CONSOLE \
-    -e FUSE_FS -e VIRTIO_FS \
+    -e DAX -e FS_DAX -e FUSE_FS -e VIRTIO_FS \
     -e VIRTIO_VSOCKETS -e VSOCKETS -e VHOST_VSOCK \
     -e NET -e INET -e EXT4_FS -e TMPFS \
     -e DEVTMPFS -e DEVTMPFS_MOUNT \

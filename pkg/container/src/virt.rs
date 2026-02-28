@@ -92,6 +92,8 @@ pub struct VirtualizationBackend {
     data_dir: PathBuf,
     /// Path to the guest Linux kernel
     kernel_path: PathBuf,
+    /// Path to the initrd image (k3rs-init runs as PID 1 from initrd)
+    initrd_path: Option<PathBuf>,
     /// Per-VM resource configuration
     vm_config: VmConfig,
     /// Active VM instances (in-memory, repopulated on discovery)
@@ -115,7 +117,7 @@ impl VirtualizationBackend {
             tokio::fs::create_dir_all(&vm_dir).await?;
 
             let kernel_manager = KernelManager::with_dir(&data_dir.join("kernel"));
-            let (kernel_path, _initrd) =
+            let (kernel_path, initrd_path) =
                 kernel_manager.ensure_available().await.unwrap_or_else(|e| {
                     tracing::warn!("Kernel provisioning: {}. Using default path.", e);
                     (PathBuf::from("/var/lib/k3rs/vmlinux"), None)
@@ -136,6 +138,7 @@ impl VirtualizationBackend {
             Ok(Self {
                 data_dir: vm_dir,
                 kernel_path,
+                initrd_path,
                 vm_config: VmConfig::default(),
                 instances: Arc::new(RwLock::new(HashMap::new())),
                 kernel_manager,
@@ -255,7 +258,12 @@ impl VirtualizationBackend {
         Ok(())
     }
 
-    /// Boot a VM using k3rs-vmm helper (no initrd — virtiofs is root).
+    /// Boot a VM using k3rs-vmm helper.
+    ///
+    /// When an initrd is available, passes `--initrd` so k3rs-init runs as PID 1
+    /// from the initrd and starts the vsock listener + virtiofs mount.
+    /// Without initrd, the kernel mounts virtiofs directly as root (requires
+    /// CONFIG_VIRTIO_FS=y built into the kernel).
     async fn boot_vm(&self, id: &str, rootfs_dir: &Path) -> Result<Option<u32>> {
         let log_path = self.log_path(id);
         let vmm = which_vmm()
@@ -268,16 +276,21 @@ impl VirtualizationBackend {
         let stderr_file = log_file.try_clone()?;
 
         let mut cmd = std::process::Command::new(&vmm);
-        cmd.args([
-            "boot",
-            "--kernel", &self.kernel_path.to_string_lossy(),
-            "--rootfs", &rootfs_dir.to_string_lossy(),
-            "--cpus", &self.vm_config.cpu_count.to_string(),
-            "--memory", &self.vm_config.memory_mb.to_string(),
-            "--id", id,
-            "--log", &log_path.to_string_lossy(),
-            "--foreground",
-        ])
+        let mut boot_args = vec![
+            "boot".to_string(),
+            "--kernel".to_string(), self.kernel_path.to_string_lossy().to_string(),
+            "--rootfs".to_string(), rootfs_dir.to_string_lossy().to_string(),
+            "--cpus".to_string(), self.vm_config.cpu_count.to_string(),
+            "--memory".to_string(), self.vm_config.memory_mb.to_string(),
+            "--id".to_string(), id.to_string(),
+            "--log".to_string(), log_path.to_string_lossy().to_string(),
+            "--foreground".to_string(),
+        ];
+        if let Some(ref initrd) = self.initrd_path {
+            boot_args.push("--initrd".to_string());
+            boot_args.push(initrd.to_string_lossy().to_string());
+        }
+        cmd.args(&boot_args)
         .stdout(log_file)
         .stderr(stderr_file);
 
@@ -604,16 +617,19 @@ impl RuntimeBackend for VirtualizationBackend {
 
     /// Spawn an interactive exec session.
     ///
-    /// Spawns `k3rs-vmm exec --id <id> -- <cmd>` as a subprocess and returns
-    /// the child handle so the WebSocket exec handler gets piped I/O — exactly
-    /// like the OCI backend's `nsenter`-based spawn_exec.
+    /// Spawns `k3rs-vmm exec --id <id> [--tty] -- <cmd>` as a subprocess and
+    /// returns the child handle so the WebSocket exec handler gets piped I/O.
+    ///
+    /// When `tty=true`, `--tty` is passed to k3rs-vmm exec, which switches it
+    /// to streaming mode via IPC → vsock → k3rs-init PTY listener. The guest
+    /// shell then runs with a real PTY (prompts, job control, colours).
     async fn spawn_exec(
         &self,
         id: &str,
         command: &[&str],
-        _tty: bool,
+        tty: bool,
     ) -> Result<tokio::process::Child> {
-        tracing::info!("[virt] spawn_exec in VM {}: {:?}", id, command);
+        tracing::info!("[virt] spawn_exec in VM {} tty={}: {:?}", id, tty, command);
 
         let vmm = which_vmm()
             .await
@@ -625,7 +641,11 @@ impl RuntimeBackend for VirtualizationBackend {
             command.to_vec()
         };
 
-        let mut args: Vec<&str> = vec!["exec", "--id", id, "--"];
+        let mut args: Vec<&str> = vec!["exec", "--id", id];
+        if tty {
+            args.push("--tty");
+        }
+        args.push("--");
         args.extend_from_slice(&cmd_args);
 
         let child = tokio::process::Command::new(&vmm)
@@ -819,7 +839,7 @@ mod tests {
     fn test_vm_config_defaults() {
         let config = VmConfig::default();
         assert_eq!(config.cpu_count, 1);
-        assert_eq!(config.memory_mb, 128);
+        assert_eq!(config.memory_mb, 256);
     }
 
     #[test]

@@ -2,16 +2,24 @@
 //!
 //! k3rs-init listens on vsock port 5555 inside the guest for NUL-delimited
 //! exec commands from the host. This module connects from the host using the
-//! Virtualization.framework API and forwards commands, returning combined
-//! stdout+stderr output.
+//! Virtualization.framework API and forwards commands.
 //!
-//! ## Protocol
+//! ## Protocols
 //!
+//! ### One-shot exec (port 5555, no prefix)
 //! 1. Host sends: `arg0\0arg1\0arg2\n`  (NUL-delimited args, newline-terminated)
 //! 2. Host shuts down write direction (signals end-of-input to guest)
 //! 3. Guest reads args, executes command, writes stdout+stderr
 //! 4. Guest closes connection
 //! 5. Host reads to EOF, returns combined output
+//!
+//! ### Streaming PTY exec (port 5555, `\x01` prefix)
+//! 1. Host sends: `\x01arg0\0arg1\0arg2\n`  (`\x01` = streaming indicator)
+//! 2. Host keeps socket open for bidirectional relay
+//! 3. Guest reads command, creates PTY, spawns command with PTY slave
+//! 4. Guest bridges PTY master ↔ vsock bidirectionally
+//! 5. When guest process exits, guest closes connection
+//! 6. Host detects EOF, closes IPC relay
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -47,11 +55,152 @@ pub fn exec_via_vsock(
     // NUL-delimited command + newline terminator (matches k3rs-init vsock protocol)
     let cmd_str = command.join("\0") + "\n";
 
-    // ── Phase 1: initiate connection on main thread ──────────────────────
-    //
-    // Bridge the async VZ completion handler to a synchronous result:
-    //   Ok(fd)   – dup'd file descriptor we own exclusively
-    //   Err(msg) – error description
+    match connect_vsock(vm) {
+        Ok(fd) => exec_on_fd(fd, &cmd_str),
+        Err(e) => format!("exec error: {}\n", e),
+    }
+}
+
+/// Execute a streaming PTY command in the guest via vsock.
+///
+/// Sends `\x01` + NUL-delimited command to k3rs-init's PTY listener, then
+/// relays `ipc_stream` ↔ vsock bidirectionally until the guest closes the
+/// connection (process exited).
+///
+/// `ipc_stream` is the open UnixStream from the IPC listener, already past the
+/// command-header bytes (it carries stdin/stdout for the exec session).
+pub fn exec_streaming_via_vsock(
+    vm: &Arc<MainThreadBound<Retained<VZVirtualMachine>>>,
+    command: &[String],
+    ipc_stream: std::os::unix::net::UnixStream,
+) {
+    if command.is_empty() {
+        error!("exec_streaming_via_vsock: empty command");
+        return;
+    }
+
+    info!("vsock streaming exec: {:?}", command);
+
+    let fd = match connect_vsock(vm) {
+        Ok(f) => f,
+        Err(e) => {
+            error!("vsock connect failed: {}", e);
+            return;
+        }
+    };
+
+    // Send streaming prefix + NUL-delimited command + newline.
+    // The `\x01` byte tells k3rs-init to use PTY streaming mode.
+    let mut cmd_bytes = vec![0x01u8];
+    cmd_bytes.extend_from_slice(command.join("\0").as_bytes());
+    cmd_bytes.push(b'\n');
+
+    let mut written = 0;
+    while written < cmd_bytes.len() {
+        let n = unsafe {
+            libc::write(
+                fd,
+                cmd_bytes[written..].as_ptr() as *const libc::c_void,
+                cmd_bytes.len() - written,
+            )
+        };
+        if n <= 0 {
+            error!("vsock write failed: {}", std::io::Error::last_os_error());
+            unsafe { libc::close(fd) };
+            return;
+        }
+        written += n as usize;
+    }
+
+    // Bidirectional relay: ipc_stream ↔ vsock fd
+    use std::os::unix::io::IntoRawFd;
+    let ipc_fd = ipc_stream.into_raw_fd(); // we now own this fd exclusively
+    let ipc_fd_dup = unsafe { libc::dup(ipc_fd) };
+    let vsock_fd_dup = unsafe { libc::dup(fd) };
+
+    // Thread A: vsock → ipc  (guest output → exec subprocess stdout)
+    let t_vsock_to_ipc = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            let n =
+                unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            let mut off = 0usize;
+            while off < n as usize {
+                let w = unsafe {
+                    libc::write(
+                        ipc_fd,
+                        buf[off..n as usize].as_ptr() as *const libc::c_void,
+                        n as usize - off,
+                    )
+                };
+                if w <= 0 {
+                    break;
+                }
+                off += w as usize;
+            }
+            if off < n as usize {
+                break;
+            }
+        }
+        // Signal to exec subprocess that there is no more output.
+        unsafe { libc::shutdown(ipc_fd, libc::SHUT_WR) };
+        unsafe { libc::close(ipc_fd) };
+        unsafe { libc::close(fd) };
+    });
+
+    // Thread B: ipc → vsock  (exec subprocess stdin → guest input)
+    let t_ipc_to_vsock = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = unsafe {
+                libc::read(
+                    ipc_fd_dup,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                )
+            };
+            if n <= 0 {
+                break;
+            }
+            let mut off = 0usize;
+            while off < n as usize {
+                let w = unsafe {
+                    libc::write(
+                        vsock_fd_dup,
+                        buf[off..n as usize].as_ptr() as *const libc::c_void,
+                        n as usize - off,
+                    )
+                };
+                if w <= 0 {
+                    break;
+                }
+                off += w as usize;
+            }
+            if off < n as usize {
+                break;
+            }
+        }
+        // Close vsock write side so guest sees EOF on its read path.
+        unsafe { libc::shutdown(vsock_fd_dup, libc::SHUT_WR) };
+        unsafe { libc::close(ipc_fd_dup) };
+        unsafe { libc::close(vsock_fd_dup) };
+    });
+
+    t_vsock_to_ipc.join().ok();
+    t_ipc_to_vsock.join().ok();
+}
+
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+/// Connect to vsock port 5555 in the guest, returning a dup'd file descriptor.
+///
+/// Must be called from a non-main thread; uses `run_on_main` internally.
+fn connect_vsock(
+    vm: &Arc<MainThreadBound<Retained<VZVirtualMachine>>>,
+) -> Result<i32, String> {
     type Pair = (Mutex<Option<Result<i32, String>>>, Condvar);
     let pair: Arc<Pair> = Arc::new((Mutex::new(None), Condvar::new()));
     let pair_for_block = Arc::clone(&pair);
@@ -68,14 +217,10 @@ pub fn exec_via_vsock(
             return;
         }
 
-        // We configured exactly one VZVirtioSocketDeviceConfiguration, so the
-        // first device is a VZVirtioSocketDevice.
         let socket_device = devices.objectAtIndex(0);
-        // Safety: the actual ObjC object is a VZVirtioSocketDevice (subclass of VZSocketDevice).
         let vsock_device: Retained<VZVirtioSocketDevice> =
             unsafe { Retained::cast_unchecked(socket_device) };
 
-        // Build a heap-allocated block so VZ framework can copy it for the async callback.
         let pair_block = Arc::clone(&pair_for_block);
         let block = RcBlock::new(
             move |conn: *mut VZVirtioSocketConnection, err: *mut NSError| {
@@ -88,9 +233,6 @@ pub fn exec_via_vsock(
                 } else if conn.is_null() {
                     *guard = Some(Err("vsock connection is null".to_string()));
                 } else {
-                    // dup the fd so we own an independent handle.
-                    // VZVirtioSocketConnection owns and will close the original fd
-                    // when it is destroyed; our dup'd fd is unaffected.
                     let fd = unsafe { (*conn).fileDescriptor() };
                     let dup_fd = unsafe { libc::dup(fd) };
                     if dup_fd < 0 {
@@ -105,14 +247,11 @@ pub fn exec_via_vsock(
             },
         );
 
-        // Initiate async connection. The completion block is called on the main
-        // queue once the connection is established (or fails).
         unsafe {
             vsock_device.connectToPort_completionHandler(VSOCK_EXEC_PORT, &*block);
         }
     });
 
-    // ── Phase 2: wait for the dup'd fd ───────────────────────────────────
     let (lock, cv) = pair.as_ref();
     let guard = lock.lock().unwrap();
     let (mut guard, timed_out) = cv
@@ -120,18 +259,10 @@ pub fn exec_via_vsock(
         .unwrap();
 
     if timed_out.timed_out() {
-        return "exec error: vsock connection timed out (is guest booted and ready?)\n"
-            .to_string();
+        return Err("vsock connection timed out (is guest booted and ready?)".to_string());
     }
 
-    let fd = match guard.take().unwrap() {
-        Ok(fd) => fd,
-        Err(e) => return format!("exec error: {}\n", e),
-    };
-    drop(guard);
-
-    // ── Phase 3: write command + read response ───────────────────────────
-    exec_on_fd(fd, &cmd_str)
+    guard.take().unwrap()
 }
 
 /// Write `cmd` to `fd`, shutdown write direction, read all response bytes, close `fd`.

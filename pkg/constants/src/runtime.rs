@@ -16,4 +16,4 @@ pub const SUPPORTED_RUNTIMES: &[&str] = &["youki", "crun"];
 pub const DEFAULT_CPU_COUNT: u32 = 1;
 
 /// Default memory size in MiB for micro-VMs.
-pub const DEFAULT_MEMORY_MB: u64 = 128;
+pub const DEFAULT_MEMORY_MB: u64 = 256;

@@ -28,6 +28,8 @@
 
 use serde::Deserialize;
 use std::io::Write;
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -298,51 +300,260 @@ fn vsock_listener_loop() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// Byte prefix that switches vsock exec into streaming PTY mode (must match k3rs-vmm).
+const STREAM_PREFIX: u8 = 0x01;
+
 /// Handle a single vsock exec request.
+///
+/// Protocol detection (first byte):
+/// - `\x01` → streaming PTY mode: create PTY, spawn command, bridge PTY ↔ vsock
+/// - anything else → one-shot mode: run command, collect output, write, close
 #[cfg(target_os = "linux")]
 fn handle_vsock_exec(fd: i32) {
-    use std::io::{Read, Write};
-    use std::os::fd::FromRawFd;
+    // Read first byte to determine mode.
+    let mut first = [0u8; 1];
+    let n = unsafe { libc::read(fd, first.as_mut_ptr() as *mut libc::c_void, 1) };
+    if n <= 0 {
+        unsafe { libc::close(fd) };
+        return;
+    }
 
-    // Wrap fd in a safe File handle
-    let mut stream = unsafe { std::fs::File::from_raw_fd(fd) };
+    let streaming = first[0] == STREAM_PREFIX;
 
-    // Read command (NUL-delimited args terminated by newline)
-    let mut buf = vec![0u8; 65536];
-    let n = match stream.read(&mut buf) {
-        Ok(n) => n,
+    // Read command: if streaming, everything until '\n'; if one-shot, same but
+    // prepend the first byte (it's the first char of the command).
+    let mut cmd_buf = Vec::new();
+    if !streaming {
+        cmd_buf.push(first[0]);
+    }
+    let mut b = [0u8; 1];
+    loop {
+        let n = unsafe { libc::read(fd, b.as_mut_ptr() as *mut libc::c_void, 1) };
+        if n <= 0 {
+            break;
+        }
+        if b[0] == b'\n' {
+            break;
+        }
+        cmd_buf.push(b[0]);
+    }
+
+    let input = String::from_utf8_lossy(&cmd_buf).to_string();
+    let args: Vec<&str> = input.split('\0').collect();
+
+    if args.is_empty() || args[0].is_empty() {
+        let msg = b"error: empty command\n";
+        unsafe { libc::write(fd, msg.as_ptr() as *const libc::c_void, msg.len()) };
+        unsafe { libc::close(fd) };
+        return;
+    }
+
+    if streaming {
+        log_info!("vsock PTY exec: {:?}", args);
+        handle_vsock_pty_exec(fd, &args);
+    } else {
+        log_info!("vsock exec: {:?}", args);
+
+        // Diagnostic: verify rootfs mount is accessible before exec
+        let rootfs_ok = Path::new("/mnt/rootfs/bin").exists();
+        log_info!("rootfs /mnt/rootfs/bin exists: {}", rootfs_ok);
+
+        // One-shot: run command, write combined output, close.
+        // Chroot into container rootfs if mounted.
+        let output = unsafe {
+            Command::new(args[0]).args(&args[1..])
+                .pre_exec(chroot_into_rootfs)
+                .output()
+        };
+        match output {
+            Ok(out) => unsafe {
+                libc::write(
+                    fd,
+                    out.stdout.as_ptr() as *const libc::c_void,
+                    out.stdout.len(),
+                );
+                libc::write(
+                    fd,
+                    out.stderr.as_ptr() as *const libc::c_void,
+                    out.stderr.len(),
+                );
+            },
+            Err(e) => {
+                let msg = format!("exec error: {}\n", e);
+                unsafe { libc::write(fd, msg.as_ptr() as *const libc::c_void, msg.len()) };
+            }
+        }
+        unsafe { libc::close(fd) };
+    }
+}
+
+/// Chroot into the container rootfs if it is mounted at /mnt/rootfs.
+/// Called via pre_exec in spawned command children.
+#[cfg(target_os = "linux")]
+fn chroot_into_rootfs() -> std::io::Result<()> {
+    use std::ffi::CStr;
+    let rootfs = b"/mnt/rootfs\0";
+    let c_rootfs = unsafe { CStr::from_bytes_with_nul_unchecked(rootfs) };
+    unsafe {
+        let ret = libc::chroot(c_rootfs.as_ptr());
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        libc::chdir(b"/\0".as_ptr() as *const libc::c_char);
+    }
+    Ok(())
+}
+
+/// Run `args` inside a PTY and bridge the PTY master ↔ vsock `fd` bidirectionally.
+///
+/// The shell sees a real terminal (prompts, job control, colours). Raw bytes flow:
+///   host input  → vsock fd read  → PTY master write → shell stdin
+///   shell output → PTY master read → vsock fd write → host
+#[cfg(target_os = "linux")]
+fn handle_vsock_pty_exec(vsock_fd: i32, args: &[&str]) {
+    use std::os::unix::io::FromRawFd;
+
+    let mut master: libc::c_int = -1;
+    let mut slave: libc::c_int = -1;
+
+    let ret = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        let msg = format!("openpty error: {}\n", err);
+        unsafe {
+            libc::write(vsock_fd, msg.as_ptr() as *const libc::c_void, msg.len());
+            libc::close(vsock_fd);
+        }
+        return;
+    }
+
+    // Spawn the command with the slave PTY as stdin/stdout/stderr.
+    // setsid() + TIOCSCTTY give the shell a proper controlling terminal.
+    let child: Result<std::process::Child, _> = unsafe {
+        use std::process::Stdio;
+        Command::new(args[0])
+            .args(&args[1..])
+            .env("TERM", "xterm-256color")
+            .stdin(Stdio::from_raw_fd(slave))
+            .stdout(Stdio::from_raw_fd(libc::dup(slave)))
+            .stderr(Stdio::from_raw_fd(libc::dup(slave)))
+            .pre_exec(|| {
+                // Chroot into container rootfs if mounted.
+                chroot_into_rootfs()?;
+                libc::setsid();
+                libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0);
+                Ok(())
+            })
+            .spawn()
+    };
+
+    // slave is owned by the child now; close our copy so EIO propagates correctly.
+    unsafe { libc::close(slave) };
+
+    let mut child = match child {
+        Ok(c) => c,
         Err(e) => {
-            log_error!("vsock read error: {}", e);
+            let msg = format!("spawn error: {}\n", e);
+            unsafe {
+                libc::write(vsock_fd, msg.as_ptr() as *const libc::c_void, msg.len());
+                libc::close(master);
+                libc::close(vsock_fd);
+            }
             return;
         }
     };
 
-    let input = String::from_utf8_lossy(&buf[..n]).to_string();
-    let input = input.trim_end_matches('\n');
-    let args: Vec<&str> = input.split('\0').collect();
+    // Dup fds so each thread owns an independent handle.
+    let master_read_fd = master;
+    let master_write_fd = unsafe { libc::dup(master) };
+    let vsock_read_fd = vsock_fd;
+    let vsock_write_fd = unsafe { libc::dup(vsock_fd) };
 
-    if args.is_empty() || args[0].is_empty() {
-        let _ = stream.write_all(b"error: empty command\n");
-        return;
-    }
-
-    log_info!("vsock exec: {:?}", args);
-
-    // Execute the command
-    let output = Command::new(args[0]).args(&args[1..]).output();
-
-    match output {
-        Ok(output) => {
-            let _ = stream.write_all(&output.stdout);
-            let _ = stream.write_all(&output.stderr);
+    // Thread A: PTY master → vsock  (shell output → host)
+    let t_pty_to_vsock = std::thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = unsafe {
+                libc::read(
+                    master_read_fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                )
+            };
+            if n <= 0 {
+                break; // EIO when shell exits and slave side closes
+            }
+            let mut off = 0usize;
+            while off < n as usize {
+                let w = unsafe {
+                    libc::write(
+                        vsock_write_fd,
+                        buf[off..n as usize].as_ptr() as *const libc::c_void,
+                        n as usize - off,
+                    )
+                };
+                if w <= 0 {
+                    break;
+                }
+                off += w as usize;
+            }
+            if off < n as usize {
+                break;
+            }
         }
-        Err(e) => {
-            let msg = format!("exec error: {}\n", e);
-            let _ = stream.write_all(msg.as_bytes());
-        }
-    }
+        unsafe { libc::close(master_read_fd) };
+        unsafe { libc::close(vsock_write_fd) };
+    });
 
-    // Stream is dropped here, closing the fd
+    // Thread B: vsock → PTY master  (host input → shell)
+    let t_vsock_to_pty = std::thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = unsafe {
+                libc::read(
+                    vsock_read_fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                )
+            };
+            if n <= 0 {
+                break; // host disconnected
+            }
+            let mut off = 0usize;
+            while off < n as usize {
+                let w = unsafe {
+                    libc::write(
+                        master_write_fd,
+                        buf[off..n as usize].as_ptr() as *const libc::c_void,
+                        n as usize - off,
+                    )
+                };
+                if w <= 0 {
+                    break;
+                }
+                off += w as usize;
+            }
+            if off < n as usize {
+                break;
+            }
+        }
+        unsafe { libc::close(vsock_read_fd) };
+        unsafe { libc::close(master_write_fd) };
+    });
+
+    // Wait for child to exit, then join threads.
+    let _ = child.wait();
+    let _ = t_pty_to_vsock.join();
+    let _ = t_vsock_to_pty.join();
 }
 
 // ============================================================
@@ -401,6 +612,12 @@ fn mount_filesystems() -> Result<(), Box<dyn std::error::Error>> {
         if ret != 0 {
             let err = std::io::Error::last_os_error();
             log_error!("mount {} on {} failed: {}", source, target, err);
+        }
+
+        // After devtmpfs replaces /dev, recreate mount points for devpts/shm.
+        if *target == "/dev" && ret == 0 {
+            let _ = fs::create_dir_all("/dev/pts");
+            let _ = fs::create_dir_all("/dev/shm");
         }
     }
 
@@ -505,12 +722,9 @@ fn bring_interface_up(iface: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(target_os = "linux")]
 fn install_signal_handlers() {
-    use nix::sys::signal::{signal, SigHandler, Signal};
-    // Auto-reap children: setting SIGCHLD to SigIgn tells the kernel to
-    // automatically reap child processes without creating zombies.
-    unsafe {
-        let _ = signal(Signal::SIGCHLD, SigHandler::SigIgn);
-    }
+    // We do NOT set SIGCHLD=SIG_IGN here, because that breaks Command::output()
+    // (waitpid returns ECHILD immediately when SIGCHLD=SIG_IGN).
+    // Instead, reap_zombies() is called periodically with WNOHANG.
     log_info!("signal handlers installed");
 }
 
@@ -562,9 +776,9 @@ fn run_entrypoint(process: OciProcess) {
         }
     }
 
-    // Spawn the entrypoint as a child process.
+    // Spawn the entrypoint as a child process, chrooted into the container rootfs.
     // PID 1 stays alive to continue reaping orphaned zombies.
-    match Command::new(program).args(args).spawn() {
+    match unsafe { Command::new(program).args(args).pre_exec(chroot_into_rootfs).spawn() } {
         Ok(mut child) => {
             let child_pid = child.id();
             log_info!("entrypoint spawned (pid={})", child_pid);

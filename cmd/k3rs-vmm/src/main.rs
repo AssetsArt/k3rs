@@ -115,6 +115,9 @@ struct ExecArgs {
     /// Container/VM ID
     #[arg(long)]
     id: String,
+    /// Allocate a PTY in the guest for interactive sessions (SSH-like)
+    #[arg(long, default_value_t = false)]
+    tty: bool,
     /// Command to execute in guest
     #[arg(trailing_var_arg = true)]
     command: Vec<String>,
@@ -204,12 +207,17 @@ fn cmd_boot(args: BootArgs) {
     ipc::set_active_vm(&args.id);
 
     // Start IPC listener for exec requests.
-    // The closure captures the VM handle and forwards exec commands via vsock.
+    // Two closures: one for regular one-shot exec, one for streaming PTY exec.
     let id_for_ipc = args.id.clone();
     let vm_for_ipc = Arc::clone(&vm);
-    ipc::start_listener(&id_for_ipc, move |parts| {
-        vsock::exec_via_vsock(&vm_for_ipc, parts)
-    });
+    let vm_for_ipc_stream = Arc::clone(&vm);
+    ipc::start_listener(
+        &id_for_ipc,
+        move |parts| vsock::exec_via_vsock(&vm_for_ipc, parts),
+        move |parts, ipc_stream| {
+            vsock::exec_streaming_via_vsock(&vm_for_ipc_stream, parts, ipc_stream)
+        },
+    );
 
     // Handle signals for graceful shutdown
     let name = args.id.clone();
@@ -268,18 +276,32 @@ fn cmd_stop(args: StopArgs) {
 // ── Exec command ────────────────────────────────────────────────────────
 
 fn cmd_exec(args: ExecArgs) {
-    if args.command.is_empty() {
-        eprintln!("No command specified for exec");
-        process::exit(1);
-    }
+    // Default to /bin/sh when no command is given (interactive shell).
+    let command: Vec<String> = if args.command.is_empty() {
+        vec!["/bin/sh".to_string()]
+    } else {
+        args.command.clone()
+    };
 
-    info!("exec in VM {}: {}", args.id, args.command.join(" "));
+    info!("exec in VM {} tty={}: {}", args.id, args.tty, command.join(" "));
 
-    match ipc::exec_via_ipc(&args.id, &args.command) {
-        Ok(output) => print!("{}", output),
-        Err(e) => {
-            eprintln!("exec error: {}", e);
-            process::exit(1);
+    if args.tty {
+        // Streaming PTY mode: bidirectional relay through IPC → vsock → guest PTY.
+        match ipc::exec_streaming_via_ipc(&args.id, &command) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("exec error: {}", e);
+                process::exit(1);
+            }
+        }
+    } else {
+        // One-shot mode: collect output and print.
+        match ipc::exec_via_ipc(&args.id, &command) {
+            Ok(output) => print!("{}", output),
+            Err(e) => {
+                eprintln!("exec error: {}", e);
+                process::exit(1);
+            }
         }
     }
 }

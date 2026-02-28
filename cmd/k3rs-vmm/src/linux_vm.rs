@@ -104,9 +104,14 @@ fn boot_loader(config: &VmConfig) -> Retained<VZLinuxBootLoader> {
     unsafe {
         let kernel_url = path_to_ns_url(&config.kernel_path);
         let loader = VZLinuxBootLoader::initWithKernelURL(VZLinuxBootLoader::alloc(), &kernel_url);
-        loader.setCommandLine(&NSString::from_str(
-            "console=hvc0 console=ttyS0 root=virtiofs:rootfs rw init=/sbin/init",
-        ));
+        // With initrd: k3rs-init boots from initrd, mounts virtiofs at /mnt/rootfs.
+        // Without initrd: kernel mounts virtiofs directly as root (requires CONFIG_VIRTIO_FS=y).
+        let cmdline = if config.initrd_path.is_some() {
+            "console=hvc0 rdinit=/sbin/init rw loglevel=7"
+        } else {
+            "console=hvc0 root=virtiofs:rootfs rw rootwait init=/sbin/init loglevel=7"
+        };
+        loader.setCommandLine(&NSString::from_str(cmdline));
         if let Some(ref initrd) = config.initrd_path {
             loader.setInitialRamdiskURL(Some(&path_to_ns_url(initrd)));
         }

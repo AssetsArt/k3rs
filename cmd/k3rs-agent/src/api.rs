@@ -5,9 +5,9 @@
 //! stdin/stdout/stderr, and bridge the PTY master to/from the WebSocket.
 //! This gives the shell a proper terminal: prompts, echo, Ctrl+C, colours, etc.
 //!
-//! For non-interactive commands (`tty=false`) we use plain pipes and wait for
-//! the child to exit before closing the connection (avoid the race where
-//! child.wait() fires before all buffered output is sent).
+//! For VM backends (no container PID / OCI runtime) or non-interactive commands
+//! (`tty=false`) we use plain pipes. VM backends create the PTY inside the guest
+//! via the vsock streaming protocol, so the guest shell still sees a real TTY.
 
 use axum::{
     Router,
@@ -85,15 +85,15 @@ async fn handle_socket(
     if tty {
         handle_tty(ws_sender, ws_receiver, container_id, cmd_refs, runtime).await;
     } else {
-        handle_pipe(ws_sender, ws_receiver, container_id, cmd_refs, runtime).await;
+        handle_pipe(ws_sender, ws_receiver, container_id, cmd_refs, runtime, false).await;
     }
 }
 
 // ─── PTY / interactive mode ──────────────────────────────────────────────────
 
 async fn handle_tty(
-    mut ws_sender: futures_util::stream::SplitSink<WebSocket, Message>,
-    mut ws_receiver: futures_util::stream::SplitStream<WebSocket>,
+    ws_sender: futures_util::stream::SplitSink<WebSocket, Message>,
+    ws_receiver: futures_util::stream::SplitStream<WebSocket>,
     container_id: String,
     command: Vec<&str>,
     runtime: Arc<ContainerRuntime>,
@@ -105,11 +105,10 @@ async fn handle_tty(
     let runtime_bin = runtime.oci_runtime_path();
 
     if container_pid.is_none() && runtime_bin.is_none() {
-        let _ = ws_sender
-            .send(Message::Text(
-                "Error: PTY exec not supported on this backend\r\n".into(),
-            ))
-            .await;
+        // VM backend: no host-side PTY possible. Fall through to pipe mode with
+        // tty=true so the VM backend spawns k3rs-vmm exec --tty, which connects
+        // via vsock to k3rs-init's PTY listener inside the guest.
+        handle_pipe(ws_sender, ws_receiver, container_id, command, runtime, true).await;
         return;
     }
 
@@ -131,6 +130,7 @@ async fn handle_tty(
         if ret != 0 {
             let err = std::io::Error::last_os_error();
             error!("openpty failed: {}", err);
+            let mut ws_sender = ws_sender;
             let _ = ws_sender
                 .send(Message::Text(
                     format!("Error: openpty failed: {}\r\n", err).into(),
@@ -212,6 +212,7 @@ async fn handle_tty(
             .spawn()
     };
 
+    let mut ws_sender = ws_sender;
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
@@ -260,10 +261,17 @@ async fn handle_tty(
 
     // Task: WebSocket → PTY master
     let mut write_task = tokio::spawn(async move {
+        let mut ws_receiver = ws_receiver;
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 Message::Binary(bytes) => {
                     if master_write.write_all(&bytes).await.is_err() {
+                        break;
+                    }
+                }
+                Message::Text(text) => {
+                    // Accept text frames too (some clients send text for keystrokes)
+                    if master_write.write_all(text.as_bytes()).await.is_err() {
                         break;
                     }
                 }
@@ -315,17 +323,26 @@ async fn handle_tty(
     let _ = ws_sender.send(Message::Close(None)).await;
 }
 
-// ─── Pipe / non-interactive mode ─────────────────────────────────────────────
+// ─── Pipe / non-interactive or VM-backend interactive mode ───────────────────
 
+/// Bridge a WebSocket connection to a container process via plain pipes.
+///
+/// `tty=true`  → spawn_exec with tty=true so VM backends use k3rs-vmm exec --tty,
+///               which in turn connects to k3rs-init's PTY listener inside the guest.
+///               Raw binary bytes flow in both directions; no newline injection.
+///
+/// `tty=false` → single command, output collected and sent as binary frames.
+///               Output is streamed as it arrives (concurrent, not batched).
 async fn handle_pipe(
     mut ws_sender: futures_util::stream::SplitSink<WebSocket, Message>,
     mut ws_receiver: futures_util::stream::SplitStream<WebSocket>,
     container_id: String,
     command: Vec<&str>,
     runtime: Arc<ContainerRuntime>,
+    tty: bool,
 ) {
     let mut child = match runtime
-        .spawn_exec_in_container(&container_id, &command, false)
+        .spawn_exec_in_container(&container_id, &command, tty)
         .await
     {
         Ok(c) => c,
@@ -375,43 +392,79 @@ async fn handle_pipe(
         }
     });
 
-    // Drop the original sender — channel closes only when all clones are gone.
+    // Drop the original sender — channel closes only when both clones are gone.
     drop(tx);
 
-    // WS stdin task.
-    let stdin_task = tokio::spawn(async move {
+    // WS → stdin: relay raw bytes without modification.
+    // Binary frames carry raw terminal input; Text frames are treated as raw bytes too
+    // (some WebSocket clients send keystrokes as Text).
+    let mut stdin_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
-                Message::Text(text) => {
-                    if text == "exit" {
+                Message::Binary(bytes) => {
+                    if stdin.write_all(&bytes).await.is_err() {
                         break;
                     }
-                    let _ = stdin.write_all(text.as_bytes()).await;
-                    let _ = stdin.write_all(b"\n").await;
                 }
-                Message::Binary(bytes) => {
-                    let _ = stdin.write_all(&bytes).await;
+                Message::Text(text) => {
+                    if stdin.write_all(text.as_bytes()).await.is_err() {
+                        break;
+                    }
                 }
                 Message::Close(_) => break,
                 _ => {}
             }
         }
+        // Dropping stdin signals EOF to the child process.
     });
 
-    // Wait for child to exit FIRST, then drain all output.
-    let _ = child.wait().await;
-    info!("Exec process exited for {}", container_id);
+    // Wait for child exit concurrently with output streaming.
+    let mut child_task = tokio::spawn(async move { child.wait().await });
 
-    // stdout/stderr pipes will reach EOF now that child is gone.
-    let _ = tokio::join!(stdout_task, stderr_task);
+    // Main loop: stream output to WebSocket while child is running.
+    // Break when:
+    //   - all output drained (rx returns None) after child exits
+    //   - client disconnects (stdin_task ends)
+    //   - child exits (we then drain remaining output with a timeout)
+    loop {
+        tokio::select! {
+            bytes = rx.recv() => {
+                match bytes {
+                    Some(b) => {
+                        if ws_sender.send(Message::Binary(b.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break, // stdout + stderr both closed
+                }
+            }
+            _ = &mut stdin_task => {
+                // Client disconnected. Dropping stdin (done in the task) sends EOF
+                // to the child, which causes it to exit and closes stdout/stderr.
+                break;
+            }
+            _ = &mut child_task => {
+                info!("Exec process exited for {}", container_id);
+                break;
+            }
+        }
+    }
+
+    child_task.abort();
     stdin_task.abort();
 
-    // Drain remaining buffered output and send a Close frame.
-    while let Some(bytes) = rx.recv().await {
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        if ws_sender.send(Message::Text(text.into())).await.is_err() {
-            break;
-        }
+    // Allow stdout/stderr tasks up to 200ms to drain remaining buffered output.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        futures_util::future::join(stdout_task, stderr_task),
+    )
+    .await;
+
+    // Drain the channel.
+    while let Ok(Some(b)) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await
+    {
+        ws_sender.send(Message::Binary(b.into())).await.ok();
     }
 
     let _ = ws_sender.send(Message::Close(None)).await;
