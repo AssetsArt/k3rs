@@ -194,6 +194,14 @@ fn Layout() -> Element {
 // Shared types
 // ============================================================
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ResourceRequirements {
+    #[serde(default)]
+    pub cpu_millis: u64,
+    #[serde(default)]
+    pub memory_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Node {
     pub id: String,
     pub name: String,
@@ -203,6 +211,10 @@ pub struct Node {
     pub registered_at: String,
     #[serde(default)]
     pub unschedulable: bool,
+    #[serde(default)]
+    pub capacity: ResourceRequirements,
+    #[serde(default)]
+    pub allocated: ResourceRequirements,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
