@@ -41,3 +41,20 @@ pub const INITRD_FILENAME: &str = "initrd.img";
 
 /// Directory where VMM UNIX sockets are created.
 pub const VMM_SOCKET_DIR: &str = "/tmp/k3rs-runtime/vms";
+
+/// Directory for VMM PID files (one per running VM).
+pub const VMM_PID_DIR: &str = "/tmp/k3rs-runtime/vms";
+
+// ─── k3rs-init binary ─────────────────────────────────────────────────────
+
+/// System-wide install path for the k3rs-init guest binary.
+pub const K3RS_INIT_SYSTEM_PATH: &str = "/var/lib/k3rs/k3rs-init";
+
+/// User-local install path for the k3rs-init guest binary.
+pub const K3RS_INIT_USER_PATH: &str = ".k3rs/bin/k3rs-init";
+
+/// Standard /sbin/init path inside guest rootfs.
+pub const GUEST_INIT_PATH: &str = "sbin/init";
+
+/// Standard config.json path inside guest rootfs (read by k3rs-init).
+pub const GUEST_CONFIG_PATH: &str = "config.json";

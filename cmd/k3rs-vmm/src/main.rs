@@ -26,6 +26,7 @@ mod ipc;
 mod linux_vm;
 mod vm;
 mod vm_delegate;
+mod vsock;
 
 /// VM configuration passed between modules.
 #[derive(Debug, Clone)]
@@ -202,11 +203,12 @@ fn cmd_boot(args: BootArgs) {
     // Register VM ID for cleanup on exit (signal, delegate, start error)
     ipc::set_active_vm(&args.id);
 
-    // Start IPC listener for exec requests
+    // Start IPC listener for exec requests.
+    // The closure captures the VM handle and forwards exec commands via vsock.
     let id_for_ipc = args.id.clone();
-    ipc::start_listener(&id_for_ipc, move |_parts| {
-        // TODO: forward exec via vsock to guest when guest-side is ready
-        "exec not yet implemented in Rust VMM\n".to_string()
+    let vm_for_ipc = Arc::clone(&vm);
+    ipc::start_listener(&id_for_ipc, move |parts| {
+        vsock::exec_via_vsock(&vm_for_ipc, parts)
     });
 
     // Handle signals for graceful shutdown

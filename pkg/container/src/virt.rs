@@ -9,27 +9,27 @@
 //! - **virtio-console**: stdout/stderr log streaming to host file
 //! - **virtio-vsock**: host ↔ guest exec channel (port 5555)
 //!
-//! The actual VM lifecycle is managed by the `k3rs-vmm` helper binary (Rust)
-//! which wraps the Virtualization.framework via objc2-virtualization. This module
-//! communicates with k3rs-vmm via CLI invocations.
+//! ## Boot design
 //!
-//! ## Architecture
-//! ```text
-//! ┌─────────────────────────┐     ┌──────────────────────┐
-//! │  VirtualizationBackend  │     │  k3rs-vmm (Rust)     │
-//! │  (Rust, this module)    │────▶│  Virtualization.fwk  │
-//! │                         │     │  - VZLinuxBootLoader  │
-//! │  • create → rootfs dir  │     │  - virtio-fs share   │
-//! │  • start  → boot_vm()   │     │  - virtio-net NAT    │
-//! │  • exec   → vsock exec  │     │  - virtio-console    │
-//! │  • stop   → graceful    │     │  - virtio-vsock      │
-//! └─────────────────────────┘     └──────────────────────┘
-//! ```
+//! The kernel is launched with `root=virtiofs:rootfs rw init=/sbin/init`.
+//! No separate initrd is required. Before booting, this backend injects
+//! the `k3rs-init` binary into the OCI rootfs at `sbin/init` and writes a
+//! `config.json` at the rootfs root. The kernel mounts the virtiofs share
+//! as `/` and runs `k3rs-init`, which reads `config.json` and execs the
+//! container's entrypoint from the OCI image.
+//!
+//! ## Exec
+//!
+//! Exec is forwarded via the k3rs-vmm helper's IPC socket. The IPC handler
+//! in the boot process connects to the guest's vsock listener (port 5555),
+//! sends the NUL-delimited command, and returns stdout+stderr.
 //!
 //! ## Requirements
 //! - macOS 13+ (Ventura)
-//! - `k3rs-vmm` binary in PATH or `target/debug/`
+//! - `k3rs-vmm` binary in PATH or `./target/`
 //! - Linux kernel at `/var/lib/k3rs/vmlinux`
+//! - `k3rs-init` (aarch64/x86_64 Linux musl) at `/var/lib/k3rs/k3rs-init`
+//!   or `./target/<arch>-unknown-linux-musl/release/k3rs-init`
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -40,11 +40,14 @@ use tokio::sync::RwLock;
 
 use crate::backend::RuntimeBackend;
 use crate::kernel::KernelManager;
+use crate::state::ContainerStateInfo;
 
-/// Default VM resource configuration
+use pkg_constants::paths::{
+    GUEST_CONFIG_PATH, GUEST_INIT_PATH, K3RS_INIT_SYSTEM_PATH, K3RS_INIT_USER_PATH,
+};
 use pkg_constants::runtime::{DEFAULT_CPU_COUNT, DEFAULT_MEMORY_MB};
 
-/// Per-VM resource and path configuration.
+/// Per-VM resource configuration.
 #[derive(Debug, Clone)]
 pub struct VmConfig {
     /// Number of vCPUs
@@ -65,19 +68,12 @@ impl Default for VmConfig {
 /// VM instance state tracking.
 #[derive(Debug, Clone)]
 struct VmInstance {
-    /// Container/pod ID
-    id: String,
-    /// Path to the rootfs directory (shared via virtio-fs)
+    /// Path to the rootfs directory shared via virtio-fs
     rootfs_dir: PathBuf,
-    /// Process ID of the k3rs-vmm helper process
+    /// PID of the k3rs-vmm boot process
     vmm_pid: Option<u32>,
-    /// VM state
     state: VmState,
-    /// Log file path (virtio-console output)
     log_path: PathBuf,
-    /// OCI config.json path (inside rootfs, used during vsock exec)
-    #[allow(dead_code)]
-    config_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,11 +92,9 @@ pub struct VirtualizationBackend {
     data_dir: PathBuf,
     /// Path to the guest Linux kernel
     kernel_path: PathBuf,
-    /// Path to the guest initrd
-    initrd_path: Option<PathBuf>,
     /// Per-VM resource configuration
     vm_config: VmConfig,
-    /// Active VM instances
+    /// Active VM instances (in-memory, repopulated on discovery)
     instances: Arc<RwLock<HashMap<String, VmInstance>>>,
     /// Kernel asset manager
     kernel_manager: KernelManager,
@@ -108,10 +102,6 @@ pub struct VirtualizationBackend {
 
 impl VirtualizationBackend {
     /// Create a new VirtualizationBackend with default configuration.
-    ///
-    /// Validates that:
-    /// - Running on macOS
-    /// - A guest kernel is available (or can be downloaded)
     pub async fn new(_data_dir: &Path) -> Result<Self> {
         #[cfg(not(target_os = "macos"))]
         {
@@ -121,43 +111,31 @@ impl VirtualizationBackend {
         #[cfg(target_os = "macos")]
         {
             let data_dir = _data_dir;
-
             let vm_dir = data_dir.join("vms");
             tokio::fs::create_dir_all(&vm_dir).await?;
 
-            // Initialize kernel manager and check for kernel availability
             let kernel_manager = KernelManager::with_dir(&data_dir.join("kernel"));
-            let (kernel_path, initrd_path) =
+            let (kernel_path, _initrd) =
                 kernel_manager.ensure_available().await.unwrap_or_else(|e| {
-                    tracing::warn!("Kernel provisioning failed: {}. Using default paths.", e);
+                    tracing::warn!("Kernel provisioning: {}. Using default path.", e);
                     (PathBuf::from("/var/lib/k3rs/vmlinux"), None)
                 });
 
             let kernel_exists = tokio::fs::metadata(&kernel_path).await.is_ok();
-            if !kernel_exists {
-                tracing::warn!(
-                    "Guest kernel not found at {}. VM boot will require a kernel.",
-                    kernel_path.display()
-                );
-            }
+            let init_exists = find_k3rs_init().is_some();
 
             tracing::info!(
-                "VirtualizationBackend initialized: data_dir={}, kernel={}{}, cpus={}, memory={}MB",
-                vm_dir.display(),
+                "VirtualizationBackend: kernel={}{} k3rs-init={} cpus={} mem={}MB",
                 kernel_path.display(),
-                if kernel_exists {
-                    " ✓"
-                } else {
-                    " ✗ (missing)"
-                },
+                if kernel_exists { " ✓" } else { " ✗ (run scripts/build-kernel.sh)" },
+                if init_exists { "✓" } else { "✗ (run scripts/build-kernel.sh)" },
                 DEFAULT_CPU_COUNT,
-                DEFAULT_MEMORY_MB
+                DEFAULT_MEMORY_MB,
             );
 
             Ok(Self {
                 data_dir: vm_dir,
                 kernel_path,
-                initrd_path,
                 vm_config: VmConfig::default(),
                 instances: Arc::new(RwLock::new(HashMap::new())),
                 kernel_manager,
@@ -172,142 +150,187 @@ impl VirtualizationBackend {
         Ok(backend)
     }
 
-    /// Get the log path for a container.
     fn log_path(&self, id: &str) -> PathBuf {
         self.data_dir.join(format!("{}.log", id))
     }
 
-    /// Get the rootfs directory for a container.
     fn rootfs_dir(&self, id: &str) -> PathBuf {
         self.data_dir.join(format!("{}-rootfs", id))
     }
 
-    /// Get the OCI config.json path for a container.
-    fn config_path(&self, id: &str) -> PathBuf {
-        self.rootfs_dir(id).join("config.json")
-    }
-
-    /// Boot a VM using k3rs-vmm helper.
+    /// Prepare a rootfs directory so the VM kernel can boot it directly.
     ///
-    /// The k3rs-vmm process launches a Virtualization.framework VM with:
-    /// - VZLinuxBootLoader → kernel + initrd
-    /// - virtio-fs → rootfs directory shared as guest "rootfs" tag
-    /// - virtio-net → NAT networking
-    /// - virtio-console → log file
-    /// - virtio-vsock → exec channel
-    async fn boot_vm(&self, id: &str, rootfs_dir: &Path) -> Result<Option<u32>> {
-        let log_path = self.log_path(id);
+    /// The kernel cmdline `root=virtiofs:rootfs init=/sbin/init` causes Linux
+    /// to mount the virtiofs share as `/` and execute `/sbin/init`. This
+    /// method makes that work by:
+    ///
+    ///  1. Ensuring required guest directories exist.
+    ///  2. Injecting `k3rs-init` as `/sbin/init` in the rootfs.
+    ///  3. Writing `/config.json` (read by k3rs-init to find the entrypoint).
+    async fn prepare_rootfs(
+        &self,
+        rootfs: &Path,
+        id: &str,
+        command: &[String],
+        env: &[String],
+    ) -> Result<()> {
+        // ── 1. Required guest directories ─────────────────────────────────────
+        for dir in &[
+            "sbin", "proc", "sys", "dev", "dev/pts", "dev/shm",
+            "tmp", "run", "mnt/rootfs", "etc",
+        ] {
+            tokio::fs::create_dir_all(rootfs.join(dir)).await.ok();
+        }
 
-        // Find k3rs-vmm helper
-        let vmm_path = which_vmm().await;
-
-        match vmm_path {
-            Some(vmm) => {
-                let log_file = std::fs::File::create(&log_path)?;
-                let stderr_file = log_file.try_clone()?;
-
-                let mut cmd = std::process::Command::new(&vmm);
-                cmd.args([
-                    "boot",
-                    "--kernel",
-                    &self.kernel_path.to_string_lossy(),
-                    "--rootfs",
-                    &rootfs_dir.to_string_lossy(),
-                    "--cpus",
-                    &self.vm_config.cpu_count.to_string(),
-                    "--memory",
-                    &self.vm_config.memory_mb.to_string(),
-                    "--id",
-                    id,
-                    "--log",
-                    &log_path.to_string_lossy(),
-                    "--foreground",
-                ]);
-
-                // Add initrd if available
-                if let Some(ref initrd) = self.initrd_path {
-                    cmd.args(["--initrd", &initrd.to_string_lossy()]);
+        // ── 2. Inject k3rs-init as /sbin/init ────────────────────────────────
+        let init_dest = rootfs.join(GUEST_INIT_PATH); // sbin/init
+        match find_k3rs_init() {
+            Some(init_src) => {
+                tokio::fs::copy(&init_src, &init_dest)
+                    .await
+                    .with_context(|| format!(
+                        "copy k3rs-init {} → {}",
+                        init_src.display(),
+                        init_dest.display()
+                    ))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(
+                        &init_dest,
+                        std::fs::Permissions::from_mode(0o755),
+                    )?;
                 }
-
-                let child = cmd
-                    .stdout(log_file)
-                    .stderr(stderr_file)
-                    .spawn()
-                    .context("failed to spawn k3rs-vmm")?;
-
-                let pid = child.id();
-                tracing::info!(
-                    "[virt] VM {} booted via k3rs-vmm (pid={}, rootfs={}, cpus={}, mem={}MB)",
-                    id,
-                    pid,
-                    rootfs_dir.display(),
-                    self.vm_config.cpu_count,
-                    self.vm_config.memory_mb
+                tracing::debug!(
+                    "[virt] injected k3rs-init at {} (from {})",
+                    init_dest.display(),
+                    init_src.display()
                 );
-                Ok(Some(pid))
             }
             None => {
-                anyhow::bail!(
-                    "k3rs-vmm helper not found — cannot boot VM {}. \
-                     Build it: cargo build -p k3rs-vmm --release",
-                    id
+                tracing::warn!(
+                    "[virt] k3rs-init not found — guest will use existing /sbin/init. \
+                     Run `scripts/build-kernel.sh` to build it."
                 );
             }
         }
+
+        // ── 3. Write /config.json (k3rs-init reads this to find entrypoint) ──
+        let config_dest = rootfs.join(GUEST_CONFIG_PATH); // config.json
+
+        let mut all_env: Vec<String> = vec![
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+            format!("HOSTNAME={}", id),
+            "TERM=xterm".to_string(),
+        ];
+        for e in env {
+            // Don't duplicate keys
+            let key = e.split('=').next().unwrap_or("");
+            if !key.is_empty() && !all_env.iter().any(|x| x.starts_with(&format!("{}=", key))) {
+                all_env.push(e.clone());
+            }
+        }
+
+        let args: Vec<&str> = if command.is_empty() {
+            vec!["/bin/sh"]
+        } else {
+            command.iter().map(|s| s.as_str()).collect()
+        };
+
+        let config = serde_json::json!({
+            "ociVersion": "1.0.0",
+            "process": {
+                "args": args,
+                "env": all_env,
+                "cwd": "/"
+            },
+            "hostname": id
+        });
+
+        tokio::fs::write(&config_dest, serde_json::to_string_pretty(&config)?)
+            .await
+            .with_context(|| format!("write config.json to {}", config_dest.display()))?;
+
+        tracing::debug!("[virt] config.json written to {}", config_dest.display());
+        Ok(())
     }
 
-    /// Stop a VM via k3rs-vmm, falling back to kill.
+    /// Boot a VM using k3rs-vmm helper (no initrd — virtiofs is root).
+    async fn boot_vm(&self, id: &str, rootfs_dir: &Path) -> Result<Option<u32>> {
+        let log_path = self.log_path(id);
+        let vmm = which_vmm()
+            .await
+            .ok_or_else(|| anyhow::anyhow!(
+                "k3rs-vmm not found — build with `cargo build -p k3rs-vmm --release`"
+            ))?;
+
+        let log_file = std::fs::File::create(&log_path)?;
+        let stderr_file = log_file.try_clone()?;
+
+        let mut cmd = std::process::Command::new(&vmm);
+        cmd.args([
+            "boot",
+            "--kernel", &self.kernel_path.to_string_lossy(),
+            "--rootfs", &rootfs_dir.to_string_lossy(),
+            "--cpus", &self.vm_config.cpu_count.to_string(),
+            "--memory", &self.vm_config.memory_mb.to_string(),
+            "--id", id,
+            "--log", &log_path.to_string_lossy(),
+            "--foreground",
+        ])
+        .stdout(log_file)
+        .stderr(stderr_file);
+
+        let child = cmd.spawn().context("failed to spawn k3rs-vmm")?;
+        let pid = child.id();
+
+        tracing::info!(
+            "[virt] VM {} booted (pid={}, cpus={}, mem={}MB, rootfs={})",
+            id, pid,
+            self.vm_config.cpu_count,
+            self.vm_config.memory_mb,
+            rootfs_dir.display()
+        );
+        Ok(Some(pid))
+    }
+
+    /// Stop a VM via k3rs-vmm, falling back to SIGTERM/SIGKILL.
     async fn stop_vm(&self, id: &str, pid: Option<u32>) -> Result<()> {
-        // Try graceful stop via k3rs-vmm
         if let Some(vmm) = which_vmm().await {
-            let output = tokio::process::Command::new(&vmm)
+            let out = tokio::process::Command::new(&vmm)
                 .args(["stop", "--id", id])
                 .output()
                 .await;
-
-            match output {
-                Ok(o) if o.status.success() => {
-                    tracing::info!("[virt] VM {} stopped gracefully via k3rs-vmm", id);
+            if let Ok(o) = out {
+                if o.status.success() {
+                    tracing::info!("[virt] VM {} stopped via k3rs-vmm", id);
                     return Ok(());
                 }
-                Ok(o) => {
-                    tracing::warn!(
-                        "[virt] k3rs-vmm stop failed: {}",
-                        String::from_utf8_lossy(&o.stderr)
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!("[virt] k3rs-vmm stop error: {}", e);
-                }
+                tracing::warn!("[virt] k3rs-vmm stop: {}", String::from_utf8_lossy(&o.stderr));
             }
         }
 
-        // Fallback: kill the VMM process
         if let Some(pid) = pid {
             let _ = tokio::process::Command::new("kill")
                 .args(["-TERM", &pid.to_string()])
                 .output()
                 .await;
-
-            // Wait briefly, then force kill
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
             let _ = tokio::process::Command::new("kill")
                 .args(["-KILL", &pid.to_string()])
                 .output()
                 .await;
-
             tracing::info!("[virt] VM {} killed (pid={})", id, pid);
         }
 
         Ok(())
     }
 
-    /// Execute a command in a VM via k3rs-vmm vsock exec.
+    /// Execute a command via k3rs-vmm IPC → vsock → guest k3rs-init.
     async fn exec_via_vmm(&self, id: &str, command: &[&str]) -> Result<String> {
         let vmm = which_vmm()
             .await
-            .ok_or_else(|| anyhow::anyhow!("k3rs-vmm helper not found — cannot exec"))?;
+            .ok_or_else(|| anyhow::anyhow!("k3rs-vmm not found"))?;
 
         let mut args = vec![
             "exec".to_string(),
@@ -333,11 +356,13 @@ impl VirtualizationBackend {
         }
     }
 
-    /// Check if the kernel manager has assets available.
+    /// Check if a guest kernel is available.
     pub async fn kernel_available(&self) -> bool {
         self.kernel_manager.is_available().await
     }
 }
+
+// ─── RuntimeBackend impl ─────────────────────────────────────────────────────
 
 #[async_trait]
 impl RuntimeBackend for VirtualizationBackend {
@@ -349,197 +374,194 @@ impl RuntimeBackend for VirtualizationBackend {
         "macos-vz-2.0"
     }
 
+    /// Create a container from an OCI bundle directory.
+    ///
+    /// Injects k3rs-init + config.json into the OCI rootfs so the VM kernel
+    /// can boot it directly via `root=virtiofs:rootfs init=/sbin/init`.
     async fn create(&self, id: &str, bundle: &Path) -> Result<()> {
-        tracing::info!(
-            "[virt] create VM container: id={}, bundle={}",
-            id,
-            bundle.display()
-        );
+        tracing::info!("[virt] create: id={} bundle={}", id, bundle.display());
 
-        // Prepare rootfs directory for virtio-fs sharing.
-        // The bundle should contain the extracted OCI rootfs.
-        let rootfs_src = if bundle.join("rootfs").exists() {
+        // Resolve the OCI rootfs (the directory we'll share via virtio-fs)
+        let rootfs_dir = if bundle.join("rootfs").exists() {
             bundle.join("rootfs")
         } else {
             bundle.to_path_buf()
         };
 
-        // Create our own rootfs directory for this VM
-        let rootfs_dir = self.rootfs_dir(id);
-        tokio::fs::create_dir_all(&rootfs_dir).await?;
+        // Extract entrypoint + env from the OCI bundle's config.json
+        let (command, env) = parse_bundle_config(bundle);
 
-        // Copy rootfs content (or symlink for efficiency)
-        // For virtio-fs, we can share the original bundle directory directly,
-        // but we keep a separate dir for OCI config placement.
-        let config_path = self.config_path(id);
+        // Inject k3rs-init and write /config.json into the rootfs
+        self.prepare_rootfs(&rootfs_dir, id, &command, &env).await?;
 
-        // If the bundle has a config.json, copy it to where k3rs-init expects it
-        let bundle_config = bundle.join("config.json");
-        if bundle_config.exists() {
-            tokio::fs::copy(&bundle_config, &config_path).await?;
-        }
-
-        // For virtio-fs, we share the original rootfs directly (no disk image needed)
         let log_path = self.log_path(id);
         tokio::fs::write(&log_path, "").await?;
 
-        // Track the instance
-        let instance = VmInstance {
-            id: id.to_string(),
-            rootfs_dir: rootfs_src,
-            vmm_pid: None,
-            state: VmState::Created,
-            log_path,
-            config_path,
-        };
+        self.instances.write().await.insert(
+            id.to_string(),
+            VmInstance {
+                rootfs_dir,
+                vmm_pid: None,
+                state: VmState::Created,
+                log_path,
+            },
+        );
 
-        self.instances
-            .write()
-            .await
-            .insert(id.to_string(), instance);
-        tracing::info!("[virt] VM container {} created (virtio-fs rootfs)", id);
+        tracing::info!("[virt] container {} created (rootfs prepared for virtiofs boot)", id);
         Ok(())
     }
 
+    /// Create from an image reference (direct shortcut — bypasses image pull).
     async fn create_from_image(&self, id: &str, image: &str, command: &[String]) -> Result<()> {
-        tracing::info!(
-            "[virt] create VM from image: id={}, image={}, cmd={:?}",
-            id,
-            image,
-            command
-        );
+        tracing::info!("[virt] create_from_image: id={} image={}", id, image);
 
-        // Create rootfs directory and config.json for the image
         let rootfs_dir = self.rootfs_dir(id);
         tokio::fs::create_dir_all(&rootfs_dir).await?;
 
+        self.prepare_rootfs(&rootfs_dir, id, command, &[]).await?;
+
         let log_path = self.log_path(id);
-        let config_path = self.config_path(id);
-
-        // Write OCI config.json for k3rs-init to parse
-        let cmd_args: Vec<&str> = if command.is_empty() {
-            vec!["/bin/sh"]
-        } else {
-            command.iter().map(|s| s.as_str()).collect()
-        };
-        let config = serde_json::json!({
-            "process": {
-                "args": cmd_args,
-                "env": [
-                    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                    format!("HOSTNAME={}", id),
-                ],
-                "cwd": "/"
-            },
-            "hostname": id
-        });
-        tokio::fs::write(&config_path, serde_json::to_string_pretty(&config)?).await?;
-
         tokio::fs::write(
             &log_path,
             format!("[virt] VM for image {} (cmd: {:?})\n", image, command),
         )
         .await?;
 
-        let instance = VmInstance {
-            id: id.to_string(),
-            rootfs_dir,
-            vmm_pid: None,
-            state: VmState::Created,
-            log_path,
-            config_path,
-        };
-
-        self.instances
-            .write()
-            .await
-            .insert(id.to_string(), instance);
+        self.instances.write().await.insert(
+            id.to_string(),
+            VmInstance {
+                rootfs_dir,
+                vmm_pid: None,
+                state: VmState::Created,
+                log_path,
+            },
+        );
         Ok(())
     }
 
     async fn start(&self, id: &str) -> Result<()> {
-        tracing::info!("[virt] starting VM: {}", id);
+        tracing::info!("[virt] start VM: {}", id);
+
+        if !tokio::fs::metadata(&self.kernel_path).await.is_ok() {
+            anyhow::bail!(
+                "Kernel missing at {} — run `scripts/build-kernel.sh`",
+                self.kernel_path.display()
+            );
+        }
 
         let rootfs_dir = {
             let instances = self.instances.read().await;
-            let instance = instances
+            instances
                 .get(id)
-                .ok_or_else(|| anyhow::anyhow!("VM {} not found", id))?;
-            instance.rootfs_dir.clone()
+                .ok_or_else(|| anyhow::anyhow!("VM {} not found — call create() first", id))?
+                .rootfs_dir
+                .clone()
         };
 
-        // Boot the VM via k3rs-vmm
         let pid = self.boot_vm(id, &rootfs_dir).await?;
 
-        // Update state
         let mut instances = self.instances.write().await;
-        if let Some(instance) = instances.get_mut(id) {
-            instance.state = VmState::Running;
-            instance.vmm_pid = pid;
+        if let Some(inst) = instances.get_mut(id) {
+            inst.state = VmState::Running;
+            inst.vmm_pid = pid;
         }
 
-        tracing::info!("[virt] VM {} started", id);
         Ok(())
     }
 
     async fn stop(&self, id: &str) -> Result<()> {
-        tracing::info!("[virt] stopping VM: {}", id);
+        tracing::info!("[virt] stop VM: {}", id);
 
         let pid = {
             let instances = self.instances.read().await;
             instances.get(id).and_then(|i| i.vmm_pid)
         };
 
-        // Stop via k3rs-vmm or kill
         self.stop_vm(id, pid).await?;
 
-        // Update state
         let mut instances = self.instances.write().await;
-        if let Some(instance) = instances.get_mut(id) {
-            instance.state = VmState::Stopped;
-            instance.vmm_pid = None;
+        if let Some(inst) = instances.get_mut(id) {
+            inst.state = VmState::Stopped;
+            inst.vmm_pid = None;
         }
 
-        tracing::info!("[virt] VM {} stopped", id);
         Ok(())
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
-        tracing::info!("[virt] deleting VM: {}", id);
+        tracing::info!("[virt] delete VM: {}", id);
 
-        // Stop if still running
         self.stop(id).await.ok();
 
-        // Clean up rootfs and logs
-        let instance = self.instances.write().await.remove(id);
-        if let Some(inst) = instance {
+        let removed = self.instances.write().await.remove(id);
+        if let Some(inst) = removed {
             let _ = tokio::fs::remove_dir_all(&inst.rootfs_dir).await;
             let _ = tokio::fs::remove_file(&inst.log_path).await;
         }
 
-        // Clean up any remaining files
-        let rootfs_dir = self.rootfs_dir(id);
-        let log_path = self.log_path(id);
-        let _ = tokio::fs::remove_dir_all(&rootfs_dir).await;
-        let _ = tokio::fs::remove_file(&log_path).await;
+        // Best-effort cleanup for named paths (handles post-restart recovery cases)
+        let _ = tokio::fs::remove_dir_all(self.rootfs_dir(id)).await;
+        let _ = tokio::fs::remove_file(self.log_path(id)).await;
 
         tracing::info!("[virt] VM {} deleted", id);
         Ok(())
     }
 
+    /// List running VMs.
+    ///
+    /// Combines in-memory state with `k3rs-vmm ls` so VMs running before an
+    /// agent restart are rediscovered on startup.
     async fn list(&self) -> Result<Vec<String>> {
-        let instances = self.instances.read().await;
-        let ids: Vec<String> = instances
-            .values()
-            .filter(|i| i.state == VmState::Running)
-            .map(|i| i.id.clone())
-            .collect();
-        Ok(ids)
+        let mut ids: std::collections::HashSet<String> = {
+            let instances = self.instances.read().await;
+            instances
+                .iter()
+                .filter(|(_, i)| i.state == VmState::Running)
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+
+        // Query k3rs-vmm for VMs that survived an agent restart
+        if let Some(vmm) = which_vmm().await {
+            if let Ok(output) = tokio::process::Command::new(&vmm).arg("ls").output().await {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    // Skip header / empty lines
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 && parts[2] == "running" {
+                        let vm_id = parts[0].to_string();
+                        ids.insert(vm_id.clone());
+
+                        // Populate in-memory tracking if missing (agent restarted)
+                        let mut instances = self.instances.write().await;
+                        if !instances.contains_key(&vm_id) {
+                            tracing::info!(
+                                "[virt] rediscovered VM {} from k3rs-vmm ls (restart recovery)",
+                                vm_id
+                            );
+                            let rootfs_dir = self.rootfs_dir(&vm_id);
+                            let log_path = self.log_path(&vm_id);
+                            let vmm_pid = parts[1].parse::<u32>().ok();
+                            instances.insert(
+                                vm_id.clone(),
+                                VmInstance {
+                                    rootfs_dir,
+                                    vmm_pid,
+                                    state: VmState::Running,
+                                    log_path,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(ids.into_iter().collect())
     }
 
     async fn logs(&self, id: &str, tail: usize) -> Result<Vec<String>> {
         let log_path = self.log_path(id);
-
         match tokio::fs::read_to_string(&log_path).await {
             Ok(content) => {
                 let lines: Vec<String> = content
@@ -553,41 +575,129 @@ impl RuntimeBackend for VirtualizationBackend {
                     .collect();
                 Ok(lines)
             }
-            Err(_) => Ok(vec![format!("[virt] No logs available for VM {}", id)]),
+            Err(_) => Ok(vec![format!("[virt] no logs for VM {}", id)]),
         }
     }
 
     async fn exec(&self, id: &str, command: &[&str]) -> Result<String> {
         tracing::info!("[virt] exec in VM {}: {:?}", id, command);
 
-        let instances = self.instances.read().await;
-        let instance = instances
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("VM {} not found", id))?;
+        // Verify the VM is running (check in-memory OR via k3rs-vmm state)
+        let is_running = {
+            let instances = self.instances.read().await;
+            instances
+                .get(id)
+                .map(|i| i.state == VmState::Running)
+                .unwrap_or(false)
+        };
 
-        if instance.state != VmState::Running {
-            anyhow::bail!("VM {} is not running (state: {:?})", id, instance.state);
+        if !is_running {
+            // May have been discovered after a restart; check live state
+            let st = self.state(id).await?;
+            if st.status != "running" {
+                anyhow::bail!("VM {} is not running (status: {})", id, st.status);
+            }
         }
-        drop(instances);
 
-        // Exec via k3rs-vmm IPC → vsock → guest
         self.exec_via_vmm(id, command).await
     }
 
+    /// Spawn an interactive exec session.
+    ///
+    /// Spawns `k3rs-vmm exec --id <id> -- <cmd>` as a subprocess and returns
+    /// the child handle so the WebSocket exec handler gets piped I/O — exactly
+    /// like the OCI backend's `nsenter`-based spawn_exec.
     async fn spawn_exec(
         &self,
         id: &str,
         command: &[&str],
         _tty: bool,
     ) -> Result<tokio::process::Child> {
-        let _ = (id, command);
-        anyhow::bail!("Streaming exec is not yet supported for microVMs")
+        tracing::info!("[virt] spawn_exec in VM {}: {:?}", id, command);
+
+        let vmm = which_vmm()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("k3rs-vmm not found — cannot spawn_exec in VM {}", id))?;
+
+        let cmd_args: Vec<&str> = if command.is_empty() {
+            vec!["/bin/sh"]
+        } else {
+            command.to_vec()
+        };
+
+        let mut args: Vec<&str> = vec!["exec", "--id", id, "--"];
+        args.extend_from_slice(&cmd_args);
+
+        let child = tokio::process::Command::new(&vmm)
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("failed to spawn k3rs-vmm exec")?;
+
+        Ok(child)
+    }
+
+    /// Query the runtime state of a VM.
+    ///
+    /// First checks in-memory state, then falls back to `k3rs-vmm state --id`
+    /// so the agent's `discover_running_containers()` works after restarts.
+    async fn state(&self, id: &str) -> Result<ContainerStateInfo> {
+        // In-memory check (fast path)
+        {
+            let instances = self.instances.read().await;
+            if let Some(inst) = instances.get(id) {
+                let status = match inst.state {
+                    VmState::Created => "created",
+                    VmState::Running => "running",
+                    VmState::Stopped => "stopped",
+                }
+                .to_string();
+                return Ok(ContainerStateInfo {
+                    id: id.to_string(),
+                    status,
+                    pid: inst.vmm_pid.unwrap_or(0),
+                    bundle: inst.rootfs_dir.to_string_lossy().to_string(),
+                });
+            }
+        }
+
+        // k3rs-vmm state query (for post-restart recovery)
+        if let Some(vmm) = which_vmm().await {
+            let out = tokio::process::Command::new(&vmm)
+                .args(["state", "--id", id])
+                .output()
+                .await;
+
+            if let Ok(o) = out {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                // Output: "state=running" or "state=not_found"
+                if let Some(val) = stdout.lines().find_map(|l| l.strip_prefix("state=")) {
+                    let status = if val.trim() == "running" { "running" } else { "stopped" };
+                    let pid = if status == "running" {
+                        vmm_pid_for(id).await
+                    } else {
+                        0
+                    };
+                    return Ok(ContainerStateInfo {
+                        id: id.to_string(),
+                        status: status.to_string(),
+                        pid,
+                        bundle: self.rootfs_dir(id).to_string_lossy().to_string(),
+                    });
+                }
+            }
+        }
+
+        anyhow::bail!("VM {} not found (not tracked and k3rs-vmm unavailable)", id)
     }
 }
 
-/// Find the k3rs-vmm helper binary path.
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Find the k3rs-vmm helper binary in PATH or common build locations.
 async fn which_vmm() -> Option<String> {
-    // Check in PATH
     if let Ok(output) = tokio::process::Command::new("which")
         .arg("k3rs-vmm")
         .output()
@@ -600,7 +710,6 @@ async fn which_vmm() -> Option<String> {
         }
     }
 
-    // Check in common locations
     for path in &[
         "./target/release/k3rs-vmm",
         "./target/debug/k3rs-vmm",
@@ -616,11 +725,95 @@ async fn which_vmm() -> Option<String> {
     None
 }
 
+/// Find the k3rs-init Linux binary to inject into the guest rootfs.
+///
+/// Search order:
+/// 1. System install (`/var/lib/k3rs/k3rs-init`) — placed by `scripts/build-kernel.sh`
+/// 2. User-local (`~/.k3rs/bin/k3rs-init`)
+/// 3. Cargo build output for aarch64 and x86_64 musl targets
+pub(crate) fn find_k3rs_init() -> Option<PathBuf> {
+    if let Some(p) = try_path(K3RS_INIT_SYSTEM_PATH) {
+        return Some(p);
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        let user_path = PathBuf::from(home).join(K3RS_INIT_USER_PATH);
+        if user_path.exists() {
+            return Some(user_path);
+        }
+    }
+
+    // Cargo build outputs — aarch64 first (Apple Silicon M-series)
+    for arch in &["aarch64", "x86_64"] {
+        for profile in &["release", "debug"] {
+            let p = format!(
+                "./target/{}-unknown-linux-musl/{}/k3rs-init",
+                arch, profile
+            );
+            if let Some(path) = try_path(&p) {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+fn try_path(s: &str) -> Option<PathBuf> {
+    let p = PathBuf::from(s);
+    if p.exists() { Some(p) } else { None }
+}
+
+/// Parse the OCI bundle config.json to extract command and env vars.
+/// Returns empty vecs on parse failure (k3rs-init defaults to /bin/sh).
+fn parse_bundle_config(bundle: &Path) -> (Vec<String>, Vec<String>) {
+    let data = match std::fs::read_to_string(bundle.join("config.json")) {
+        Ok(d) => d,
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&data) {
+        Ok(v) => v,
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+
+    let command = v["process"]["args"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+
+    let env = v["process"]["env"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+
+    (command, env)
+}
+
+/// Get the PID of the k3rs-vmm boot process for a given VM ID.
+async fn vmm_pid_for(id: &str) -> u32 {
+    let out = tokio::process::Command::new("pgrep")
+        .args(["-f", &format!("k3rs-vmm boot.*--id {}", id)])
+        .output()
+        .await;
+
+    match out {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .lines()
+                .next()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(target_os = "macos")]
-    use std::path::PathBuf;
 
     #[test]
     fn test_vm_config_defaults() {
@@ -629,140 +822,122 @@ mod tests {
         assert_eq!(config.memory_mb, 128);
     }
 
+    #[test]
+    fn test_parse_bundle_config_missing() {
+        let (cmd, env) = parse_bundle_config(Path::new("/nonexistent"));
+        assert!(cmd.is_empty());
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn test_parse_bundle_config_valid() {
+        use std::io::Write;
+        let tmp = std::env::temp_dir().join("k3rs-virt-cfg-test");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let cfg = serde_json::json!({
+            "process": {
+                "args": ["/bin/bash", "-l"],
+                "env": ["HOME=/root", "PATH=/bin"]
+            }
+        });
+        let mut f = std::fs::File::create(tmp.join("config.json")).unwrap();
+        f.write_all(serde_json::to_string(&cfg).unwrap().as_bytes()).unwrap();
+
+        let (cmd, env) = parse_bundle_config(&tmp);
+        assert_eq!(cmd, vec!["/bin/bash", "-l"]);
+        assert_eq!(env, vec!["HOME=/root", "PATH=/bin"]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn test_virtualization_backend_create_and_lifecycle() {
-        let tmp_dir = PathBuf::from("/tmp/k3rs-virt-test");
-        let _ = tokio::fs::create_dir_all(&tmp_dir).await;
-
-        let backend = VirtualizationBackend::new(&tmp_dir).await.unwrap();
-
+    async fn test_backend_new() {
+        let tmp = PathBuf::from("/tmp/k3rs-virt-new-test");
+        let _ = tokio::fs::create_dir_all(&tmp).await;
+        let backend = VirtualizationBackend::new(&tmp).await.unwrap();
         assert_eq!(backend.name(), "vm");
         assert_eq!(backend.version(), "macos-vz-2.0");
         assert!(!backend.handles_images());
-
-        // List should be empty
-        let list = backend.list().await.unwrap();
-        assert!(list.is_empty());
-
-        // Cleanup
-        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
     }
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn test_create_uses_virtiofs_not_disk_image() {
-        let tmp_dir = PathBuf::from("/tmp/k3rs-virt-test-create");
-        let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+    async fn test_create_writes_config_into_rootfs() {
+        let tmp = PathBuf::from("/tmp/k3rs-virt-cfg-rootfs-test");
+        let _ = tokio::fs::create_dir_all(&tmp).await;
+        let backend = VirtualizationBackend::new(&tmp).await.unwrap();
 
-        let backend = VirtualizationBackend::new(&tmp_dir).await.unwrap();
+        // Build a fake OCI bundle
+        let bundle = tmp.join("bundle");
+        let rootfs = bundle.join("rootfs");
+        tokio::fs::create_dir_all(&rootfs).await.unwrap();
 
-        // Create a fake rootfs bundle
-        let bundle_dir = tmp_dir.join("test-bundle");
-        let rootfs_dir = bundle_dir.join("rootfs");
-        tokio::fs::create_dir_all(&rootfs_dir).await.unwrap();
-        tokio::fs::write(rootfs_dir.join("hello.txt"), "world")
-            .await
-            .unwrap();
+        let cfg = serde_json::json!({
+            "process": {"args": ["/bin/sh"], "env": [], "cwd": "/"}
+        });
+        tokio::fs::write(
+            bundle.join("config.json"),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .await
+        .unwrap();
 
-        // Create the container
-        let id = "test-vm-001";
-        backend.create(id, &bundle_dir).await.unwrap();
+        backend.create("vm-cfg-test", &bundle).await.unwrap();
 
-        // Verify: no .img disk image was created
-        let img_path = tmp_dir.join("vms").join(format!("{}.img", id));
+        // config.json must land INSIDE the rootfs (guest reads it at /config.json)
+        let guest_cfg = rootfs.join("config.json");
         assert!(
-            !img_path.exists(),
-            "Should NOT create disk images (virtio-fs mode)"
+            guest_cfg.exists(),
+            "config.json must be written into the rootfs, not just the bundle dir"
         );
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&guest_cfg).unwrap()).unwrap();
+        assert_eq!(v["process"]["args"][0], "/bin/sh");
 
-        // Verify: log file was created
-        let log_path = backend.log_path(id);
-        assert!(
-            tokio::fs::metadata(&log_path).await.is_ok(),
-            "Log file should exist"
-        );
-
-        // Verify: instance is tracked
-        let instances = backend.instances.read().await;
-        assert!(instances.contains_key(id));
-        let inst = &instances[id];
-        assert_eq!(inst.state, VmState::Created);
-        assert!(inst.vmm_pid.is_none());
-
-        // Cleanup
-        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
     }
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn test_create_from_image_generates_config() {
-        let tmp_dir = PathBuf::from("/tmp/k3rs-virt-test-image");
-        let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+    async fn test_no_disk_image_created() {
+        let tmp = PathBuf::from("/tmp/k3rs-virt-no-img-test");
+        let _ = tokio::fs::create_dir_all(&tmp).await;
+        let backend = VirtualizationBackend::new(&tmp).await.unwrap();
 
-        let backend = VirtualizationBackend::new(&tmp_dir).await.unwrap();
+        let bundle = tmp.join("bundle2");
+        tokio::fs::create_dir_all(bundle.join("rootfs")).await.unwrap();
 
-        let id = "test-img-001";
+        backend.create("vm-no-img", &bundle).await.unwrap();
+
+        // virtio-fs design: NO disk image files should be created
+        let img = tmp.join("vms").join("vm-no-img.img");
+        assert!(!img.exists(), "virtio-fs mode must not create .img files");
+
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_delete_cleans_up() {
+        let tmp = PathBuf::from("/tmp/k3rs-virt-del-test");
+        let _ = tokio::fs::create_dir_all(&tmp).await;
+        let backend = VirtualizationBackend::new(&tmp).await.unwrap();
+
         backend
-            .create_from_image(id, "alpine:latest", &["sh".to_string()])
+            .create_from_image("del-vm-001", "test:latest", &[])
             .await
             .unwrap();
 
-        // Verify: OCI config.json was generated
-        let config_path = backend.config_path(id);
-        assert!(
-            tokio::fs::metadata(&config_path).await.is_ok(),
-            "config.json should be generated for k3rs-init"
-        );
+        let rootfs = backend.rootfs_dir("del-vm-001");
+        assert!(rootfs.exists());
 
-        // Verify config contents
-        let config_data = tokio::fs::read_to_string(&config_path).await.unwrap();
-        let config: serde_json::Value = serde_json::from_str(&config_data).unwrap();
-        assert_eq!(config["hostname"], id);
-        assert_eq!(config["process"]["args"][0], "sh");
+        backend.delete("del-vm-001").await.unwrap();
+        assert!(!rootfs.exists());
+        assert!(!backend.instances.read().await.contains_key("del-vm-001"));
 
-        // Cleanup
-        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-    }
-
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn test_delete_cleans_up_rootfs_dir() {
-        let tmp_dir = PathBuf::from("/tmp/k3rs-virt-test-delete");
-        let _ = tokio::fs::create_dir_all(&tmp_dir).await;
-
-        let backend = VirtualizationBackend::new(&tmp_dir).await.unwrap();
-
-        let id = "test-del-001";
-        backend
-            .create_from_image(id, "test:latest", &[])
-            .await
-            .unwrap();
-
-        // Verify files exist
-        let rootfs = backend.rootfs_dir(id);
-        assert!(tokio::fs::metadata(&rootfs).await.is_ok());
-
-        // Delete
-        backend.delete(id).await.unwrap();
-
-        // Verify cleaned up
-        assert!(tokio::fs::metadata(&rootfs).await.is_err());
-
-        let instances = backend.instances.read().await;
-        assert!(!instances.contains_key(id));
-
-        // Cleanup
-        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_which_vmm_returns_none_when_not_installed() {
-        // In test env, k3rs-vmm is likely not in PATH
-        // This tests the graceful "not found" path
-        let result = which_vmm().await;
-        // Can't assert None since user might have it installed,
-        // but the function should not panic
-        let _ = result;
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
     }
 }

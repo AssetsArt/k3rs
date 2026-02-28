@@ -178,11 +178,14 @@ cd "linux-${KERNEL_VERSION}"
 echo "[build-kernel] Step 2/4: Configuring kernel (${KERNEL_ARCH}, minimal + virtio)..."
 make ARCH="$KERNEL_ARCH" defconfig
 
-# Enable virtio drivers needed for k3rs microVMs
+# Enable virtio drivers needed for k3rs microVMs.
+# FUSE_FS and VIRTIO_FS must be built-in (=y, not =m) because the kernel
+# mounts virtiofs as root (`root=virtiofs:rootfs`), which requires in-kernel
+# support before any modules are available.
 scripts/config \
     -e VIRTIO -e VIRTIO_PCI -e VIRTIO_MMIO \
     -e VIRTIO_BLK -e VIRTIO_NET -e VIRTIO_CONSOLE \
-    -e VIRTIOFS -e FUSE \
+    -e FUSE_FS -e VIRTIO_FS \
     -e VIRTIO_VSOCKETS -e VSOCKETS -e VHOST_VSOCK \
     -e NET -e INET -e EXT4_FS -e TMPFS \
     -e DEVTMPFS -e DEVTMPFS_MOUNT \
@@ -268,7 +271,7 @@ make ARCH="$KERNEL_ARCH" defconfig
 scripts/config \
     -e VIRTIO -e VIRTIO_PCI -e VIRTIO_MMIO \
     -e VIRTIO_BLK -e VIRTIO_NET -e VIRTIO_CONSOLE \
-    -e VIRTIOFS -e FUSE \
+    -e FUSE_FS -e VIRTIO_FS \
     -e VIRTIO_VSOCKETS -e VSOCKETS -e VHOST_VSOCK \
     -e NET -e INET -e EXT4_FS -e TMPFS \
     -e DEVTMPFS -e DEVTMPFS_MOUNT \
