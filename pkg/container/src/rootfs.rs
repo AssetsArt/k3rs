@@ -164,18 +164,29 @@ impl RootfsManager {
                         continue;
                     }
 
-                    let dest = rootfs_clone.join(&entry_path);
+                    // Calculate safe destination path, avoiding absolute path traversal.
+                    let mut dest = rootfs_clone.to_path_buf();
+                    for component in entry_path.components() {
+                        if let std::path::Component::Normal(c) = component {
+                            dest.push(c);
+                        }
+                    }
 
-                    // Defer hard links whose target hasn't been extracted yet.
-                    // The tar crate's unpack() calls hard_link(link_src, dest); if link_src
-                    // doesn't exist yet we get ENOENT, so we defer and retry below.
+                    // Always defer hard links. The tar crate's unpack() for EntryType::Link
+                    // uses relative paths from the current working directory, which fails
+                    // when extracting to a nested rootfs. We also need to ensure the source
+                    // file exists, so we collect them and link them in a second pass using
+                    // absolute paths.
                     if entry.header().entry_type() == tar::EntryType::Link {
                         if let Some(link_name) = entry.header().link_name()? {
-                            let link_src = rootfs_clone.join(&*link_name);
-                            if !link_src.exists() {
-                                deferred_hard_links.push((link_src, dest));
-                                continue;
+                            let mut link_src = rootfs_clone.to_path_buf();
+                            for component in link_name.components() {
+                                if let std::path::Component::Normal(c) = component {
+                                    link_src.push(c);
+                                }
                             }
+                            deferred_hard_links.push((link_src, dest));
+                            continue;
                         }
                     }
 
@@ -189,6 +200,11 @@ impl RootfsManager {
                             std::os::unix::fs::PermissionsExt::from_mode(0o644),
                         );
                         let _ = std::fs::remove_file(&dest);
+                    }
+
+                    // Ensure parent directory exists.
+                    if let Some(parent) = dest.parent() {
+                        let _ = std::fs::create_dir_all(parent);
                     }
 
                     if let Err(e) = entry.unpack(&dest) {
@@ -210,6 +226,11 @@ impl RootfsManager {
                         continue; // a later layer or earlier iteration already wrote it
                     }
                     if link_src.exists() {
+                        // Ensure parent directory exists for the hard link.
+                        if let Some(parent) = dest.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+
                         std::fs::hard_link(&link_src, &dest).map_err(|e| {
                             anyhow::anyhow!(
                                 "failed to hard link `{}` -> `{}`: {e}",
@@ -392,7 +413,7 @@ impl RootfsManager {
                   "options": ["nosuid", "noexec", "nodev"] },
                 { "destination": "/sys", "type": "sysfs", "source": "sysfs",
                   "options": ["nosuid", "noexec", "nodev", "ro"] },
-                { "destination": "/sys/fs/cgroup", "type": "cgroup2", "source": "cgroup",
+                { "destination": "/sys/fs/cgroup", "type": "cgroup", "source": "cgroup",
                   "options": ["nosuid", "noexec", "nodev", "relatime", "ro"] }
             ],
             "linux": linux
@@ -583,4 +604,119 @@ mod tests {
         let config: serde_json::Value = serde_json::from_str(&config_str).unwrap();
         assert_eq!(config["process"]["cwd"], "/app");
     }
+}
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use tar::{Builder, Header, EntryType};
+
+#[tokio::test]
+async fn test_extract_hard_links() {
+    let tmp_base = std::env::temp_dir().join(format!("k3rs-test-{}", chrono::Utc::now().timestamp_millis()));
+    let _ = std::fs::remove_dir_all(&tmp_base);
+    std::fs::create_dir_all(&tmp_base).unwrap();
+    let image_dir = tmp_base.join("image");
+    let layers_dir = image_dir.join("layers");
+    std::fs::create_dir_all(&layers_dir).unwrap();
+    
+    let container_dir = tmp_base.join("container");
+    std::fs::create_dir_all(&container_dir).unwrap();
+
+    // Create a layer with a directory and a file, and a hard link to that file.
+    let layer_path = layers_dir.join("layer_0.tar.gz");
+    let file = std::fs::File::create(&layer_path).unwrap();
+    let enc = GzEncoder::new(file, Compression::default());
+    let mut tar = Builder::new(enc);
+
+    // 1. Regular file: usr/bin/perl5.40.1
+    let mut header = Header::new_gnu();
+    let data = b"perl-binary-content";
+    header.set_size(data.len() as u64);
+    header.set_mode(0o755);
+    tar.append_data(&mut header, "usr/bin/perl5.40.1", &data[..]).unwrap();
+
+    // 2. Hard link: usr/bin/perl -> usr/bin/perl5.40.1
+    let mut header = Header::new_gnu();
+    header.set_entry_type(EntryType::Link);
+    header.set_link_name("usr/bin/perl5.40.1").unwrap();
+    header.set_size(0);
+    tar.append_data(&mut header, "usr/bin/perl", &[][..]).unwrap();
+
+    tar.into_inner().unwrap().finish().unwrap();
+
+    // Also need a config.json because parse_image_workdir looks for it (though we don't call it here)
+    std::fs::write(image_dir.join("config.json"), "{}").unwrap();
+
+    // Extract
+    let result = RootfsManager::extract(&image_dir, &container_dir).await;
+    assert!(result.is_ok(), "Extraction failed: {:?}", result.err());
+
+    let rootfs = result.unwrap();
+    assert!(rootfs.join("usr/bin/perl5.40.1").exists());
+    assert!(rootfs.join("usr/bin/perl").exists());
+    
+    // Verify it's a hard link (same inode)
+    let meta1 = std::fs::metadata(rootfs.join("usr/bin/perl5.40.1")).unwrap();
+    let meta2 = std::fs::metadata(rootfs.join("usr/bin/perl")).unwrap();
+    
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(meta1.ino(), meta2.ino());
+    }
+    let _ = std::fs::remove_dir_all(&tmp_base);
+}
+
+#[tokio::test]
+async fn test_extract_hard_links_deferred() {
+    let tmp_base = std::env::temp_dir().join(format!("k3rs-test-deferred-{}", chrono::Utc::now().timestamp_millis()));
+    let _ = std::fs::remove_dir_all(&tmp_base);
+    std::fs::create_dir_all(&tmp_base).unwrap();
+    let image_dir = tmp_base.join("image");
+    let layers_dir = image_dir.join("layers");
+    std::fs::create_dir_all(&layers_dir).unwrap();
+    
+    let container_dir = tmp_base.join("container");
+    std::fs::create_dir_all(&container_dir).unwrap();
+
+    // Create a layer where the hard link comes BEFORE the target file.
+    let layer_path = layers_dir.join("layer_0.tar.gz");
+    let file = std::fs::File::create(&layer_path).unwrap();
+    let enc = GzEncoder::new(file, Compression::default());
+    let mut tar = Builder::new(enc);
+
+    // 1. Hard link: usr/bin/perl -> usr/bin/perl5.40.1 (Target doesn't exist yet!)
+    let mut header = Header::new_gnu();
+    header.set_entry_type(EntryType::Link);
+    header.set_link_name("usr/bin/perl5.40.1").unwrap();
+    header.set_size(0);
+    tar.append_data(&mut header, "usr/bin/perl", &[][..]).unwrap();
+
+    // 2. Regular file: usr/bin/perl5.40.1
+    let mut header = Header::new_gnu();
+    let data = b"perl-binary-content";
+    header.set_size(data.len() as u64);
+    header.set_mode(0o755);
+    tar.append_data(&mut header, "usr/bin/perl5.40.1", &data[..]).unwrap();
+
+    tar.into_inner().unwrap().finish().unwrap();
+    std::fs::write(image_dir.join("config.json"), "{}").unwrap();
+
+    // Extract
+    let result = RootfsManager::extract(&image_dir, &container_dir).await;
+    assert!(result.is_ok(), "Extraction failed: {:?}", result.err());
+
+    let rootfs = result.unwrap();
+    assert!(rootfs.join("usr/bin/perl5.40.1").exists());
+    assert!(rootfs.join("usr/bin/perl").exists());
+    
+    // Verify it's a hard link (same inode)
+    let meta1 = std::fs::metadata(rootfs.join("usr/bin/perl5.40.1")).unwrap();
+    let meta2 = std::fs::metadata(rootfs.join("usr/bin/perl")).unwrap();
+    
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(meta1.ino(), meta2.ino());
+    }
+    let _ = std::fs::remove_dir_all(&tmp_base);
 }
