@@ -279,6 +279,7 @@ impl RootfsManager {
         working_dir: Option<&str>,
         network_mode: NetworkMode,
     ) -> Result<String> {
+        let _network_mode = network_mode;
         // Resolve command: pod spec > image entrypoint+cmd > /bin/sh
         let cmd: Vec<String> = if !command.is_empty() {
             command.to_vec()
@@ -345,6 +346,7 @@ impl RootfsManager {
             "CAP_FOWNER",
             "CAP_MKNOD",
             "CAP_NET_RAW",
+            "CAP_NET_ADMIN",
             "CAP_SETGID",
             "CAP_SETUID",
             "CAP_SETFCAP",
@@ -356,20 +358,17 @@ impl RootfsManager {
         ]);
 
         // Build namespaces
-        let mut namespaces = vec![
+        let namespaces = vec![
             serde_json::json!({ "type": "pid" }),
             serde_json::json!({ "type": "ipc" }),
             serde_json::json!({ "type": "uts" }),
             serde_json::json!({ "type": "mount" }),
             serde_json::json!({ "type": "cgroup" }),
             serde_json::json!({ "type": "user" }),
+            serde_json::json!({ "type": "network" }), // Always isolated for rootless port binding
         ];
 
-        if network_mode == NetworkMode::Isolated {
-            namespaces.push(serde_json::json!({ "type": "network" }));
-        }
-
-        // Create basic Linux section with user namespace mapping
+        // Create basic Linux section with user namespace mapping and sysctls
         let mut uid_mappings = vec![
             serde_json::json!({ "hostID": host_uid(), "containerID": 0, "size": 1 })
         ];
@@ -380,8 +379,6 @@ impl RootfsManager {
         // If running as non-root, try to add subordinate mappings from /etc/subuid for nginx etc.
         if !is_root() {
             // Mapping for common service UIDs (1-1000) using subuids
-            // For a production runtime, we would parse /etc/subuid properly.
-            // In this environment, we know detoro has 524288:65536.
             uid_mappings.push(serde_json::json!({ "hostID": 524288, "containerID": 1, "size": 1000 }));
             gid_mappings.push(serde_json::json!({ "hostID": 524288, "containerID": 1, "size": 1000 }));
         }
@@ -390,6 +387,9 @@ impl RootfsManager {
             "namespaces": namespaces,
             "uidMappings": uid_mappings,
             "gidMappings": gid_mappings,
+            "sysctl": {
+                "net.ipv4.ip_unprivileged_port_start": "0"
+            },
             "maskedPaths": [
                 "/proc/acpi", "/proc/asound", "/proc/kcore", "/proc/keys",
                 "/proc/latency_stats", "/proc/timer_list", "/proc/timer_stats",
@@ -569,9 +569,11 @@ mod tests {
         assert!(ns_types.contains(&"pid"));
         assert!(ns_types.contains(&"mount"));
         assert!(ns_types.contains(&"user"));
+        assert!(ns_types.contains(&"network"));
 
         assert!(config["linux"]["uidMappings"].is_array());
         assert!(config["linux"]["gidMappings"].is_array());
+        assert_eq!(config["linux"]["sysctl"]["net.ipv4.ip_unprivileged_port_start"], "0");
     }
 
     #[test]
@@ -592,7 +594,8 @@ mod tests {
             .iter()
             .map(|n| n["type"].as_str().unwrap())
             .collect();
-        assert!(!ns_types.contains(&"network"));
+        // Now always contains network namespace for rootless support
+        assert!(ns_types.contains(&"network"));
     }
 
     #[test]
