@@ -347,6 +347,7 @@ impl RootfsManager {
             "CAP_MKNOD",
             "CAP_NET_RAW",
             "CAP_NET_ADMIN",
+            "CAP_SYS_ADMIN", // Added for youki compatibility
             "CAP_SETGID",
             "CAP_SETUID",
             "CAP_SETFCAP",
@@ -358,15 +359,21 @@ impl RootfsManager {
         ]);
 
         // Build namespaces
-        let namespaces = vec![
+        let mut namespaces = vec![
             serde_json::json!({ "type": "pid" }),
             serde_json::json!({ "type": "ipc" }),
             serde_json::json!({ "type": "uts" }),
             serde_json::json!({ "type": "mount" }),
-            serde_json::json!({ "type": "cgroup" }),
             serde_json::json!({ "type": "user" }),
             serde_json::json!({ "type": "network" }), // Always isolated for rootless port binding
         ];
+
+        // Only add cgroup namespace if running as root.
+        // In rootless mode, many systems don't have cgroup v2 delegation enabled
+        // for non-root users, leading to permission denied errors.
+        if is_root() {
+            namespaces.push(serde_json::json!({ "type": "cgroup" }));
+        }
 
         // Create basic Linux section with user namespace mapping and sysctls
         let mut uid_mappings = vec![
@@ -400,6 +407,33 @@ impl RootfsManager {
             ]
         });
 
+        let mut mounts = vec![
+            serde_json::json!({ "destination": "/proc", "type": "proc", "source": "proc" }),
+            serde_json::json!({ "destination": "/dev", "type": "tmpfs", "source": "tmpfs",
+              "options": ["nosuid", "strictatime", "mode=755", "size=65536k"] }),
+            serde_json::json!({ "destination": "/dev/pts", "type": "devpts", "source": "devpts",
+              "options": ["nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"] }),
+            serde_json::json!({ "destination": "/dev/shm", "type": "tmpfs", "source": "shm",
+              "options": ["nosuid", "noexec", "nodev", "mode=1777", "size=65536k"] }),
+            serde_json::json!({ "destination": "/dev/mqueue", "type": "mqueue", "source": "mqueue",
+              "options": ["nosuid", "noexec", "nodev"] }),
+            serde_json::json!({ "destination": "/sys", "type": "sysfs", "source": "sysfs",
+              "options": ["nosuid", "noexec", "nodev", "ro"] }),
+            serde_json::json!({ "destination": "/tmp", "type": "tmpfs", "source": "tmpfs",
+              "options": ["nosuid", "nodev", "mode=1777", "size=65536k"] }),
+            serde_json::json!({ "destination": "/run", "type": "tmpfs", "source": "tmpfs",
+              "options": ["nosuid", "nodev", "mode=755", "size=65536k"] }),
+        ];
+
+        if is_root() {
+            mounts.push(serde_json::json!({
+                "destination": "/sys/fs/cgroup",
+                "type": "cgroup",
+                "source": "cgroup",
+                "options": ["nosuid", "noexec", "nodev", "relatime", "ro"]
+            }));
+        }
+
         let config = serde_json::json!({
             "ociVersion": "1.0.2",
             "process": {
@@ -420,25 +454,7 @@ impl RootfsManager {
             },
             "root": { "path": "rootfs", "readonly": false },
             "hostname": container_id,
-            "mounts": [
-                { "destination": "/proc", "type": "proc", "source": "proc" },
-                { "destination": "/dev", "type": "tmpfs", "source": "tmpfs",
-                  "options": ["nosuid", "strictatime", "mode=755", "size=65536k"] },
-                { "destination": "/dev/pts", "type": "devpts", "source": "devpts",
-                  "options": ["nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"] },
-                { "destination": "/dev/shm", "type": "tmpfs", "source": "shm",
-                  "options": ["nosuid", "noexec", "nodev", "mode=1777", "size=65536k"] },
-                { "destination": "/dev/mqueue", "type": "mqueue", "source": "mqueue",
-                  "options": ["nosuid", "noexec", "nodev"] },
-                { "destination": "/sys", "type": "sysfs", "source": "sysfs",
-                  "options": ["nosuid", "noexec", "nodev", "ro"] },
-                { "destination": "/sys/fs/cgroup", "type": "cgroup", "source": "cgroup",
-                  "options": ["nosuid", "noexec", "nodev", "relatime", "ro"] },
-                { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs",
-                  "options": ["nosuid", "nodev", "mode=1777", "size=65536k"] },
-                { "destination": "/run", "type": "tmpfs", "source": "tmpfs",
-                  "options": ["nosuid", "nodev", "mode=755", "size=65536k"] }
-            ],
+            "mounts": mounts,
             "linux": linux
         });
 

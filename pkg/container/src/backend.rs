@@ -101,19 +101,8 @@ impl OciBackend {
     pub fn detect(data_dir: &std::path::Path) -> Result<Self> {
         // Try youki then crun
         for name in &["youki", "crun"] {
-            // 1. Check PATH
-            if let Ok(output) = std::process::Command::new("which").arg(name).output()
-                && output.status.success()
-            {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                return Ok(Self::new(&path, data_dir));
-            }
-
-            // 2. Check k3rs install directories
-            let install_dir = crate::installer::RuntimeInstaller::install_dir();
-            let path = install_dir.join(name);
-            if path.exists() {
-                return Ok(Self::new(&path.to_string_lossy(), data_dir));
+            if let Ok(oci) = Self::with_name(name, data_dir) {
+                return Ok(oci);
             }
         }
 
@@ -131,52 +120,21 @@ impl OciBackend {
             && output.status.success()
         {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let version = Self::get_version(&path);
-            tracing::info!("Using OCI runtime: {} at {} ({})", name, path, version);
-            return Ok(Self {
-                runtime_path: path,
-                runtime_name: name.to_string(),
-                runtime_version: version,
-                log_dir: data_dir.join("logs"),
-                state_dir: data_dir.join("state"),
-            });
+            return Ok(Self::new(&path, data_dir));
         }
 
-        // 2. Search installer directories for auto-downloaded runtimes.
-        let mut search_dirs: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from(
-            pkg_constants::paths::RUNTIME_INSTALL_DIR,
-        )];
-        if let Ok(home) = std::env::var("HOME") {
-            search_dirs.push(
-                std::path::PathBuf::from(home).join(pkg_constants::paths::RUNTIME_FALLBACK_DIR),
-            );
-        }
-
-        for dir in &search_dirs {
-            let candidate = dir.join(name);
-            if candidate.exists() {
-                let path = candidate.to_string_lossy().to_string();
-                let version = Self::get_version(&path);
-                tracing::info!(
-                    "Using auto-downloaded OCI runtime: {} at {} ({})",
-                    name,
-                    path,
-                    version
-                );
-                return Ok(Self {
-                    runtime_path: path,
-                    runtime_name: name.to_string(),
-                    runtime_version: version,
-                    log_dir: data_dir.join("logs"),
-                    state_dir: data_dir.join("state"),
-                });
-            }
+        // 2. Search installer directory for auto-downloaded runtimes.
+        let install_dir = crate::installer::RuntimeInstaller::install_dir();
+        let candidate = install_dir.join(name);
+        if candidate.exists() {
+            let path = candidate.to_string_lossy().to_string();
+            return Ok(Self::new(&path, data_dir));
         }
 
         Err(anyhow::anyhow!(
-            "OCI runtime {} not found in PATH or {:?}",
+            "OCI runtime {} not found in PATH or {}",
             name,
-            search_dirs
+            install_dir.display()
         ))
     }
 
@@ -246,6 +204,18 @@ impl OciBackend {
         let mut cmd = tokio::process::Command::new(&self.runtime_path);
         // Use a custom root directory for state — avoids permission issues
         cmd.arg("--root").arg(&self.state_dir);
+
+        // Rootless cgroup fixes
+        if unsafe { libc::geteuid() != 0 } {
+            if self.runtime_name == "crun" {
+                // In rootless mode without systemd delegation, crun can skip cgroup management.
+                cmd.arg("--cgroup-manager").arg("none");
+            } else if self.runtime_name == "youki" {
+                // youki works best with systemd-cgroup in rootless environments like Fedora.
+                cmd.arg("--systemd-cgroup");
+            }
+        }
+
         cmd
     }
 }
@@ -284,22 +254,21 @@ impl RuntimeBackend for OciBackend {
             .open(&log_path)?;
         let stderr_file = stdout_file.try_clone()?;
 
-        let status = self
-            .cmd()
-            .args([
-                "--log",
-                &runtime_log.to_string_lossy(),
-                "create",
-                "--bundle",
-                &bundle.to_string_lossy(),
-                "--pid-file",
-                &pid_file.to_string_lossy(),
-                id,
-            ])
-            .stdout(stdout_file)
-            .stderr(stderr_file)
-            .status()
-            .await?;
+        let mut command = self.cmd();
+        command.args([
+            "--log",
+            &runtime_log.to_string_lossy(),
+            "create",
+            "--bundle",
+            &bundle.to_string_lossy(),
+            "--pid-file",
+            &pid_file.to_string_lossy(),
+            id,
+        ])
+        .stdout(stdout_file)
+        .stderr(stderr_file);
+
+        let status = command.status().await?;
 
         if !status.success() {
             let stderr = tokio::fs::read_to_string(&log_path)
