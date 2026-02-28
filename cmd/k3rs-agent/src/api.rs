@@ -157,6 +157,7 @@ async fn handle_tty(
             "--net".to_string(),
             "--mount".to_string(),
             "--user".to_string(),
+            "--preserve-credentials".to_string(),
             "--".to_string(),
         ];
         if command.is_empty() {

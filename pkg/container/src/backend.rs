@@ -411,6 +411,10 @@ impl RuntimeBackend for OciBackend {
                 "--net".to_string(),
                 "--mount".to_string(),
                 "--user".to_string(),
+                // Rootless containers set /proc/<pid>/setgroups to "deny", so
+                // nsenter must not call setgroups(). --preserve-credentials skips
+                // the uid/gid/setgroups changes when entering the user namespace.
+                "--preserve-credentials".to_string(),
                 "--".to_string(),
             ];
             args.extend(command.iter().map(|s| s.to_string()));
@@ -475,6 +479,7 @@ impl RuntimeBackend for OciBackend {
                 "--net".to_string(),
                 "--mount".to_string(),
                 "--user".to_string(),
+                "--preserve-credentials".to_string(),
                 "--".to_string(),
             ];
             if command.is_empty() {
