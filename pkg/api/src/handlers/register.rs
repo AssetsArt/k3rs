@@ -71,7 +71,7 @@ pub async fn register_node(
             last_heartbeat: now,
             labels: payload.labels.clone(),
             taints: vec![],
-            capacity: ResourceRequirements::default(),
+            capacity: payload.capacity.unwrap_or_default(),
             allocated: ResourceRequirements::default(),
             unschedulable: false,
         }

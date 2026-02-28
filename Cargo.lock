@@ -3680,6 +3680,7 @@ dependencies = [
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "sysinfo 0.38.0",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -95,10 +95,30 @@ async fn main() -> anyhow::Result<()> {
         .danger_accept_invalid_certs(true) // For development
         .build()?;
 
+    // Detect real machine resources to report as node capacity.
+    let capacity = {
+        use sysinfo::System;
+        let mut sys = System::new_all();
+        sys.refresh_all();
+        let cpu_millis = (sys.cpus().len() as u64) * 1000;
+        let memory_bytes = sys.total_memory(); // bytes
+        info!(
+            "Detected machine capacity: {} vCPU ({} millicores), {:.1} GiB RAM",
+            sys.cpus().len(),
+            cpu_millis,
+            memory_bytes as f64 / 1_073_741_824.0
+        );
+        pkg_types::pod::ResourceRequirements {
+            cpu_millis,
+            memory_bytes,
+        }
+    };
+
     let req = NodeRegistrationRequest {
         token: token.clone(),
         node_name: node_name.clone(),
         labels: HashMap::new(),
+        capacity: Some(capacity),
     };
 
     let url = format!("{}/register", server.trim_end_matches('/'));

@@ -12,6 +12,9 @@ pub struct NodeRegistrationRequest {
     pub node_name: String,
     #[serde(default)]
     pub labels: HashMap<String, String>,
+    /// Real CPU/memory capacity reported by the agent at registration time.
+    #[serde(default)]
+    pub capacity: Option<ResourceRequirements>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
