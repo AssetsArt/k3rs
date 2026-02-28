@@ -148,10 +148,12 @@ async fn handle_tty(
 
     if let Some(pid) = container_pid {
         // nsenter: enters the container's namespaces by PID, no cgroup interaction needed.
+        // --pid intentionally omitted: nsenter forks when crossing PID namespace
+        // boundaries, orphaning the session created in pre_exec and causing
+        // tcsetpgrp() to fail with ESRCH when the shell exits.
         cmd_args_owned = vec![
             "--target".to_string(),
             pid.to_string(),
-            "--pid".to_string(),
             "--uts".to_string(),
             "--ipc".to_string(),
             "--net".to_string(),
@@ -201,6 +203,11 @@ async fn handle_tty(
                 // Make the slave PTY the controlling terminal of this session.
                 // Without this, shells print "can't access tty" and disable job control.
                 libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0);
+                // Set the initial foreground process group to this process's own
+                // pgroup (= PID after setsid). Shells save tcgetpgrp() on startup
+                // and restore it on exit; seeding it here ensures they restore a
+                // valid pgroup and don't print "Cannot set tty process group".
+                libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpgrp());
                 Ok(())
             })
             .spawn()
