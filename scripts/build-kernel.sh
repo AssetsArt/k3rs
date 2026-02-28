@@ -86,6 +86,12 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Make OUTPUT_DIR absolute (it may be relative to project root)
+case "$OUTPUT_DIR" in
+    /*) ;; # already absolute
+    *)  OUTPUT_DIR="${PROJECT_ROOT}/${OUTPUT_DIR}" ;;
+esac
+
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║  k3rs kernel builder                                    ║"
 echo "╠══════════════════════════════════════════════════════════╣"
