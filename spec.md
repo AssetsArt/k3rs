@@ -599,7 +599,9 @@ impl AgentStore {
 - [x] Remove `ContainerRuntime` from Server — Server is pure Control Plane
 - [x] Remove server lock file system (lock file write/cleanup, colocation guard)
 - [x] Update dev scripts (`dev.sh`, `dev-agent.sh`) — remove colocation flags
-- [x] Agent exponential backoff on Server disconnect (1s → 2s → 4s → … → 30s cap) — implemented in `ConnectivityManager::backoff_duration()` (`cmd/k3rs-agent/src/connectivity.rs`); heartbeat uses backoff on failure, registration retry uses backoff
+- [x] Agent exponential backoff on Server disconnect (1s → 2s → 4s → 8s → 16s → 30s cap) — `ConnectivityManager::backoff_duration()` (`cmd/k3rs-agent/src/connectivity.rs`); two bugs fixed:
+  - **Off-by-one in heartbeat loop**: `fail_count` is 1-based after first failure; fixed by passing `fail_count.saturating_sub(1)` to convert to 0-based index → first retry now fires after 1s (was 2s)
+  - **Shift overflow panic**: `1u64 << attempt` panics when `attempt ≥ 64` (reconnect loop increments unboundedly); fixed by capping shift index at 30 (`attempt.min(30)`) before the left-shift
 - [x] Agent: continue running containers when Server unreachable — containers are independent OS processes; pod sync loop uses `continue` on server error, leaving running containers untouched
 
 #### Agent Local State Cache
