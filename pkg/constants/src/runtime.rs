@@ -19,7 +19,7 @@ pub const DEFAULT_CPU_COUNT: u32 = 1;
 pub const DEFAULT_MEMORY_MB: u64 = 256;
 
 /// Version of Firecracker to download when not found in PATH.
-pub const FIRECRACKER_VERSION: &str = "1.12.0";
+pub const FIRECRACKER_VERSION: &str = "1.14.2";
 
 /// Default guest CID for Firecracker vsock (must be >= 3).
 /// CID 0 = hypervisor, CID 1 = loopback, CID 2 = host.
