@@ -419,22 +419,47 @@ impl ContainerRuntime {
         self.backend.list().await
     }
 
-    /// Discover running containers from the backend and populate the state store.
+    /// Discover running containers from all backends and populate the state store.
     pub async fn discover_running_containers(&self) -> Result<Vec<String>> {
-        info!(
-            "Discovering running containers from {} backend...",
-            self.backend.name()
-        );
         let mut discovered = Vec::new();
 
-        let ids = self.backend.list().await.unwrap_or_default();
+        // Discover from default backend (OCI)
+        self.discover_from_backend(&self.backend, &mut discovered)
+            .await;
+
+        // Discover from VM backend (Firecracker/Virtualization.framework)
+        // if it was previously initialized. The FC backend's list() calls
+        // restore_from_pid_files() which recovers VMs that survived agent restart.
+        if let Ok(vm) = self.get_or_init_vm_backend().await {
+            if !Arc::ptr_eq(&self.backend, &vm) {
+                self.discover_from_backend(&vm, &mut discovered).await;
+            }
+        }
+
+        info!("Discovered {} running/created containers", discovered.len());
+        Ok(discovered)
+    }
+
+    /// Discover running containers from a single backend and track them in the store.
+    async fn discover_from_backend(
+        &self,
+        backend: &Arc<dyn RuntimeBackend>,
+        discovered: &mut Vec<String>,
+    ) {
+        info!(
+            "Discovering running containers from {} backend...",
+            backend.name()
+        );
+        let ids = backend.list().await.unwrap_or_default();
         for id in ids {
-            match self.backend.state(&id).await {
+            match backend.state(&id).await {
                 Ok(state_info) => {
                     if state_info.status == "running" || state_info.status == "created" {
                         info!(
-                            "Discovered container: {} (status: {})",
-                            id, state_info.status
+                            "Discovered container: {} (status: {}, backend: {})",
+                            id,
+                            state_info.status,
+                            backend.name()
                         );
 
                         let bundle_path = state_info.bundle.clone();
@@ -443,7 +468,7 @@ impl ContainerRuntime {
                         self.store.track(
                             &id,
                             "recovered",
-                            self.backend.name(),
+                            backend.name(),
                             &bundle_path,
                             &log_path.to_string_lossy(),
                         );
@@ -458,13 +483,14 @@ impl ContainerRuntime {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to get state for discovered container {}: {}", id, e);
+                    tracing::warn!(
+                        "Failed to get state for discovered container {}: {}",
+                        id,
+                        e
+                    );
                 }
             }
         }
-
-        info!("Discovered {} running/created containers", discovered.len());
-        Ok(discovered)
     }
 
     /// Get logs from a container.
