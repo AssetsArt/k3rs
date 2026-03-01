@@ -1,13 +1,16 @@
+//! AgentStateCache — in-memory representation of Agent state.
+//!
+//! Loaded from `AgentStore` on startup, written back after every successful
+//! server sync. `AgentStore` (SlateDB) owns persistence; this struct is
+//! purely the in-memory view passed through `Arc<RwLock<AgentStateCache>>`.
+
 use chrono::{DateTime, Utc};
 use pkg_types::{endpoint::Endpoint, ingress::Ingress, pod::Pod, service::Service};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Write;
-use std::path::Path;
-use tracing::info;
 
-/// Persisted to `<DATA_DIR>/agent/state.json` after every successful server sync.
-/// Single source of truth for offline operation.
+/// In-memory representation of Agent state.
+/// Persisted to AgentStore (SlateDB) after every successful server sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentStateCache {
     pub node_name: String,
@@ -29,38 +32,6 @@ pub struct AgentStateCache {
     pub endpoints: Vec<Endpoint>,
     /// All Ingress rules.
     pub ingresses: Vec<Ingress>,
-}
-
-fn cache_dir() -> String {
-    format!("{}/agent", pkg_constants::paths::DATA_DIR)
-}
-
-pub fn state_path() -> String {
-    format!("{}/state.json", cache_dir())
-}
-
-pub fn routes_path() -> String {
-    format!("{}/routes.json", cache_dir())
-}
-
-pub fn dns_path() -> String {
-    format!("{}/dns-records.json", cache_dir())
-}
-
-/// Write data to a file atomically: write to .tmp → fsync → rename.
-fn atomic_write(path: &str, data: &[u8]) -> anyhow::Result<()> {
-    let tmp_path = format!("{}.tmp", path);
-
-    if let Some(parent) = Path::new(path).parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let mut file = std::fs::File::create(&tmp_path)?;
-    file.write_all(data)?;
-    file.sync_all()?;
-
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
 }
 
 impl AgentStateCache {
@@ -86,42 +57,12 @@ impl AgentStateCache {
             .num_seconds()
     }
 
-    /// Atomically write the full state to state.json.
-    pub fn save(&self) -> anyhow::Result<()> {
-        let data = serde_json::to_vec_pretty(self)?;
-        atomic_write(&state_path(), &data)?;
-        info!(
-            "Cache saved: {} pods, {} services, {} endpoints",
-            self.pods.len(),
-            self.services.len(),
-            self.endpoints.len()
-        );
-        Ok(())
-    }
-
-    /// Load state from state.json. Returns None if file does not exist.
-    pub fn load() -> anyhow::Result<Option<Self>> {
-        let path = state_path();
-        let data = match std::fs::read_to_string(&path) {
-            Ok(d) => d,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        let cache: Self = serde_json::from_str(&data)?;
-        info!(
-            "Cache loaded: {} pods, {} services, {} endpoints (last synced: {})",
-            cache.pods.len(),
-            cache.services.len(),
-            cache.endpoints.len(),
-            cache.last_synced_at,
-        );
-        Ok(Some(cache))
-    }
-
-    /// Derive routing table from cached services and endpoints,
-    /// matching the logic in `ServiceProxy::update_routes()`.
-    /// Writes routes.json atomically and returns the routes HashMap.
-    pub fn derive_routes(&self) -> anyhow::Result<HashMap<String, Vec<String>>> {
+    /// Derive routing table from cached services + endpoints.
+    /// Returns `HashMap<"ClusterIP:port", Vec<"backendIP:targetPort">>`.
+    ///
+    /// This is a pure computation — no I/O. Called by `AgentStore::save()`
+    /// to write the derived `/agent/routes` key in the same `WriteBatch`.
+    pub fn derive_routes_map(&self) -> HashMap<String, Vec<String>> {
         let mut routes: HashMap<String, Vec<String>> = HashMap::new();
 
         for svc in &self.services {
@@ -152,16 +93,15 @@ impl AgentStateCache {
             }
         }
 
-        let data = serde_json::to_vec_pretty(&routes)?;
-        atomic_write(&routes_path(), &data)?;
-        info!("Derived routes.json: {} routes", routes.len());
-        Ok(routes)
+        routes
     }
 
-    /// Derive DNS records from cached services,
-    /// matching the logic in `DnsServer::update_records()`.
-    /// Writes dns-records.json atomically and returns the records HashMap.
-    pub fn derive_dns(&self) -> anyhow::Result<HashMap<String, String>> {
+    /// Derive DNS records from cached services.
+    /// Returns `HashMap<"name.ns.svc.cluster.local", "ClusterIP">`.
+    ///
+    /// This is a pure computation — no I/O. Called by `AgentStore::save()`
+    /// to write the derived `/agent/dns-records` key in the same `WriteBatch`.
+    pub fn derive_dns_map(&self) -> HashMap<String, String> {
         let domain_suffix = "svc.cluster.local";
         let mut records: HashMap<String, String> = HashMap::new();
 
@@ -172,9 +112,6 @@ impl AgentStateCache {
             }
         }
 
-        let data = serde_json::to_vec_pretty(&records)?;
-        atomic_write(&dns_path(), &data)?;
-        info!("Derived dns-records.json: {} records", records.len());
-        Ok(records)
+        records
     }
 }

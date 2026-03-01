@@ -1,6 +1,7 @@
 mod api;
 mod cache;
 mod connectivity;
+mod store;
 
 use cache::AgentStateCache;
 use chrono::Utc;
@@ -15,6 +16,7 @@ use pkg_types::node::{NodeRegistrationRequest, NodeRegistrationResponse};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use store::AgentStore;
 use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
@@ -199,12 +201,22 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting k3rs-agent for node: {}", node_name);
 
     // =========================================================================
-    // Phase A: Load cache (before any network IO)
+    // Phase A: Open AgentStore (SlateDB) and load cached state
     // =========================================================================
-    let cached = match AgentStateCache::load() {
+    let store = match AgentStore::open(pkg_constants::paths::DATA_DIR).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Failed to open AgentStore, starting fresh: {}", e);
+            // Re-open at a temp path so the rest of the code still has a store.
+            // In practice this should never happen on a well-formed filesystem.
+            AgentStore::open("/tmp/k3rs-agent-fallback").await?
+        }
+    };
+
+    let cached = match store.load().await {
         Ok(c) => c,
         Err(e) => {
-            warn!("Failed to load cache, starting fresh: {}", e);
+            warn!("Failed to load from AgentStore, starting fresh: {}", e);
             None
         }
     };
@@ -225,27 +237,30 @@ async fn main() -> anyhow::Result<()> {
     let service_proxy = Arc::new(ServiceProxy::new(service_proxy_port));
     service_proxy.start().await?;
 
-    // Load cached routes if available
-    if has_cache {
-        match service_proxy.load_from_file(&cache::routes_path()).await {
-            Ok(n) => info!("ServiceProxy pre-loaded {} cached routes", n),
-            Err(e) => warn!("Failed to load cached routes: {}", e),
-        }
+    // Pre-populate routes from cached services/endpoints if available.
+    // Uses the same update_routes() path as the live sync loop — no file I/O.
+    if let Some(ref c) = cached {
+        service_proxy.update_routes(&c.services, &c.endpoints).await;
+        info!(
+            "ServiceProxy pre-loaded {} cached services as routes",
+            c.services.len()
+        );
     }
 
     // Start the embedded DNS server.
     // UdpSocket::bind(0.0.0.0:5353) on macOS can hang because mDNSResponder
-    // holds the port. We load cached records into the in-memory table first
-    // (no socket needed), then start the listener in a background task.
+    // holds the port. We pre-populate the in-memory record table first (no
+    // socket needed), then start the listener in a background task.
     let dns_addr: SocketAddr = format!("0.0.0.0:{}", dns_port).parse()?;
     let dns_server = Arc::new(DnsServer::new(dns_addr));
 
-    // Pre-populate records before start so the DNS task has them immediately
-    if has_cache {
-        match dns_server.load_from_file(&cache::dns_path()).await {
-            Ok(n) => info!("DnsServer pre-loaded {} cached records", n),
-            Err(e) => warn!("Failed to load cached DNS records: {}", e),
-        }
+    // Pre-populate DNS records from cached services if available.
+    if let Some(ref c) = cached {
+        dns_server.update_records(&c.services).await;
+        info!(
+            "DnsServer pre-loaded {} cached services as DNS records",
+            c.services.len()
+        );
     }
 
     // Start DNS listener in background — never block main startup on port bind
@@ -323,11 +338,14 @@ async fn main() -> anyhow::Result<()> {
         Ok(new_identity) => {
             connectivity.set_connected();
             if let Some((node_id, api_port)) = new_identity {
-                let mut c = cache.write().unwrap();
-                c.node_id = Some(node_id);
-                c.agent_api_port = Some(api_port);
-                if let Err(e) = c.save() {
-                    warn!("Failed to save cache after registration: {}", e);
+                {
+                    let mut c = cache.write().unwrap();
+                    c.node_id = Some(node_id);
+                    c.agent_api_port = Some(api_port);
+                }
+                let snapshot = cache.read().unwrap().clone();
+                if let Err(e) = store.save(&snapshot).await {
+                    warn!("Failed to save to AgentStore after registration: {}", e);
                 }
             }
         }
@@ -444,6 +462,7 @@ async fn main() -> anyhow::Result<()> {
     let ctrl_conn = connectivity.clone();
     let ctrl_reg_req = reg_req.clone();
     let ctrl_node_name = node_name.clone();
+    let ctrl_store = store.clone();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -613,6 +632,7 @@ async fn main() -> anyhow::Result<()> {
             let rc_node_name = ctrl_node_name.clone();
             let rc_cache = ctrl_cache.clone();
             let rc_conn = ctrl_conn.clone();
+            let rc_store = ctrl_store.clone();
             tokio::spawn(async move {
                 let mut attempt = 0u32;
                 loop {
@@ -640,11 +660,14 @@ async fn main() -> anyhow::Result<()> {
                         Ok(new_identity) => {
                             info!("Reconnected to server after {} attempts", attempt + 1);
                             if let Some((node_id, api_port)) = new_identity {
-                                let mut c = rc_cache.write().unwrap();
-                                c.node_id = Some(node_id);
-                                c.agent_api_port = Some(api_port);
-                                if let Err(e) = c.save() {
-                                    warn!("Failed to save cache after reconnect: {}", e);
+                                {
+                                    let mut c = rc_cache.write().unwrap();
+                                    c.node_id = Some(node_id);
+                                    c.agent_api_port = Some(api_port);
+                                }
+                                let snapshot = rc_cache.read().unwrap().clone();
+                                if let Err(e) = rc_store.save(&snapshot).await {
+                                    warn!("Failed to save to AgentStore after reconnect: {}", e);
                                 }
                             }
                             rc_conn.set_connected();
@@ -669,6 +692,7 @@ async fn main() -> anyhow::Result<()> {
             let sync_node_name = ctrl_node_name.clone();
             let sync_cache = ctrl_cache.clone();
             let sync_conn = ctrl_conn.clone();
+            let sync_store = ctrl_store.clone();
             let in_flight: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
                 std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
             tokio::spawn(async move {
@@ -708,14 +732,15 @@ async fn main() -> anyhow::Result<()> {
 
                     match resp.json::<Vec<pkg_types::pod::Pod>>().await {
                         Ok(pods) => {
-                            // Update cache with fetched pods
+                            // Update in-memory cache with fetched pods (outside lock for save)
                             {
                                 let mut c = sync_cache.write().unwrap();
                                 c.pods = pods.clone();
                                 c.last_synced_at = Utc::now();
-                                if let Err(e) = c.save() {
-                                    warn!("Failed to save cache after pod sync: {}", e);
-                                }
+                            }
+                            let snapshot = sync_cache.read().unwrap().clone();
+                            if let Err(e) = sync_store.save(&snapshot).await {
+                                warn!("Failed to save to AgentStore after pod sync: {}", e);
                             }
 
                             // --- Health monitoring: check Running pods ---
@@ -957,6 +982,7 @@ async fn main() -> anyhow::Result<()> {
             let route_token = ctrl_token.clone();
             let route_cache = ctrl_cache.clone();
             let route_conn = ctrl_conn.clone();
+            let route_store = ctrl_store.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
                 loop {
@@ -1023,27 +1049,23 @@ async fn main() -> anyhow::Result<()> {
                         all_endpoints.extend(endpoints);
                     }
 
-                    // Update in-memory routing + DNS
+                    // Update in-memory routing + DNS (live, in-memory)
                     ctrl_service_proxy
                         .update_routes(&all_services, &all_endpoints)
                         .await;
                     ctrl_dns_server.update_records(&all_services).await;
 
-                    // Persist to cache + derive files
+                    // Persist to AgentStore (single WriteBatch: meta + services +
+                    // endpoints + derived /agent/routes + /agent/dns-records)
                     {
                         let mut c = route_cache.write().unwrap();
                         c.services = all_services;
                         c.endpoints = all_endpoints;
                         c.last_synced_at = Utc::now();
-                        if let Err(e) = c.save() {
-                            warn!("Failed to save cache after route sync: {}", e);
-                        }
-                        if let Err(e) = c.derive_routes() {
-                            warn!("Failed to derive routes.json: {}", e);
-                        }
-                        if let Err(e) = c.derive_dns() {
-                            warn!("Failed to derive dns-records.json: {}", e);
-                        }
+                    }
+                    let snapshot = route_cache.read().unwrap().clone();
+                    if let Err(e) = route_store.save(&snapshot).await {
+                        warn!("Failed to save to AgentStore after route sync: {}", e);
                     }
                 }
             });
@@ -1056,7 +1078,11 @@ async fn main() -> anyhow::Result<()> {
     // Block until Ctrl-C
     info!("Agent is running. Press Ctrl-C to stop.");
     tokio::signal::ctrl_c().await?;
-    info!("Shutting down agent");
+    info!("Shutting down agent — flushing AgentStore WAL...");
+    if let Err(e) = store.close().await {
+        warn!("AgentStore close error: {}", e);
+    }
+    info!("Shutdown complete");
 
     Ok(())
 }
