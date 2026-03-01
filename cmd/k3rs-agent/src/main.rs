@@ -385,11 +385,16 @@ async fn main() -> anyhow::Result<()> {
             let client = reqwest::Client::new();
             let mut fail_count = 0u32;
             loop {
-                // Use backoff when reconnecting, normal 10s when connected
-                let delay = if fail_count > 0 {
-                    ConnectivityManager::backoff_duration(fail_count)
-                } else {
+                // Connected: poll every 10s. Failing: exponential backoff 1s→2s→4s→30s.
+                //
+                // `fail_count` is incremented *after* each failure, so it is
+                // 1-based at the top of the loop. We subtract 1 to convert to
+                // the 0-based index that `backoff_duration` expects, ensuring
+                // the first retry fires after 1s (not 2s).
+                let delay = if fail_count == 0 {
                     std::time::Duration::from_secs(10)
+                } else {
+                    ConnectivityManager::backoff_duration(fail_count.saturating_sub(1))
                 };
                 tokio::time::sleep(delay).await;
 

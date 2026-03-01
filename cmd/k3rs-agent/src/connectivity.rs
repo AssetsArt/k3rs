@@ -70,9 +70,16 @@ impl ConnectivityManager {
         matches!(*self.rx.borrow(), ConnectivityState::Connected)
     }
 
-    /// Exponential backoff: 1s → 2s → 4s → … → 30s (capped).
+    /// Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s (capped).
+    ///
+    /// `attempt` is **0-based**: `attempt=0` returns 1s (first retry delay).
+    ///
+    /// The shift index is capped at 30 before the left-shift to prevent a
+    /// u64 shift-overflow panic when `attempt` is very large (e.g. many hours
+    /// of server downtime where the reconnect loop keeps incrementing).
     pub fn backoff_duration(attempt: u32) -> std::time::Duration {
-        let secs = std::cmp::min(1u64 << attempt, 30);
+        let shift = attempt.min(30); // 2^30 >> 30s cap; safe for u64 (64 bits)
+        let secs = std::cmp::min(1u64 << shift, 30);
         std::time::Duration::from_secs(secs)
     }
 }
