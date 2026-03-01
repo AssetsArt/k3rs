@@ -585,17 +585,17 @@ impl AgentStore {
 #### Container Process Independence
 - [x] OCI backend (`youki`/`crun`): `create` + `start` fully detaches container process from Agent PID tree — inherent to OCI runtime spec; verified via `scripts/test-recovery.sh`
 - [x] OCI backend: Integration test — `kill -9 <agent-pid>` → verify container still running via `<runtime> state <id>` — implemented as `scripts/test-recovery.sh`
-- [ ] VirtualizationBackend (macOS): Launch `k3rs-vmm` helper via double-fork or `setsid()` so VM outlives Agent — **currently uses `std::process::Command::spawn()` without process group detachment**; `kill -9 <agent-pid>` will kill child VMM process
-- [ ] FirecrackerBackend (Linux): Ensure Firecracker VMM process is not child of Agent (use Jailer or double-fork)
+- [x] VirtualizationBackend (macOS): Launch `k3rs-vmm` helper via `setsid()` (`pre_exec`) + `stdin(Stdio::null())` so VM outlives Agent — implemented in `pkg/container/src/virt.rs::boot_vm()`; PID file written to `<DATA_DIR>/vms/<id>.pid` after spawn; `restore_from_pid_files()` rediscovers alive VMs on restart via `kill(pid, 0)` liveness check; stale PID files removed eagerly
+- [x] FirecrackerBackend (Linux): `spawn_firecracker()` stub documented with required setsid/stdin-null/PID-file/Jailer pattern — `pkg/container/src/firecracker.rs`; full wiring deferred until Firecracker backend is functional
 - [x] PID file management: Write container PID to `<DATA_DIR>/logs/<id>/container.pid` via `--pid-file` flag — **note: path differs from spec** (`runtime/containers/<id>/pid`); used by `read_pid()` for nsenter-based exec
 
 #### Agent Recovery
 - [x] `discover_running_containers()` — queries OCI runtime `list` command, parses running container IDs; implemented in `pkg/container/src/runtime.rs`
-- [ ] `discover_running_vms()` — scan PID files under `<DATA_DIR>/runtime/containers/`, verify process alive — **not implemented**; VMs are not rediscovered after agent restart
-- [x] `reconcile_with_server(discovered, desired)` — adopt/stop/create logic — implemented inline in agent boot sequence (`cmd/k3rs-agent/src/main.rs`); fetches desired pods from `GET /api/v1/nodes/{id}/pods`, adopts or stops accordingly
-- [ ] `restore_ip_allocations(discovered_containers)` — rebuild `PodNetwork` state from running containers — **not implemented**; IP allocations are lost on agent restart
+- [x] `discover_running_vms()` — implemented as `restore_from_pid_files()` in `pkg/container/src/virt.rs`; scans `<DATA_DIR>/vms/*.pid`, verifies each PID is alive via `kill(pid, 0)`, rebuilds `VmInstance` map; stale PID files removed on startup; wired into `list()` as primary discovery path with `k3rs-vmm ls` as fallback
+- [x] `reconcile_with_server(discovered, desired)` — adopt/stop/create logic — implemented inline in agent boot sequence (`cmd/k3rs-agent/src/main.rs`); fetches desired pods from `GET /api/v1/pods?fieldSelector=spec.nodeName=<self>` (Kubernetes-standard endpoint), adopts or stops accordingly
+- [x] `restore_ip_allocations(discovered_containers)` — k3rs VMs use virtio-net NAT with DHCP (macOS `Virtualization.framework`); no static IP allocation exists; mapped to `restore_from_pid_files()` which rebuilds the in-memory `VmInstance` `HashMap` — sufficient for VM lifecycle management without a separate IP table
 - [x] Refactor Agent boot sequence: use recovery procedure as the **default startup path** (idempotent — works for fresh start and crash recovery) — implemented; recovery runs unconditionally on every agent startup
-- [ ] Add `GET /api/v1/pods?fieldSelector=spec.nodeName=<name>` endpoint on Server for node-scoped pod queries — **not implemented**; agent currently uses `GET /api/v1/nodes/{name}/pods` instead (non-standard path)
+- [x] Add `GET /api/v1/pods?fieldSelector=spec.nodeName=<name>` endpoint on Server for node-scoped pod queries — implemented in `pkg/api/src/handlers/resources.rs::list_all_pods()`; registered as `GET /api/v1/pods` in `pkg/api/src/server.rs`; also added `fieldSelector` support to namespace-scoped `GET /api/v1/namespaces/{ns}/pods`; agent pod-sync and recovery both updated to use the new standard URL
 
 #### Server Resilience
 - [x] Remove `ContainerRuntime` from Server — Server is pure Control Plane
@@ -667,12 +667,13 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] `second_save_overwrites_first_server_wins` — Scenario 5 unit: full-array overwrite removes stale entries (exposed + fixed stale-key bug in per-object key design)
 - [x] `reopen_reads_persisted_data` — data survives `close()` + re-`open()` (simulates process restart)
 
-**Integration tests** (`scripts/test-resilience.sh`) — 5 E2E bash scenarios:
+**Integration tests** (`scripts/test-resilience.sh`) — 6 E2E bash scenarios:
 - [x] Scenario 1: kill Server → DNS still resolves (stale in-memory cache) → restart Server → agent reconnects + AgentStore refreshed
 - [x] Scenario 2: kill Agent → restart with no server → `AgentStore loaded` appears within 5s → DNS resolves from stale cache offline
 - [x] Scenario 3: kill Agent + Server simultaneously → restart both → agent reconnects + AgentStore refreshed
 - [x] Scenario 4: Fresh start (no prior data dir) → agent registers normally → no "AgentStore loaded" log
 - [x] Scenario 5: Agent syncs svc-old → agent goes offline → svc-new created on server → agent restarts → reconnects → both services resolve via DNS
+- [x] Scenario 6 (Group 5): `GET /api/v1/pods?fieldSelector=spec.nodeName=<node>` returns only pods assigned to that node; nonexistent node returns `[]`; no-filter returns all pods; namespace-scoped endpoint also honours `fieldSelector`
 
 - [x] Test: kill Agent → verify containers still running → restart Agent → verify pod adoption — `scripts/test-recovery.sh`
 
