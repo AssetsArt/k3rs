@@ -910,6 +910,11 @@ async fn main() -> anyhow::Result<()> {
 
                 loop {
                     match read.next().await {
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(b))) => {
+                            use std::io::Write as _;
+                            std::io::stdout().write_all(&b).ok();
+                            std::io::stdout().flush().ok();
+                        }
                         Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
                             print!("{}", text);
                         }
