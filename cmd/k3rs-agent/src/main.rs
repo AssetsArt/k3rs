@@ -72,11 +72,7 @@ async fn try_register(
         );
 
         // Store certs to disk for future mTLS connections
-        let cert_dir = format!(
-            "{}/certs/{}",
-            pkg_constants::paths::CONFIG_DIR,
-            node_name
-        );
+        let cert_dir = format!("{}/certs/{}", pkg_constants::paths::CONFIG_DIR, node_name);
         tokio::fs::create_dir_all(&cert_dir).await?;
         tokio::fs::write(format!("{}/node.crt", cert_dir), &reg_resp.certificate).await?;
         tokio::fs::write(format!("{}/node.key", cert_dir), &reg_resp.private_key).await?;
@@ -87,7 +83,11 @@ async fn try_register(
     } else {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        Err(anyhow::anyhow!("Registration failed: {} - {}", status, body))
+        Err(anyhow::anyhow!(
+            "Registration failed: {} - {}",
+            status,
+            body
+        ))
     }
 }
 
@@ -233,12 +233,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Start the embedded DNS server
+    // Start the embedded DNS server.
+    // UdpSocket::bind(0.0.0.0:5353) on macOS can hang because mDNSResponder
+    // holds the port. We load cached records into the in-memory table first
+    // (no socket needed), then start the listener in a background task.
     let dns_addr: SocketAddr = format!("0.0.0.0:{}", dns_port).parse()?;
     let dns_server = Arc::new(DnsServer::new(dns_addr));
-    dns_server.start().await?;
 
-    // Load cached DNS records if available
+    // Pre-populate records before start so the DNS task has them immediately
     if has_cache {
         match dns_server.load_from_file(&cache::dns_path()).await {
             Ok(n) => info!("DnsServer pre-loaded {} cached records", n),
@@ -246,12 +248,30 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Start the Pingora tunnel proxy
+    // Start DNS listener in background — never block main startup on port bind
+    {
+        let ds = dns_server.clone();
+        tokio::spawn(async move {
+            if let Err(e) = ds.start().await {
+                warn!("DNS server failed to start on port {}: {}", dns_port, e);
+            }
+        });
+    }
+
+    // Start the Pingora tunnel proxy in a background task.
+    // Pingora's Server::new() + bootstrap() can block when a second Pingora
+    // server is created while the first one is already running, so we must
+    // not await it on the main flow.
     let server_host = server
         .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    let proxy = TunnelProxy::new(server_host, proxy_port);
-    proxy.start().await?;
+        .trim_start_matches("https://")
+        .to_string();
+    tokio::spawn(async move {
+        let proxy = TunnelProxy::new(&server_host, proxy_port);
+        if let Err(e) = proxy.start().await {
+            warn!("TunnelProxy failed to start: {}", e);
+        }
+    });
 
     // =========================================================================
     // Phase C: Attempt registration (non-fatal on failure)
@@ -356,11 +376,7 @@ async fn main() -> anyhow::Result<()> {
                 tokio::time::sleep(delay).await;
 
                 // Skip heartbeat if we have no node_id yet (never registered)
-                let has_node_id = heartbeat_cache
-                    .read()
-                    .unwrap()
-                    .node_id
-                    .is_some();
+                let has_node_id = heartbeat_cache.read().unwrap().node_id.is_some();
                 if !has_node_id {
                     continue;
                 }
@@ -383,10 +399,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                         fail_count = 0;
                         heartbeat_conn.set_connected();
-                        info!(
-                            "Heartbeat OK for {} (status=200)",
-                            heartbeat_node_name,
-                        );
+                        info!("Heartbeat OK for {} (status=200)", heartbeat_node_name,);
                     }
                     Ok(resp) => {
                         fail_count += 1;
@@ -482,11 +495,11 @@ async fn main() -> anyhow::Result<()> {
                         .await
                         .unwrap_or_default();
 
-                    if let Some(ref node_id) = initial_node_id {
+                    if initial_node_id.is_some() {
                         let url = format!(
                             "{}/api/v1/nodes/{}/pods",
                             ctrl_server.trim_end_matches('/'),
-                            node_id
+                            ctrl_node_name
                         );
                         let desired_pods: Vec<pkg_types::pod::Pod> = match client
                             .get(&url)
@@ -519,10 +532,7 @@ async fn main() -> anyhow::Result<()> {
                                 );
                                 let _ = client
                                     .put(&status_url)
-                                    .header(
-                                        "Authorization",
-                                        format!("Bearer {}", ctrl_token),
-                                    )
+                                    .header("Authorization", format!("Bearer {}", ctrl_token))
                                     .json(&pkg_types::pod::PodStatus::Running)
                                     .send()
                                     .await;
@@ -628,10 +638,7 @@ async fn main() -> anyhow::Result<()> {
                     .await
                     {
                         Ok(new_identity) => {
-                            info!(
-                                "Reconnected to server after {} attempts",
-                                attempt + 1
-                            );
+                            info!("Reconnected to server after {} attempts", attempt + 1);
                             if let Some((node_id, api_port)) = new_identity {
                                 let mut c = rc_cache.write().unwrap();
                                 c.node_id = Some(node_id);
@@ -659,6 +666,7 @@ async fn main() -> anyhow::Result<()> {
             let sync_client = client.clone();
             let sync_server = ctrl_server.clone();
             let sync_token = ctrl_token.clone();
+            let sync_node_name = ctrl_node_name.clone();
             let sync_cache = ctrl_cache.clone();
             let sync_conn = ctrl_conn.clone();
             let in_flight: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -673,15 +681,16 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
 
-                    let node_id = sync_cache.read().unwrap().node_id.clone();
-                    let Some(ref node_id) = node_id else {
+                    // Pod sync: skip if not registered yet
+                    let has_registration = sync_cache.read().unwrap().node_id.is_some();
+                    if !has_registration {
                         continue;
                     };
 
                     let url = format!(
                         "{}/api/v1/nodes/{}/pods",
                         sync_server.trim_end_matches('/'),
-                        node_id
+                        sync_node_name
                     );
 
                     let resp = match sync_client
@@ -853,10 +862,7 @@ async fn main() -> anyhow::Result<()> {
                                         // 1. Pull Image
                                         info!("[pod:{}] Pulling image: {}", pod.name, image);
                                         if let Err(e) = pod_runtime.pull_image(&image).await {
-                                            error!(
-                                                "[pod:{}] Image pull failed: {}",
-                                                pod.name, e
-                                            );
+                                            error!("[pod:{}] Image pull failed: {}", pod.name, e);
                                             let _ = pod_client
                                                 .put(&status_url)
                                                 .header(
@@ -870,10 +876,7 @@ async fn main() -> anyhow::Result<()> {
                                         }
 
                                         // 2. Create Container
-                                        info!(
-                                            "[pod:{}] Creating container: {}",
-                                            pod.name, pod.id
-                                        );
+                                        info!("[pod:{}] Creating container: {}", pod.name, pod.id);
                                         if let Err(e) = pod_runtime
                                             .create_container(
                                                 &pod.id,
@@ -901,20 +904,14 @@ async fn main() -> anyhow::Result<()> {
                                         }
 
                                         // 3. Start Container
-                                        info!(
-                                            "[pod:{}] Starting container: {}",
-                                            pod.name, pod.id
-                                        );
-                                        if let Err(e) =
-                                            pod_runtime.start_container(&pod.id).await
-                                        {
+                                        info!("[pod:{}] Starting container: {}", pod.name, pod.id);
+                                        if let Err(e) = pod_runtime.start_container(&pod.id).await {
                                             error!(
                                                 "[pod:{}] Container start failed: {}",
                                                 pod.name, e
                                             );
                                             pod_in_flight.lock().unwrap().remove(&pod.id);
-                                            let _ =
-                                                pod_runtime.cleanup_container(&pod.id).await;
+                                            let _ = pod_runtime.cleanup_container(&pod.id).await;
                                             let _ = pod_client
                                                 .put(&status_url)
                                                 .header(
@@ -1004,10 +1001,7 @@ async fn main() -> anyhow::Result<()> {
                         {
                             Ok(r) => r.json().await.unwrap_or_default(),
                             Err(e) => {
-                                warn!(
-                                    "Route sync: failed to fetch services for ns {}: {}",
-                                    ns, e
-                                );
+                                warn!("Route sync: failed to fetch services for ns {}: {}", ns, e);
                                 continue;
                             }
                         };
@@ -1020,10 +1014,7 @@ async fn main() -> anyhow::Result<()> {
                         {
                             Ok(r) => r.json().await.unwrap_or_default(),
                             Err(e) => {
-                                warn!(
-                                    "Route sync: failed to fetch endpoints for ns {}: {}",
-                                    ns, e
-                                );
+                                warn!("Route sync: failed to fetch endpoints for ns {}: {}", ns, e);
                                 continue;
                             }
                         };

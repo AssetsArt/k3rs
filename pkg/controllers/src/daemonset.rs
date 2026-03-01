@@ -139,7 +139,7 @@ impl DaemonSetController {
             // Create pods on nodes that don't have one
             let mut created = 0u32;
             for node in &eligible_nodes {
-                if !nodes_with_pods.contains_key(&node.id) {
+                if !nodes_with_pods.contains_key(&node.name) {
                     self.create_pod_on_node(ns, &ds, node).await?;
                     created += 1;
                     info!("DaemonSet {}: created pod on node {}", ds.name, node.name);
@@ -147,11 +147,11 @@ impl DaemonSetController {
             }
 
             // Delete pods on nodes that are no longer eligible
-            let eligible_ids: std::collections::HashSet<&str> =
-                eligible_nodes.iter().map(|n| n.id.as_str()).collect();
+            let eligible_names: std::collections::HashSet<&str> =
+                eligible_nodes.iter().map(|n| n.name.as_str()).collect();
             for (pod_key, pod) in &owned_pods {
                 if let Some(nid) = &pod.node_name
-                    && !eligible_ids.contains(nid.as_str())
+                    && !eligible_names.contains(nid.as_str())
                 {
                     self.store.delete(pod_key).await?;
                     info!(
@@ -170,7 +170,7 @@ impl DaemonSetController {
                     matches!(p.status, PodStatus::Running | PodStatus::Scheduled)
                         && p.node_name
                             .as_ref()
-                            .is_some_and(|nid| eligible_ids.contains(nid.as_str()))
+                            .is_some_and(|nid| eligible_names.contains(nid.as_str()))
                 })
                 .count() as u32
                 + created;

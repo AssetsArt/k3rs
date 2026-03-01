@@ -62,25 +62,24 @@ pub async fn exec_into_pod(
         None => return (StatusCode::BAD_REQUEST, "Pod is not scheduled to a node").into_response(),
     };
 
-    // pod.node_name stores the node UUID (set by the scheduler), but nodes are
-    // stored under /registry/nodes/{node_name} (human name). Scan all nodes to
-    // find the one whose id matches.
-    let node_entries = match state.store.list_prefix("/registry/nodes/").await {
-        Ok(e) => e,
-        Err(e) => {
-            error!("Store error during node scan: {}", e);
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-    let node: Node = match node_entries
-        .into_iter()
-        .filter_map(|(_, v)| serde_json::from_slice::<Node>(&v).ok())
-        .find(|n| n.id == *node_name)
-    {
-        Some(n) => n,
-        None => {
-            warn!("Node with id {} not found in registry", node_name);
+    // pod.node_name now stores the human-readable node name (set by the
+    // scheduler), which matches the registry key /registry/nodes/{name}.
+    let node_key = format!("/registry/nodes/{}", node_name);
+    let node: Node = match state.store.get(&node_key).await {
+        Ok(Some(data)) => match serde_json::from_slice(&data) {
+            Ok(n) => n,
+            Err(e) => {
+                error!("Failed to deserialize node: {}", e);
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        },
+        Ok(None) => {
+            warn!("Node {} not found in registry", node_name);
             return (StatusCode::NOT_FOUND, "Node not found").into_response();
+        }
+        Err(e) => {
+            error!("Store error during node lookup: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
 
