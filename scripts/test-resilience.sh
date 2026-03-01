@@ -1,16 +1,20 @@
 #!/bin/bash
 # =============================================================================
-# k3rs Integration Test: Agent Cache Resilience & Reconnect
+# k3rs Integration Test: Agent Cache Resilience & Reconnect + API Compliance
 # =============================================================================
-# Tests Group 1 (ALSC / AgentStore) + Group 2 (backoff) behaviour end-to-end.
+# Groups covered
+# --------------
+#   Group 1 (ALSC / AgentStore) + Group 2 (backoff) — scenarios 1-5
+#   Group 5 (API Compliance)                          — scenario 6
 #
 # Scenarios
 # ---------
-#   1. Server down   — Agent routing+DNS survive; reconnect refreshes cache
-#   2. Agent restart — Stale cache restores within 1s (no server contact)
-#   3. Both down     — Restart both; full cluster recovery
-#   4. Fresh start   — No prior cache; normal boot path
-#   5. Stale cache   — Reconnect after offline; server-wins full re-sync
+#   1. Server down      — Agent routing+DNS survive; reconnect refreshes cache
+#   2. Agent restart    — Stale cache restores within 1s (no server contact)
+#   3. Both down        — Restart both; full cluster recovery
+#   4. Fresh start      — No prior cache; normal boot path
+#   5. Stale cache      — Reconnect after offline; server-wins full re-sync
+#   6. fieldSelector    — GET /api/v1/pods?fieldSelector=spec.nodeName=<name>
 #
 # Requirements
 # ------------
@@ -443,6 +447,120 @@ scenario_5_stale_resync() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Scenario 6: GET /api/v1/pods?fieldSelector=spec.nodeName=<name> (Group 5)
+# ─────────────────────────────────────────────────────────────────────────────
+scenario_6_field_selector() {
+    log "━━━ Scenario 6: GET /api/v1/pods?fieldSelector=spec.nodeName filtering ━━━"
+    local dir="${BASE_DATA}/s6"
+    rm -rf "$dir"; mkdir -p "$dir"
+
+    local srv_pid agent_pid
+    srv_pid=$(start_server "${dir}/server-data" "${dir}/server.log")
+    sleep 2
+
+    # Agent registers resilience-node so the scheduler has a non-tainted worker to assign to.
+    agent_pid=$(start_agent "${dir}/agent-data" "${dir}/agent.log")
+    if ! wait_for_log "${dir}/agent.log" "Successfully registered" 20; then
+        fail "S6: Agent failed to register (prerequisite)"
+        kill_pid "$agent_pid"; kill_pid "$srv_pid"; return
+    fi
+
+    # Create pod-A — scheduler assigns to $NODE (only worker without NoSchedule taint).
+    local pod_a_resp
+    pod_a_resp=$(curl -sf -X POST "${SERVER_URL}/api/v1/namespaces/default/pods" \
+        -H "Content-Type: application/json" \
+        -H "$AUTH" \
+        -d "$(cat <<JSON
+{
+  "id": "",
+  "name": "fs-pod-a",
+  "namespace": "default",
+  "spec": {
+    "containers": [{"name": "c", "image": "nginx:latest", "command": [], "args": [], "env": {}}]
+  },
+  "status": "Pending",
+  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+JSON
+)")
+
+    # Verify scheduler assigned pod-a to $NODE.
+    if echo "$pod_a_resp" | grep -q "\"node_name\":\"${NODE}\""; then
+        pass "S6: pod-a scheduled to node '${NODE}'"
+    else
+        fail "S6: pod-a not assigned to '${NODE}' — scheduler may have failed"
+        log "  Server response: $pod_a_resp"
+        kill_pid "$agent_pid"; kill_pid "$srv_pid"; return
+    fi
+
+    # Create pod-B in a different namespace (also lands on $NODE — that's fine;
+    # we test isolation by node-name, not namespace, below).
+    curl -sf -X POST "${SERVER_URL}/api/v1/namespaces/default/pods" \
+        -H "Content-Type: application/json" \
+        -H "$AUTH" \
+        -d "$(cat <<JSON
+{
+  "id": "",
+  "name": "fs-pod-b",
+  "namespace": "default",
+  "spec": {
+    "containers": [{"name": "c", "image": "alpine:latest", "command": [], "args": [], "env": {}}]
+  },
+  "status": "Pending",
+  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+JSON
+)" > /dev/null
+
+    # ── Test 1: matching fieldSelector returns our pod ────────────────────────
+    local filtered
+    filtered=$(curl -sf "${SERVER_URL}/api/v1/pods?fieldSelector=spec.nodeName=${NODE}" \
+        -H "$AUTH")
+    if echo "$filtered" | grep -q "fs-pod-a"; then
+        pass "S6: GET /api/v1/pods?fieldSelector=spec.nodeName=${NODE} returns pod-a"
+    else
+        fail "S6: fieldSelector=${NODE} did not return pod-a (got: $filtered)"
+    fi
+
+    # The filtered result must NOT contain pods from other nodes.
+    # (No other nodes exist, so we only verify the nonexistent-node case below.)
+
+    # ── Test 2: nonexistent node → empty list ────────────────────────────────
+    local empty
+    empty=$(curl -sf "${SERVER_URL}/api/v1/pods?fieldSelector=spec.nodeName=nonexistent-node" \
+        -H "$AUTH")
+    if [ "$empty" = "[]" ]; then
+        pass "S6: GET /api/v1/pods?fieldSelector=spec.nodeName=nonexistent-node returns []"
+    else
+        fail "S6: nonexistent-node filter returned non-empty: $empty"
+    fi
+
+    # ── Test 3: no filter → all pods present ─────────────────────────────────
+    local all
+    all=$(curl -sf "${SERVER_URL}/api/v1/pods" -H "$AUTH")
+    if echo "$all" | grep -q "fs-pod-a" && echo "$all" | grep -q "fs-pod-b"; then
+        pass "S6: GET /api/v1/pods (no filter) returns all pods (pod-a and pod-b)"
+    else
+        fail "S6: GET /api/v1/pods (no filter) missing pods (got: $all)"
+    fi
+
+    # ── Test 4: namespace-scoped list also honours fieldSelector ─────────────
+    # Both pods are in 'default' and assigned to $NODE, so this must return ≥1.
+    local ns_filtered
+    ns_filtered=$(curl -sf \
+        "${SERVER_URL}/api/v1/namespaces/default/pods?fieldSelector=spec.nodeName=${NODE}" \
+        -H "$AUTH")
+    if echo "$ns_filtered" | grep -q "fs-pod-a"; then
+        pass "S6: GET /api/v1/namespaces/default/pods?fieldSelector=spec.nodeName=${NODE} works"
+    else
+        fail "S6: namespace-scoped fieldSelector did not return pod-a (got: $ns_filtered)"
+    fi
+
+    kill_pid "$agent_pid"; kill_pid "$srv_pid"
+    log "Scenario 6 done"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 main() {
@@ -460,11 +578,12 @@ main() {
     log "Build complete"
     echo ""
 
-    scenario_4_fresh_start;   echo ""
-    scenario_1_server_down;   echo ""
+    scenario_4_fresh_start;           echo ""
+    scenario_1_server_down;           echo ""
     scenario_2_agent_restart_offline; echo ""
-    scenario_3_both_restart;  echo ""
-    scenario_5_stale_resync;  echo ""
+    scenario_3_both_restart;          echo ""
+    scenario_5_stale_resync;          echo ""
+    scenario_6_field_selector;        echo ""
 
     echo "╔══════════════════════════════════════════════════════════════╗"
     printf "║   Results: %-5d passed  %-5d failed%21s║\n" "$PASSED" "$FAILED" ""
