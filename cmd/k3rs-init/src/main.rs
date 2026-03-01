@@ -380,8 +380,12 @@ fn handle_vsock_exec(fd: i32) {
         // One-shot: run command, write combined output, close.
         // In initrd mode chroot into the virtiofs-mounted container rootfs first;
         // in no-initrd mode virtiofs IS already the root so no chroot is needed.
+        //
+        // Always set a standard PATH so bare command names (e.g. "ls") resolve
+        // correctly inside the chroot even if PID 1 was started with no PATH.
         let output = unsafe {
             Command::new(args[0]).args(&args[1..])
+                .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
                 .pre_exec(|| {
                     if is_initrd_mode() { chroot_into_rootfs() } else { Ok(()) }
                 })
@@ -480,6 +484,7 @@ fn handle_vsock_pty_exec(vsock_fd: i32, args: &[&str]) {
         Command::new(args[0])
             .args(&args[1..])
             .env("TERM", "xterm-256color")
+            .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
             .stdin(Stdio::from_raw_fd(slave))
             .stdout(Stdio::from_raw_fd(libc::dup(slave)))
             .stderr(Stdio::from_raw_fd(libc::dup(slave)))

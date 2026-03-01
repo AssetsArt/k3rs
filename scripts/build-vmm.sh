@@ -35,6 +35,7 @@ if [ ! -f "$BINARY_PATH" ]; then
 fi
 
 # Sign with virtualization entitlement (required for Virtualization.framework)
+# codesign --entitlements cmd/k3rs-vmm/k3rs-vmm.entitlements --force -s - target/debug/k3rs-vmm
 ENTITLEMENTS="$VMM_DIR/k3rs-vmm.entitlements"
 if [ -f "$ENTITLEMENTS" ]; then
     codesign --entitlements "$ENTITLEMENTS" --force -s - "$BINARY_PATH"

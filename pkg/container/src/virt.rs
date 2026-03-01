@@ -104,7 +104,7 @@ pub struct VirtualizationBackend {
 
 impl VirtualizationBackend {
     /// Create a new VirtualizationBackend with default configuration.
-    pub async fn new(_data_dir: &Path) -> Result<Self> {
+    pub async fn new(data_dir: &Path) -> Result<Self> {
         #[cfg(not(target_os = "macos"))]
         {
             anyhow::bail!("VirtualizationBackend requires macOS");
@@ -112,7 +112,6 @@ impl VirtualizationBackend {
 
         #[cfg(target_os = "macos")]
         {
-            let data_dir = _data_dir;
             let vm_dir = data_dir.join("vms");
             tokio::fs::create_dir_all(&vm_dir).await?;
 
@@ -129,8 +128,16 @@ impl VirtualizationBackend {
             tracing::info!(
                 "VirtualizationBackend: kernel={}{} k3rs-init={} cpus={} mem={}MB",
                 kernel_path.display(),
-                if kernel_exists { " ✓" } else { " ✗ (run scripts/build-kernel.sh)" },
-                if init_exists { "✓" } else { "✗ (run scripts/build-kernel.sh)" },
+                if kernel_exists {
+                    " ✓"
+                } else {
+                    " ✗ (run scripts/build-kernel.sh)"
+                },
+                if init_exists {
+                    "✓"
+                } else {
+                    "✗ (run scripts/build-kernel.sh)"
+                },
                 DEFAULT_CPU_COUNT,
                 DEFAULT_MEMORY_MB,
             );
@@ -179,8 +186,16 @@ impl VirtualizationBackend {
     ) -> Result<()> {
         // ── 1. Required guest directories ─────────────────────────────────────
         for dir in &[
-            "sbin", "proc", "sys", "dev", "dev/pts", "dev/shm",
-            "tmp", "run", "mnt/rootfs", "etc",
+            "sbin",
+            "proc",
+            "sys",
+            "dev",
+            "dev/pts",
+            "dev/shm",
+            "tmp",
+            "run",
+            "mnt/rootfs",
+            "etc",
         ] {
             tokio::fs::create_dir_all(rootfs.join(dir)).await.ok();
         }
@@ -191,18 +206,17 @@ impl VirtualizationBackend {
             Some(init_src) => {
                 tokio::fs::copy(&init_src, &init_dest)
                     .await
-                    .with_context(|| format!(
-                        "copy k3rs-init {} → {}",
-                        init_src.display(),
-                        init_dest.display()
-                    ))?;
+                    .with_context(|| {
+                        format!(
+                            "copy k3rs-init {} → {}",
+                            init_src.display(),
+                            init_dest.display()
+                        )
+                    })?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(
-                        &init_dest,
-                        std::fs::Permissions::from_mode(0o755),
-                    )?;
+                    std::fs::set_permissions(&init_dest, std::fs::Permissions::from_mode(0o755))?;
                 }
                 tracing::debug!(
                     "[virt] injected k3rs-init at {} (from {})",
@@ -266,11 +280,9 @@ impl VirtualizationBackend {
     /// CONFIG_VIRTIO_FS=y built into the kernel).
     async fn boot_vm(&self, id: &str, rootfs_dir: &Path) -> Result<Option<u32>> {
         let log_path = self.log_path(id);
-        let vmm = which_vmm()
-            .await
-            .ok_or_else(|| anyhow::anyhow!(
-                "k3rs-vmm not found — build with `cargo build -p k3rs-vmm --release`"
-            ))?;
+        let vmm = which_vmm().await.ok_or_else(|| {
+            anyhow::anyhow!("k3rs-vmm not found — build with `cargo build -p k3rs-vmm --release`")
+        })?;
 
         let log_file = std::fs::File::create(&log_path)?;
         let stderr_file = log_file.try_clone()?;
@@ -278,28 +290,33 @@ impl VirtualizationBackend {
         let mut cmd = std::process::Command::new(&vmm);
         let mut boot_args = vec![
             "boot".to_string(),
-            "--kernel".to_string(), self.kernel_path.to_string_lossy().to_string(),
-            "--rootfs".to_string(), rootfs_dir.to_string_lossy().to_string(),
-            "--cpus".to_string(), self.vm_config.cpu_count.to_string(),
-            "--memory".to_string(), self.vm_config.memory_mb.to_string(),
-            "--id".to_string(), id.to_string(),
-            "--log".to_string(), log_path.to_string_lossy().to_string(),
+            "--kernel".to_string(),
+            self.kernel_path.to_string_lossy().to_string(),
+            "--rootfs".to_string(),
+            rootfs_dir.to_string_lossy().to_string(),
+            "--cpus".to_string(),
+            self.vm_config.cpu_count.to_string(),
+            "--memory".to_string(),
+            self.vm_config.memory_mb.to_string(),
+            "--id".to_string(),
+            id.to_string(),
+            "--log".to_string(),
+            log_path.to_string_lossy().to_string(),
             "--foreground".to_string(),
         ];
         if let Some(ref initrd) = self.initrd_path {
             boot_args.push("--initrd".to_string());
             boot_args.push(initrd.to_string_lossy().to_string());
         }
-        cmd.args(&boot_args)
-        .stdout(log_file)
-        .stderr(stderr_file);
+        cmd.args(&boot_args).stdout(log_file).stderr(stderr_file);
 
         let child = cmd.spawn().context("failed to spawn k3rs-vmm")?;
         let pid = child.id();
 
         tracing::info!(
             "[virt] VM {} booted (pid={}, cpus={}, mem={}MB, rootfs={})",
-            id, pid,
+            id,
+            pid,
             self.vm_config.cpu_count,
             self.vm_config.memory_mb,
             rootfs_dir.display()
@@ -319,7 +336,10 @@ impl VirtualizationBackend {
                     tracing::info!("[virt] VM {} stopped via k3rs-vmm", id);
                     return Ok(());
                 }
-                tracing::warn!("[virt] k3rs-vmm stop: {}", String::from_utf8_lossy(&o.stderr));
+                tracing::warn!(
+                    "[virt] k3rs-vmm stop: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                );
             }
         }
 
@@ -420,7 +440,10 @@ impl RuntimeBackend for VirtualizationBackend {
             },
         );
 
-        tracing::info!("[virt] container {} created (rootfs prepared for virtiofs boot)", id);
+        tracing::info!(
+            "[virt] container {} created (rootfs prepared for virtiofs boot)",
+            id
+        );
         Ok(())
     }
 
@@ -631,9 +654,9 @@ impl RuntimeBackend for VirtualizationBackend {
     ) -> Result<tokio::process::Child> {
         tracing::info!("[virt] spawn_exec in VM {} tty={}: {:?}", id, tty, command);
 
-        let vmm = which_vmm()
-            .await
-            .ok_or_else(|| anyhow::anyhow!("k3rs-vmm not found — cannot spawn_exec in VM {}", id))?;
+        let vmm = which_vmm().await.ok_or_else(|| {
+            anyhow::anyhow!("k3rs-vmm not found — cannot spawn_exec in VM {}", id)
+        })?;
 
         let cmd_args: Vec<&str> = if command.is_empty() {
             vec!["/bin/sh"]
@@ -694,7 +717,11 @@ impl RuntimeBackend for VirtualizationBackend {
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 // Output: "state=running" or "state=not_found"
                 if let Some(val) = stdout.lines().find_map(|l| l.strip_prefix("state=")) {
-                    let status = if val.trim() == "running" { "running" } else { "stopped" };
+                    let status = if val.trim() == "running" {
+                        "running"
+                    } else {
+                        "stopped"
+                    };
                     let pid = if status == "running" {
                         vmm_pid_for(id).await
                     } else {
@@ -766,10 +793,7 @@ pub(crate) fn find_k3rs_init() -> Option<PathBuf> {
     // Cargo build outputs — aarch64 first (Apple Silicon M-series)
     for arch in &["aarch64", "x86_64"] {
         for profile in &["release", "debug"] {
-            let p = format!(
-                "./target/{}-unknown-linux-musl/{}/k3rs-init",
-                arch, profile
-            );
+            let p = format!("./target/{}-unknown-linux-musl/{}/k3rs-init", arch, profile);
             if let Some(path) = try_path(&p) {
                 return Some(path);
             }
@@ -798,12 +822,20 @@ fn parse_bundle_config(bundle: &Path) -> (Vec<String>, Vec<String>) {
 
     let command = v["process"]["args"]
         .as_array()
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
 
     let env = v["process"]["env"]
         .as_array()
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
 
     (command, env)
@@ -817,14 +849,12 @@ async fn vmm_pid_for(id: &str) -> u32 {
         .await;
 
     match out {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .lines()
-                .next()
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0)
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .trim()
+            .lines()
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0),
         _ => 0,
     }
 }
@@ -862,7 +892,8 @@ mod tests {
             }
         });
         let mut f = std::fs::File::create(tmp.join("config.json")).unwrap();
-        f.write_all(serde_json::to_string(&cfg).unwrap().as_bytes()).unwrap();
+        f.write_all(serde_json::to_string(&cfg).unwrap().as_bytes())
+            .unwrap();
 
         let (cmd, env) = parse_bundle_config(&tmp);
         assert_eq!(cmd, vec!["/bin/bash", "-l"]);
@@ -928,7 +959,9 @@ mod tests {
         let backend = VirtualizationBackend::new(&tmp).await.unwrap();
 
         let bundle = tmp.join("bundle2");
-        tokio::fs::create_dir_all(bundle.join("rootfs")).await.unwrap();
+        tokio::fs::create_dir_all(bundle.join("rootfs"))
+            .await
+            .unwrap();
 
         backend.create("vm-no-img", &bundle).await.unwrap();
 
