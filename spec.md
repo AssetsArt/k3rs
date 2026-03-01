@@ -545,25 +545,25 @@ struct AgentStateCache {
 - [x] Remove `ContainerRuntime` from Server — Server is pure Control Plane
 - [x] Remove server lock file system (lock file write/cleanup, colocation guard)
 - [x] Update dev scripts (`dev.sh`, `dev-agent.sh`) — remove colocation flags
-- [ ] Agent exponential backoff on Server disconnect (1s → 2s → 4s → … → 30s cap) — **not implemented**; heartbeat loop uses fixed 10s interval with no backoff on failure
+- [x] Agent exponential backoff on Server disconnect (1s → 2s → 4s → … → 30s cap) — implemented in `ConnectivityManager::backoff_duration()` (`cmd/k3rs-agent/src/connectivity.rs`); heartbeat uses backoff on failure, registration retry uses backoff
 - [x] Agent: continue running containers when Server unreachable — containers are independent OS processes; pod sync loop uses `continue` on server error, leaving running containers untouched
 
 #### Agent Local State Cache
-- [ ] Define `AgentStateCache` struct — `node_name`, `server_seq`, `last_synced_at`, `pods`, `services`, `endpoints`, `ingresses`; serde Serialize/Deserialize
-- [ ] `AgentStateCache::save(path)` — atomic write: serialize to JSON → write to `state.json.tmp` → `fsync` → `rename` to `state.json`
-- [ ] `AgentStateCache::load(path)` — deserialize from `state.json`; return `None` if file missing (fresh node)
-- [ ] `AgentStateCache::derive_routes()` → `RoutingTable` (ClusterIP:port → backends); write to `routes.json`
-- [ ] `AgentStateCache::derive_dns()` → `HashMap<String, IpAddr>` (FQDN → ClusterIP); write to `dns-records.json`
-- [ ] Route sync loop: call `AgentStateCache::save()` + `derive_routes()` + `derive_dns()` after **every** successful server sync
-- [ ] Pod sync loop: include fetched pods in `AgentStateCache` and save after every successful fetch
-- [ ] Agent startup: load `state.json` before connecting to server → initialize `ServiceProxy` and `DnsServer` with cached data
-- [ ] `ServiceProxy::load_from_file(routes_path)` — load `routes.json` on startup for zero-delay route serving
-- [ ] `DnsServer::load_from_file(dns_path)` — load `dns-records.json` on startup for zero-delay DNS serving
-- [ ] Connectivity state machine: `CONNECTING → CONNECTED → RECONNECTING → CONNECTED` (log state transitions)
-- [ ] `RECONNECTING` state: continue serving stale in-memory state; log `WARN` with cache age on every retry attempt
-- [ ] `OFFLINE` state: server unreachable at startup; log `WARN: starting in offline mode, cache age: Xs`; keep retrying in background
-- [ ] On reconnect: perform full re-sync from server → overwrite in-memory state and cache files (server-wins, no merging)
-- [ ] Agent startup sequence: `load_cache` → `start_services_with_stale` → `connect_server` → `full_sync` → `overwrite_cache`
+- [x] Define `AgentStateCache` struct — `node_name`, `node_id`, `agent_api_port`, `server_seq`, `last_synced_at`, `pods`, `services`, `endpoints`, `ingresses`; serde Serialize/Deserialize — `cmd/k3rs-agent/src/cache.rs`
+- [x] `AgentStateCache::save(path)` — atomic write: serialize to JSON → write to `state.json.tmp` → `fsync` → `rename` to `state.json` — `cache.rs::save()`
+- [x] `AgentStateCache::load(path)` — deserialize from `state.json`; return `None` if file missing (fresh node) — `cache.rs::load()`
+- [x] `AgentStateCache::derive_routes()` → `RoutingTable` (ClusterIP:port → backends); write to `routes.json` — `cache.rs::derive_routes()`
+- [x] `AgentStateCache::derive_dns()` → `HashMap<String, IpAddr>` (FQDN → ClusterIP); write to `dns-records.json` — `cache.rs::derive_dns()`
+- [x] Route sync loop: call `AgentStateCache::save()` + `derive_routes()` + `derive_dns()` after **every** successful server sync — `main.rs` route sync loop
+- [x] Pod sync loop: include fetched pods in `AgentStateCache` and save after every successful fetch — `main.rs` pod sync loop
+- [x] Agent startup: load `state.json` before connecting to server → initialize `ServiceProxy` and `DnsServer` with cached data — `main.rs` Phase A + B
+- [x] `ServiceProxy::load_from_file(routes_path)` — load `routes.json` on startup for zero-delay route serving — `pkg/proxy/src/service_proxy.rs`
+- [x] `DnsServer::load_from_file(dns_path)` — load `dns-records.json` on startup for zero-delay DNS serving — `pkg/network/src/dns.rs`
+- [x] Connectivity state machine: `CONNECTING → CONNECTED → RECONNECTING → CONNECTED` (log state transitions) — `cmd/k3rs-agent/src/connectivity.rs`
+- [x] `RECONNECTING` state: continue serving stale in-memory state; log `WARN` with cache age on every retry attempt — heartbeat loop in `main.rs`
+- [x] `OFFLINE` state: server unreachable at startup; log `WARN: starting in offline mode, cache age: Xs`; keep retrying in background — `main.rs` Phase C
+- [x] On reconnect: perform full re-sync from server → overwrite in-memory state and cache files (server-wins, no merging) — sync loops resume on `is_connected()`, heartbeat sets `CONNECTED` on recovery
+- [x] Agent startup sequence: `load_cache` → `start_services_with_stale` → `connect_server` → `full_sync` → `overwrite_cache` — `main.rs` Phases A→B→C→D→E
 
 #### Testing & Validation
 - [x] Test: kill Agent → verify containers still running → restart Agent → verify pod adoption — implemented as `scripts/test-recovery.sh` (full end-to-end bash integration test)

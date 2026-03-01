@@ -45,6 +45,17 @@ impl DnsServer {
         info!("DNS records updated: {} entries", count);
     }
 
+    /// Load DNS records from a JSON file (for cache-based startup).
+    /// Returns the number of records loaded.
+    pub async fn load_from_file(&self, path: &str) -> anyhow::Result<usize> {
+        let data = std::fs::read_to_string(path)?;
+        let new_records: HashMap<String, String> = serde_json::from_str(&data)?;
+        let count = new_records.len();
+        let mut records = self.records.write().await;
+        *records = new_records;
+        Ok(count)
+    }
+
     /// Start the DNS server as a background UDP listener.
     pub async fn start(&self) -> anyhow::Result<()> {
         info!("Starting embedded DNS server on {}", self.listen_addr);
