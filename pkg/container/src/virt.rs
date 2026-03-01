@@ -172,6 +172,15 @@ impl VirtualizationBackend {
         self.data_dir.join(format!("{}-rootfs", id))
     }
 
+    /// Path to the PID file for a VM.
+    ///
+    /// Written by `boot_vm()` after spawn, removed by `stop_vm()` / `delete()`.
+    /// Used by `restore_from_pid_files()` to verify liveness after an agent
+    /// restart without relying on `pgrep` or `k3rs-vmm ls`.
+    fn pid_file_path(&self, id: &str) -> PathBuf {
+        self.data_dir.join(format!("{}.pid", id))
+    }
+
     /// Prepare a rootfs directory so the VM kernel can boot it directly.
     ///
     /// The kernel cmdline `root=virtiofs:rootfs init=/sbin/k3rs-init` causes Linux
@@ -317,10 +326,45 @@ impl VirtualizationBackend {
             boot_args.push("--initrd".to_string());
             boot_args.push(initrd.to_string_lossy().to_string());
         }
-        cmd.args(&boot_args).stdout(log_file).stderr(stderr_file);
+        cmd.args(&boot_args)
+            .stdout(log_file)
+            .stderr(stderr_file)
+            // Redirect stdin to /dev/null so k3rs-vmm inherits no controlling
+            // terminal from the agent.  Without this, a SIGHUP on terminal
+            // close propagates to k3rs-vmm, killing the VM.
+            .stdin(std::process::Stdio::null());
+
+        // Detach k3rs-vmm from the agent's process group and session.
+        //
+        // setsid() runs in the forked child (between fork and exec).  It
+        // creates a new session — new PGID, no controlling terminal — so
+        // k3rs-vmm is fully independent of the agent's lifecycle:
+        //
+        //   • Agent SIGKILL   → k3rs-vmm reparented to PID 1, keeps running
+        //   • Terminal SIGHUP → not delivered (different session)
+        //   • Agent exit      → VM continues (new process group leader)
+        //
+        // SAFETY: setsid() is async-signal-safe (POSIX). No captures.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+        }
 
         let child = cmd.spawn().context("failed to spawn k3rs-vmm")?;
-        let pid = child.id();
+        // std::process::Child::id() returns u32 (unlike tokio's Option<u32>)
+        let pid: u32 = child.id();
+
+        // Write PID file so restore_from_pid_files() can re-discover this VM
+        // after an agent restart without relying on pgrep or k3rs-vmm ls.
+        if let Err(e) = std::fs::write(self.pid_file_path(id), format!("{}\n", pid)) {
+            tracing::warn!("[virt] failed to write PID file for VM {}: {}", id, e);
+        }
 
         tracing::info!(
             "[virt] VM {} booted (pid={}, cpus={}, mem={}MB, rootfs={})",
@@ -334,6 +378,9 @@ impl VirtualizationBackend {
     }
 
     /// Stop a VM via k3rs-vmm, falling back to SIGTERM/SIGKILL.
+    ///
+    /// Cleans up the PID file regardless of how the stop occurred so that
+    /// `restore_from_pid_files()` never re-discovers a stopped VM.
     async fn stop_vm(&self, id: &str, pid: Option<u32>) -> Result<()> {
         if let Some(vmm) = which_vmm().await {
             let out = tokio::process::Command::new(&vmm)
@@ -343,6 +390,7 @@ impl VirtualizationBackend {
             if let Ok(o) = out {
                 if o.status.success() {
                     tracing::info!("[virt] VM {} stopped via k3rs-vmm", id);
+                    let _ = std::fs::remove_file(self.pid_file_path(id));
                     return Ok(());
                 }
                 tracing::warn!(
@@ -365,6 +413,8 @@ impl VirtualizationBackend {
             tracing::info!("[virt] VM {} killed (pid={})", id, pid);
         }
 
+        // Always clean up the PID file, even if stop was a no-op (VM already dead).
+        let _ = std::fs::remove_file(self.pid_file_path(id));
         Ok(())
     }
 
@@ -401,6 +451,100 @@ impl VirtualizationBackend {
     /// Check if a guest kernel is available.
     pub async fn kernel_available(&self) -> bool {
         self.kernel_manager.is_available().await
+    }
+
+    // ── Private: post-restart VM discovery ────────────────────────────────────
+
+    /// Rebuild the in-memory `VmInstance` table from `{data_dir}/*.pid` files.
+    ///
+    /// This is the canonical "restore state after agent restart" path — analogous
+    /// to `restore_ip_allocations()` in a full pod-network stack:
+    ///
+    /// 1. Scan all `{data_dir}/*.pid` files (written by `boot_vm()` at start).
+    /// 2. Read the stored PID.
+    /// 3. Call `kill(pid, 0)` — existence-only check, **no signal sent**.
+    ///    Returns 0 if the process is alive, -1 (ESRCH) if it is gone.
+    /// 4. Alive → add to `discovered` set + rebuild `VmInstance` entry.
+    ///    Dead  → remove the stale PID file so it is never re-read.
+    ///
+    /// By relying on PID files + kernel-level liveness rather than `pgrep`,
+    /// this avoids:
+    ///   - False-positive matches on unrelated processes with similar cmdlines.
+    ///   - Subprocess overhead of spawning `pgrep` for every VM on each tick.
+    ///   - Fragile string parsing of `k3rs-vmm ls` output.
+    async fn restore_from_pid_files(
+        &self,
+        discovered: &mut std::collections::HashSet<String>,
+    ) {
+        let mut dir = match tokio::fs::read_dir(&self.data_dir).await {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+
+        while let Ok(Some(entry)) = dir.next_entry().await {
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if !name.ends_with(".pid") {
+                continue;
+            }
+
+            let vm_id = name.trim_end_matches(".pid").to_string();
+
+            // Read the stored PID (written as "<pid>\n").
+            let pid: u32 = match tokio::fs::read_to_string(entry.path())
+                .await
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                Some(p) => p,
+                None => {
+                    // Corrupt or empty PID file — remove and skip.
+                    let _ = tokio::fs::remove_file(entry.path()).await;
+                    continue;
+                }
+            };
+
+            // kill(pid, 0): sends no signal; returns 0 if the process exists,
+            // -1 with ESRCH if it does not.  This is the POSIX-approved way
+            // to check process liveness from the host.
+            //
+            // SAFETY: pid comes from our own PID file (written atomically by
+            // boot_vm).  Signal 0 cannot harm the target process.
+            let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+
+            if alive {
+                discovered.insert(vm_id.clone());
+
+                // Rebuild in-memory VmInstance if the agent just restarted and
+                // lost its HashMap.
+                let mut instances = self.instances.write().await;
+                if !instances.contains_key(&vm_id) {
+                    tracing::info!(
+                        "[virt] restored VM {} from PID file (pid={}, process alive)",
+                        vm_id,
+                        pid
+                    );
+                    instances.insert(
+                        vm_id.clone(),
+                        VmInstance {
+                            rootfs_dir: self.rootfs_dir(&vm_id),
+                            vmm_pid: Some(pid),
+                            state: VmState::Running,
+                            log_path: self.log_path(&vm_id),
+                        },
+                    );
+                }
+            } else {
+                // Process is dead — PID file is stale.  Remove it so future
+                // restarts do not re-discover a ghost VM.
+                tracing::info!(
+                    "[virt] removing stale PID file for VM {} (pid={}, process gone)",
+                    vm_id,
+                    pid
+                );
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
     }
 }
 
@@ -536,7 +680,7 @@ impl RuntimeBackend for VirtualizationBackend {
     async fn delete(&self, id: &str) -> Result<()> {
         tracing::info!("[virt] delete VM: {}", id);
 
-        self.stop(id).await.ok();
+        self.stop(id).await.ok(); // stop_vm() removes the PID file
 
         let removed = self.instances.write().await.remove(id);
         if let Some(inst) = removed {
@@ -547,6 +691,8 @@ impl RuntimeBackend for VirtualizationBackend {
         // Best-effort cleanup for named paths (handles post-restart recovery cases)
         let _ = tokio::fs::remove_dir_all(self.rootfs_dir(id)).await;
         let _ = tokio::fs::remove_file(self.log_path(id)).await;
+        // PID file: stop_vm() already removed it; this is a safety net.
+        let _ = tokio::fs::remove_file(self.pid_file_path(id)).await;
 
         tracing::info!("[virt] VM {} deleted", id);
         Ok(())
@@ -554,8 +700,16 @@ impl RuntimeBackend for VirtualizationBackend {
 
     /// List running VMs.
     ///
-    /// Combines in-memory state with `k3rs-vmm ls` so VMs running before an
-    /// agent restart are rediscovered on startup.
+    /// Uses a two-tier discovery strategy for robustness across agent restarts:
+    ///
+    /// **Primary** — `restore_from_pid_files()`:
+    ///   Scans `{data_dir}/*.pid` and verifies each PID with `kill(pid,0)`.
+    ///   This is O(#VMs) with no subprocess overhead and handles the common
+    ///   restart-recovery case reliably.
+    ///
+    /// **Fallback** — `k3rs-vmm ls`:
+    ///   Covers VMs started before PID-file support was added (backward compat)
+    ///   or the rare case where the PID file was lost (e.g. disk issue).
     async fn list(&self) -> Result<Vec<String>> {
         let mut ids: std::collections::HashSet<String> = {
             let instances = self.instances.read().await;
@@ -566,12 +720,15 @@ impl RuntimeBackend for VirtualizationBackend {
                 .collect()
         };
 
-        // Query k3rs-vmm for VMs that survived an agent restart
+        // Primary: PID file scan + kill(pid, 0) liveness check.
+        self.restore_from_pid_files(&mut ids).await;
+
+        // Fallback: query k3rs-vmm ls for VMs not caught by PID files.
+        // Keeps backward compatibility and handles edge cases (lost PID file).
         if let Some(vmm) = which_vmm().await {
             if let Ok(output) = tokio::process::Command::new(&vmm).arg("ls").output().await {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
-                    // Skip header / empty lines
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 3 && parts[2] == "running" {
                         let vm_id = parts[0].to_string();
@@ -581,19 +738,17 @@ impl RuntimeBackend for VirtualizationBackend {
                         let mut instances = self.instances.write().await;
                         if !instances.contains_key(&vm_id) {
                             tracing::info!(
-                                "[virt] rediscovered VM {} from k3rs-vmm ls (restart recovery)",
+                                "[virt] rediscovered VM {} from k3rs-vmm ls (fallback)",
                                 vm_id
                             );
-                            let rootfs_dir = self.rootfs_dir(&vm_id);
-                            let log_path = self.log_path(&vm_id);
                             let vmm_pid = parts[1].parse::<u32>().ok();
                             instances.insert(
                                 vm_id.clone(),
                                 VmInstance {
-                                    rootfs_dir,
+                                    rootfs_dir: self.rootfs_dir(&vm_id),
                                     vmm_pid,
                                     state: VmState::Running,
-                                    log_path,
+                                    log_path: self.log_path(&vm_id),
                                 },
                             );
                         }
