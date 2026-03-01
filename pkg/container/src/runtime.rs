@@ -219,11 +219,12 @@ impl ContainerRuntime {
                             "OCI runtime {} not found in PATH or install dir — attempting auto-download...",
                             name
                         );
-                        let downloaded = crate::installer::RuntimeInstaller::ensure_runtime(None)
-                            .await
-                            .map_err(|e| {
-                                anyhow::anyhow!("Auto-download failed for {}: {}", name, e)
-                            })?;
+                        let downloaded =
+                            crate::installer::RuntimeInstaller::ensure_runtime(Some(name))
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Auto-download failed for {}: {}", name, e)
+                                })?;
                         Arc::new(OciBackend::new(
                             &downloaded.to_string_lossy(),
                             &self.data_dir,

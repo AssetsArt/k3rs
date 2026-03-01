@@ -67,15 +67,26 @@ impl RuntimeInstaller {
     }
 
     fn find_in_path(name: &str) -> Result<PathBuf> {
+        // 1. Try `which` first
         if let Ok(output) = std::process::Command::new("which").arg(name).output()
             && output.status.success()
         {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             info!("Found {} in PATH: {}", name, path);
-            Ok(PathBuf::from(path))
-        } else {
-            Err(anyhow::anyhow!("{} not in PATH", name))
+            return Ok(PathBuf::from(path));
         }
+
+        // 2. Check standard locations directly — `which` may fail if PATH is restricted
+        //    (common inside containers spawned by cargo-watch/pm2).
+        for dir in &["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin"] {
+            let candidate = PathBuf::from(dir).join(name);
+            if candidate.exists() {
+                info!("Found {} at {} (direct lookup)", name, candidate.display());
+                return Ok(candidate);
+            }
+        }
+
+        Err(anyhow::anyhow!("{} not in PATH", name))
     }
 
     /// Get the install directory — prefers /usr/local/bin/k3rs-runtime,
