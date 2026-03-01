@@ -6,9 +6,9 @@ created_at: "2024-02-25T00:00:00Z"
 spec:
   replicas: 2
   template:
-    runtime: "youki"
+    # runtime: "youki"
     # runtime: "crun" # Explicitly select runtime: "youki", "crun", or "vm" (Apple VZ / Firecracker)
-    # runtime: "vm"
+    runtime: "vm"
     containers:
       - name: "nginx"
         image: "nginx:1.28.2-alpine"
