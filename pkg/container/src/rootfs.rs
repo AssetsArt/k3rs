@@ -364,9 +364,15 @@ impl RootfsManager {
             serde_json::json!({ "type": "ipc" }),
             serde_json::json!({ "type": "uts" }),
             serde_json::json!({ "type": "mount" }),
-            serde_json::json!({ "type": "user" }),
-            serde_json::json!({ "type": "network" }), // Always isolated for rootless port binding
+            serde_json::json!({ "type": "network" }),
         ];
+
+        // User namespace + UID/GID mappings: only for rootless mode.
+        // As root (e.g. inside Podman --privileged), user namespace is unnecessary
+        // and causes issues: gid_map write failures, proc mount denied, chown EINVAL.
+        if !is_root() {
+            namespaces.push(serde_json::json!({ "type": "user" }));
+        }
 
         // Only add cgroup namespace if running as root.
         // In rootless mode, many systems don't have cgroup v2 delegation enabled
@@ -375,37 +381,43 @@ impl RootfsManager {
             namespaces.push(serde_json::json!({ "type": "cgroup" }));
         }
 
-        // Create basic Linux section with user namespace mapping and sysctls
-        let mut uid_mappings =
-            vec![serde_json::json!({ "hostID": host_uid(), "containerID": 0, "size": 1 })];
-        let mut gid_mappings =
-            vec![serde_json::json!({ "hostID": host_gid(), "containerID": 0, "size": 1 })];
+        // UID/GID mappings — only needed with user namespace (rootless mode)
+        let uid_mappings: Vec<serde_json::Value> = if !is_root() {
+            vec![
+                serde_json::json!({ "hostID": host_uid(), "containerID": 0, "size": 1 }),
+                serde_json::json!({ "hostID": 524288, "containerID": 1, "size": 1000 }),
+            ]
+        } else {
+            vec![]
+        };
+        let gid_mappings: Vec<serde_json::Value> = if !is_root() {
+            vec![
+                serde_json::json!({ "hostID": host_gid(), "containerID": 0, "size": 1 }),
+                serde_json::json!({ "hostID": 524288, "containerID": 1, "size": 1000 }),
+            ]
+        } else {
+            vec![]
+        };
 
-        // If running as non-root, try to add subordinate mappings from /etc/subuid for nginx etc.
-        if !is_root() {
-            // Mapping for common service UIDs (1-1000) using subuids
-            uid_mappings
-                .push(serde_json::json!({ "hostID": 524288, "containerID": 1, "size": 1000 }));
-            gid_mappings
-                .push(serde_json::json!({ "hostID": 524288, "containerID": 1, "size": 1000 }));
-        }
-
-        let linux = serde_json::json!({
+        let mut linux_val = serde_json::json!({
             "namespaces": namespaces,
-            "uidMappings": uid_mappings,
-            "gidMappings": gid_mappings,
-            "sysctl": {
-                "net.ipv4.ip_unprivileged_port_start": "0"
-            },
             "maskedPaths": [
                 "/proc/acpi", "/proc/asound", "/proc/kcore", "/proc/keys",
                 "/proc/latency_stats", "/proc/timer_list", "/proc/timer_stats",
                 "/proc/sched_debug", "/sys/firmware", "/proc/scsi"
             ],
             "readonlyPaths": [
-                "/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"
+                "/proc/bus", "/proc/fs", "/proc/irq", "/proc/sysrq-trigger"
             ]
         });
+
+        // Add UID/GID mappings only for rootless mode (user namespace)
+        if !uid_mappings.is_empty() {
+            linux_val["uidMappings"] = serde_json::json!(uid_mappings);
+            linux_val["gidMappings"] = serde_json::json!(gid_mappings);
+        }
+
+        let linux = linux_val;
 
         let mut mounts = vec![
             serde_json::json!({ "destination": "/proc", "type": "proc", "source": "proc" }),
