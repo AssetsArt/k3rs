@@ -347,8 +347,8 @@ Restarting `k3rs-server` has **zero impact** on running Pods:
 | Component | During Server Downtime | After Server Restart |
 |---|---|---|
 | **Running Containers** | ✅ Continue running on Agent nodes | ✅ No restart needed |
-| **Service Proxy (Pingora)** | ✅ Continues routing traffic | ✅ Reconnects route sync |
-| **DNS Server** | ✅ Continues resolving cached records | ✅ Refreshes from new sync |
+| **Service Proxy (Pingora)** | ✅ Continues routing (stale in-memory routes from `AgentStateCache`) | ✅ Reconnects → refreshes routes from server |
+| **DNS Server** | ✅ Continues resolving (stale in-memory records from `AgentStateCache`) | ✅ Reconnects → refreshes DNS from server |
 | **Agent Container Runtime** | ✅ Fully independent | ✅ No state change |
 | **Scheduling** | ❌ Paused (no new pod placement) | ✅ Resumes immediately |
 | **Controllers** | ❌ Paused (no reconciliation) | ✅ Catch up via level-triggered reconcile |
@@ -372,12 +372,12 @@ Restarting or crashing `k3rs-agent` **must not** terminate running containers:
 | Component | During Agent Crash | After Agent Restart |
 |---|---|---|
 | **Running Containers** | ✅ Continue running (independent processes) | ✅ Reconciled by pod sync loop |
-| **Service Proxy (Pingora)** | ❌ Stops (runs in-process) | ✅ Restarts with cached routes |
-| **DNS Server** | ❌ Stops (runs in-process) | ✅ Restarts, rebuilds from Server sync |
+| **Service Proxy (Pingora)** | ❌ Stops (runs in-process) | ✅ Restarts from `routes.json` cache — serving within milliseconds, before server reconnect |
+| **DNS Server** | ❌ Stops (runs in-process) | ✅ Restarts from `dns-records.json` cache — resolving within milliseconds, before server reconnect |
 | **Pod Networking** | ✅ Existing connections continue | ✅ IP allocations restored from state |
 | **Heartbeat** | ❌ Stops → Server marks node NotReady/Unknown | ✅ Resumes, node transitions back to Ready |
 
-> **Trade-off**: Service Proxy and DNS run in-process with the Agent for simplicity. During an Agent crash, new service discovery and load balancing are temporarily unavailable, but existing TCP connections to pods continue working because containers and their network stacks are independent.
+> **Trade-off**: Service Proxy and DNS run in-process with the Agent for simplicity. During an Agent crash, new service discovery and load balancing are temporarily unavailable, but existing TCP connections to pods continue working because containers and their network stacks are independent. After restart, the `AgentStateCache` restores routing and DNS within milliseconds — independent of server availability.
 
 ### Agent Recovery Procedure
 
@@ -407,6 +407,114 @@ When the Agent restarts after a crash, it **must** perform the following recover
 
 **Idempotency**: Every step must be **idempotent** — the same recovery procedure runs regardless of whether the Agent crashed, was gracefully restarted, or is starting for the first time.
 
+### Agent Local State Cache
+
+**Goal**: The Agent must remain operational — pods running, Service Proxy routing, DNS resolving — even when the API Server is unreachable indefinitely.
+
+**Design**: Every successful sync from the API Server writes the full relevant state to disk atomically. On startup or server failure, the Agent loads this cached state immediately and serves it as-is. Server state always wins on reconnect — no merging.
+
+#### State Data Model
+
+```rust
+/// Persisted to <DATA_DIR>/agent/state.json after every successful server sync.
+/// This is the single source of truth for offline operation.
+struct AgentStateCache {
+    /// Node name (from registration)
+    node_name: String,
+    /// Monotonic sequence from server EventLog — used to detect stale/old cache on reconnect
+    server_seq: u64,
+    /// Timestamp of last successful server sync
+    last_synced_at: DateTime<Utc>,
+    /// Desired pod specs for this node (from GET /api/v1/nodes/{name}/pods)
+    pods: Vec<Pod>,
+    /// All Services across all namespaces (for Service Proxy + DNS)
+    services: Vec<Service>,
+    /// All Endpoints across all namespaces (for Service Proxy backend resolution)
+    endpoints: Vec<Endpoint>,
+    /// All Ingress rules (for Ingress Proxy)
+    ingresses: Vec<Ingress>,
+}
+```
+
+#### Storage Layout
+
+```
+<DATA_DIR>/agent/
+├── state.json           # Full AgentStateCache — written after every sync
+├── routes.json          # ServiceProxy RoutingTable — fast-path for proxy startup
+└── dns-records.json     # DnsServer A-records — fast-path for DNS startup
+```
+
+`routes.json` and `dns-records.json` are derived views of `state.json`, written atomically alongside it. They exist as separate files so `ServiceProxy` and `DnsServer` can load their own format directly on startup without parsing the full state object.
+
+**Atomic write protocol**: All files written via `write_to_tmp → fsync → rename` to prevent partial reads during agent crash mid-write.
+
+#### Sync Behavior
+
+**Write (normal connected operation):**
+1. Route sync loop fetches services + endpoints from server every 10s
+2. Pod sync loop fetches pod list from server every 10s
+3. After **each successful fetch** → serialize `AgentStateCache` → write atomically to `state.json`
+4. Also derive and write `routes.json` (ClusterIP:port → backends map) and `dns-records.json` (service FQDN → ClusterIP map)
+
+**Read (startup / server unreachable):**
+1. On agent startup: load `state.json` if it exists → use as initial in-memory state before any server contact
+2. Start `ServiceProxy` with `routes.json` data immediately → serving within milliseconds (stale-while-revalidate)
+3. Start `DnsServer` with `dns-records.json` data immediately → resolving within milliseconds
+4. Attempt server connection in background → on success, full re-sync → overwrite cache with fresh data
+
+#### Agent Connectivity State Machine
+
+```
+           ┌──────────────┐
+   start   │              │  server responds
+  ─────────►  CONNECTING  ├──────────────────────────────────────────┐
+           │              │                                          │
+           └──────┬───────┘                                 ┌────────▼────────┐
+                  │ timeout / error                         │                 │
+                  ▼                                         │   CONNECTED     │
+           ┌──────────────┐                                 │                 │
+           │              │  cache exists on disk           └────────┬────────┘
+           │   OFFLINE    │◄──────────────────────                  │ heartbeat/sync fails
+           │  (stale ok)  │                                          ▼
+           └──────┬───────┘                                 ┌────────────────┐
+                  │ background retry → server responds      │                │
+                  └─────────────────────────────────────────►  RECONNECTING  │
+                                                            │  (exponential  │
+                                                            │   backoff)     │
+                                                            └────────┬───────┘
+                                                                     │ server responds
+                                                                     └──► CONNECTED
+```
+
+| State | Description |
+|---|---|
+| **CONNECTING** | Initial startup. If cache exists, start proxy/DNS with stale data while connecting. |
+| **CONNECTED** | Server reachable. All syncs succeed. Cache written to disk after every sync. |
+| **RECONNECTING** | Heartbeat/sync failing. Agent continues serving stale in-memory state. Retries with exponential backoff (1s → 2s → 4s → 8s → 30s cap). |
+| **OFFLINE** | Server unreachable at startup AND cache exists. Load cache → serve stale → keep retrying in background. If no cache: start with empty state, keep retrying. |
+
+#### Behavior by Connectivity State
+
+| Behavior | CONNECTED | RECONNECTING | OFFLINE |
+|---|---|---|---|
+| **Running pods** | ✅ Server-driven sync | ✅ Keep running (independent processes) | ✅ Keep running (independent processes) |
+| **New pod scheduling** | ✅ Normal | ❌ Skipped (server unreachable) | ❌ Skipped |
+| **Service Proxy routes** | ✅ Live from server | ✅ Last cached in-memory routes | ✅ Loaded from `routes.json` on startup |
+| **DNS resolution** | ✅ Live from server | ✅ Last cached in-memory records | ✅ Loaded from `dns-records.json` on startup |
+| **Heartbeat** | ✅ Every 10s | ❌ Failing → server marks node `NotReady` | ❌ No heartbeat |
+| **Cache writes** | ✅ After every sync | ❌ No writes (server unreachable) | ❌ No writes |
+| **Log output** | Normal | `WARN: server unreachable, retrying (attempt N, age: Xs)` | `WARN: starting in offline mode, cache age: Xs` |
+
+#### Design Principles
+
+1. **Write-through, serve-stale**: Cache is written on every successful sync. An arbitrarily old cache is always preferred over no routing or DNS.
+2. **Atomic writes only**: All cache files written via `write → fsync → rename` — no partial reads possible.
+3. **Server-wins on reconnect**: Full server state overwrites cache — no merging, no conflict resolution needed.
+4. **No cache expiry**: Cache does not expire. Offline agent with 24-hour-old routes is better than offline agent with no routes.
+5. **Cache is advisory for pod desired state**: In OFFLINE/RECONNECTING mode, the Agent does **not** create new containers from cached pod specs. It only keeps already-running containers alive and adopts them via the OCI recovery procedure. New pod creation resumes only after server reconnect.
+6. **Empty cache is valid**: If no `state.json` exists (fresh node), Agent starts with empty in-memory state and waits for first server sync. Service Proxy and DNS start with no routes and populate on first sync.
+
 ### Design Invariants
 
 1. **No container is a child of the Agent** — Agent crash ≠ container crash
@@ -414,6 +522,7 @@ When the Agent restarts after a crash, it **must** perform the following recover
 3. **Level-triggered reconciliation** — Agent does not rely on missed events; it always compares full actual vs desired state
 4. **Server is stateless w.r.t. runtime** — Server never holds container runtime handles or references
 5. **Idempotent recovery** — Running the recovery procedure on a healthy Agent is a no-op
+6. **Stale state over no state** — Agent always prefers cached state to empty state for networking (Service Proxy + DNS)
 
 ### Implementation Checklist
 
@@ -439,16 +548,30 @@ When the Agent restarts after a crash, it **must** perform the following recover
 - [ ] Agent exponential backoff on Server disconnect (1s → 2s → 4s → … → 30s cap) — **not implemented**; heartbeat loop uses fixed 10s interval with no backoff on failure
 - [x] Agent: continue running containers when Server unreachable — containers are independent OS processes; pod sync loop uses `continue` on server error, leaving running containers untouched
 
-#### Networking Recovery
-- [ ] Service Proxy: cache last-known routing table to disk (`<DATA_DIR>/runtime/routes.json`) for fast restart — **not implemented**; `RoutingTable` is in-memory only
-- [ ] DNS Server: cache last-known service records to disk (`<DATA_DIR>/runtime/dns-records.json`) for fast restart — **not implemented**; DNS records are rebuilt from server sync only
-- [ ] On Agent restart: load cached routes/records immediately → serve stale while syncing fresh from Server
+#### Agent Local State Cache
+- [ ] Define `AgentStateCache` struct — `node_name`, `server_seq`, `last_synced_at`, `pods`, `services`, `endpoints`, `ingresses`; serde Serialize/Deserialize
+- [ ] `AgentStateCache::save(path)` — atomic write: serialize to JSON → write to `state.json.tmp` → `fsync` → `rename` to `state.json`
+- [ ] `AgentStateCache::load(path)` — deserialize from `state.json`; return `None` if file missing (fresh node)
+- [ ] `AgentStateCache::derive_routes()` → `RoutingTable` (ClusterIP:port → backends); write to `routes.json`
+- [ ] `AgentStateCache::derive_dns()` → `HashMap<String, IpAddr>` (FQDN → ClusterIP); write to `dns-records.json`
+- [ ] Route sync loop: call `AgentStateCache::save()` + `derive_routes()` + `derive_dns()` after **every** successful server sync
+- [ ] Pod sync loop: include fetched pods in `AgentStateCache` and save after every successful fetch
+- [ ] Agent startup: load `state.json` before connecting to server → initialize `ServiceProxy` and `DnsServer` with cached data
+- [ ] `ServiceProxy::load_from_file(routes_path)` — load `routes.json` on startup for zero-delay route serving
+- [ ] `DnsServer::load_from_file(dns_path)` — load `dns-records.json` on startup for zero-delay DNS serving
+- [ ] Connectivity state machine: `CONNECTING → CONNECTED → RECONNECTING → CONNECTED` (log state transitions)
+- [ ] `RECONNECTING` state: continue serving stale in-memory state; log `WARN` with cache age on every retry attempt
+- [ ] `OFFLINE` state: server unreachable at startup; log `WARN: starting in offline mode, cache age: Xs`; keep retrying in background
+- [ ] On reconnect: perform full re-sync from server → overwrite in-memory state and cache files (server-wins, no merging)
+- [ ] Agent startup sequence: `load_cache` → `start_services_with_stale` → `connect_server` → `full_sync` → `overwrite_cache`
 
 #### Testing & Validation
 - [x] Test: kill Agent → verify containers still running → restart Agent → verify pod adoption — implemented as `scripts/test-recovery.sh` (full end-to-end bash integration test)
-- [ ] Test: kill Server → verify Agent continues serving traffic → restart Server → verify reconnection
+- [ ] Test: kill Server → verify Agent continues routing (ServiceProxy) + DNS resolving → restart Server → verify reconnect + cache refresh
+- [ ] Test: kill Agent → restart Agent (no server contact) → verify ServiceProxy + DNS serve stale cached state within 1s
 - [ ] Test: kill Agent + Server simultaneously → restart both → verify full cluster recovery
-- [ ] Test: Agent starts fresh (no prior containers) → verify normal boot path works (idempotent recovery)
+- [ ] Test: Agent starts fresh (no prior containers, no cache) → verify normal boot path works
+- [ ] Test: Agent starts with stale cache (server seq mismatch) → verify full re-sync on connect
 
 ## Why Cloudflare Pingora?
 Using Cloudflare Pingora as the backbone for this orchestrator provides several architectural advantages:
