@@ -10,4 +10,4 @@ spec:
     # runtime: "vm"
     containers:
       - name: "nginx"
-        image: "nginx:latest"
+        image: "nginx:1.28.2-alpine"

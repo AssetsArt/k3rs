@@ -53,8 +53,9 @@ pub const K3RS_INIT_SYSTEM_PATH: &str = "/var/lib/k3rs/k3rs-init";
 /// User-local install path for the k3rs-init guest binary.
 pub const K3RS_INIT_USER_PATH: &str = ".k3rs/bin/k3rs-init";
 
-/// Standard /sbin/init path inside guest rootfs.
-pub const GUEST_INIT_PATH: &str = "sbin/init";
+/// Path where k3rs-init is injected inside the guest rootfs.
+/// Using a dedicated name avoids overwriting a container's own /sbin/k3rs-init.
+pub const GUEST_INIT_PATH: &str = "sbin/k3rs-init";
 
 /// Standard config.json path inside guest rootfs (read by k3rs-init).
 pub const GUEST_CONFIG_PATH: &str = "config.json";

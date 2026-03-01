@@ -107,9 +107,9 @@ fn boot_loader(config: &VmConfig) -> Retained<VZLinuxBootLoader> {
         // With initrd: k3rs-init boots from initrd, mounts virtiofs at /mnt/rootfs.
         // Without initrd: kernel mounts virtiofs directly as root (requires CONFIG_VIRTIO_FS=y).
         let cmdline = if config.initrd_path.is_some() {
-            "console=hvc0 rdinit=/sbin/init rw loglevel=7"
+            "console=hvc0 rdinit=/sbin/k3rs-init rw loglevel=7"
         } else {
-            "console=hvc0 root=virtiofs:rootfs rw rootwait init=/sbin/init loglevel=7"
+            "console=hvc0 root=virtiofs:rootfs rw rootwait init=/sbin/k3rs-init loglevel=7"
         };
         loader.setCommandLine(&NSString::from_str(cmdline));
         if let Some(ref initrd) = config.initrd_path {

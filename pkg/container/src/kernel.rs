@@ -17,7 +17,7 @@
 //! ```text
 //! /var/lib/k3rs/
 //! ├── vmlinux       # Uncompressed Linux kernel (ELF) with virtio support
-//! └── initrd.img    # Initial ramdisk containing k3rs-init as /sbin/init
+//! └── initrd.img    # Initial ramdisk containing k3rs-init as /sbin/k3rs-init
 //! ```
 //!
 //! ### Building a minimal kernel (arm64)
@@ -51,7 +51,7 @@
 //!
 //! # 2. Create initrd
 //! mkdir -p /tmp/initrd/{sbin,dev,proc,sys,tmp,run,mnt/rootfs}
-//! cp target/aarch64-unknown-linux-musl/release/k3rs-init /tmp/initrd/sbin/init
+//! cp target/aarch64-unknown-linux-musl/release/k3rs-init /tmp/initrd/sbin/k3rs-init
 //! cd /tmp/initrd && find . | cpio -o -H newc | gzip > /var/lib/k3rs/initrd.img
 //! ```
 

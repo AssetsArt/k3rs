@@ -12,7 +12,7 @@
 #
 # Output:
 #   <output_dir>/vmlinux      – uncompressed Linux kernel
-#   <output_dir>/initrd.img   – initrd containing k3rs-init as /sbin/init
+#   <output_dir>/initrd.img   – initrd containing k3rs-init as /sbin/k3rs-init
 
 set -euo pipefail
 
@@ -212,8 +212,8 @@ cargo zigbuild --release --target "$RUST_TARGET" -p k3rs-init
 INITRD_ROOT="/tmp/initrd"
 rm -rf "$INITRD_ROOT"
 mkdir -p "$INITRD_ROOT"/{sbin,dev,proc,sys,tmp,run,mnt/rootfs,etc}
-cp "target/${RUST_TARGET}/release/k3rs-init" "$INITRD_ROOT/sbin/init"
-chmod 755 "$INITRD_ROOT/sbin/init"
+cp "target/${RUST_TARGET}/release/k3rs-init" "$INITRD_ROOT/sbin/k3rs-init"
+chmod 755 "$INITRD_ROOT/sbin/k3rs-init"
 
 cd "$INITRD_ROOT"
 find . | cpio -o -H newc --quiet | gzip > /tmp/initrd.img
@@ -304,8 +304,8 @@ fi
 INITRD_ROOT="/tmp/k3rs-initrd-$$"
 rm -rf "$INITRD_ROOT"
 mkdir -p "$INITRD_ROOT"/{sbin,dev,proc,sys,tmp,run,mnt/rootfs,etc}
-cp "target/${RUST_TARGET}/release/k3rs-init" "$INITRD_ROOT/sbin/init"
-chmod 755 "$INITRD_ROOT/sbin/init"
+cp "target/${RUST_TARGET}/release/k3rs-init" "$INITRD_ROOT/sbin/k3rs-init"
+chmod 755 "$INITRD_ROOT/sbin/k3rs-init"
 
 cd "$INITRD_ROOT"
 find . | cpio -o -H newc --quiet | gzip > /tmp/initrd.img

@@ -1,6 +1,6 @@
 //! # k3rs-init — Guest PID 1
 //!
-//! This binary runs as `/sbin/init` inside lightweight Linux microVMs (both
+//! This binary runs as `/sbin/k3rs-init` inside lightweight Linux microVMs (both
 //! macOS Virtualization.framework and Linux Firecracker/rust-vmm backends).
 //!
 //! ## Responsibilities
@@ -384,10 +384,18 @@ fn handle_vsock_exec(fd: i32) {
         // Always set a standard PATH so bare command names (e.g. "ls") resolve
         // correctly inside the chroot even if PID 1 was started with no PATH.
         let output = unsafe {
-            Command::new(args[0]).args(&args[1..])
-                .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            Command::new(args[0])
+                .args(&args[1..])
+                .env(
+                    "PATH",
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                )
                 .pre_exec(|| {
-                    if is_initrd_mode() { chroot_into_rootfs() } else { Ok(()) }
+                    if is_initrd_mode() {
+                        chroot_into_rootfs()
+                    } else {
+                        Ok(())
+                    }
                 })
                 .output()
         };
@@ -457,13 +465,21 @@ fn handle_vsock_pty_exec(vsock_fd: i32, args: &[&str]) {
     let mut master: libc::c_int = -1;
     let mut slave: libc::c_int = -1;
 
+    // Default window size: 80×24 ensures the shell formats output correctly.
+    // Without this, some shells pad prompts or wrap incorrectly.
+    let winsize = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
     let ret = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            &winsize,
         )
     };
 
@@ -484,7 +500,10 @@ fn handle_vsock_pty_exec(vsock_fd: i32, args: &[&str]) {
         Command::new(args[0])
             .args(&args[1..])
             .env("TERM", "xterm-256color")
-            .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
             .stdin(Stdio::from_raw_fd(slave))
             .stdout(Stdio::from_raw_fd(libc::dup(slave)))
             .stderr(Stdio::from_raw_fd(libc::dup(slave)))
@@ -823,9 +842,16 @@ fn run_entrypoint(process: OciProcess) {
     // first; in no-initrd mode we are already running inside the container rootfs.
     // PID 1 stays alive to continue reaping orphaned zombies.
     match unsafe {
-        Command::new(program).args(args).pre_exec(|| {
-            if is_initrd_mode() { chroot_into_rootfs() } else { Ok(()) }
-        }).spawn()
+        Command::new(program)
+            .args(args)
+            .pre_exec(|| {
+                if is_initrd_mode() {
+                    chroot_into_rootfs()
+                } else {
+                    Ok(())
+                }
+            })
+            .spawn()
     } {
         Ok(mut child) => {
             let child_pid = child.id();

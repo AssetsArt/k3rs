@@ -263,6 +263,17 @@ pub fn exec_streaming_via_ipc(id: &str, command: &[String]) -> io::Result<()> {
     // (no line buffering, no echo, no special-character processing by the host).
     let saved_term = set_terminal_raw();
 
+    // Self-pipe: t_out writes one byte here when the guest closes the connection,
+    // which causes t_in's poll() to return so it can exit cleanly instead of
+    // blocking forever on read(STDIN_FILENO).
+    let mut done_pipe = [0i32; 2];
+    if unsafe { libc::pipe(done_pipe.as_mut_ptr()) } < 0 {
+        restore_terminal(saved_term);
+        return Err(io::Error::last_os_error());
+    }
+    let done_read = done_pipe[0];
+    let done_write = done_pipe[1];
+
     // Thread A: socket → stdout  (guest output → host terminal)
     let t_out = thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -288,41 +299,62 @@ pub fn exec_streaming_via_ipc(id: &str, command: &[String]) -> io::Result<()> {
                 off += w as usize;
             }
         }
+        // Signal t_in that the session is over by closing the write end of the pipe.
+        // t_in's poll() will see POLLHUP on done_read and exit its loop.
+        unsafe { libc::close(done_write) };
         unsafe { libc::close(stream_fd) };
     });
 
     // Thread B: stdin → socket  (host terminal input → guest)
+    // Uses poll() on both stdin and the done-pipe so it can exit immediately
+    // when the guest closes the connection (t_out signals via done_write close).
     let t_in = thread::spawn(move || {
         let mut buf = [0u8; 256];
-        loop {
-            let n = unsafe {
-                libc::read(
-                    libc::STDIN_FILENO,
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
-                )
-            };
-            if n <= 0 {
+        let mut poll_fds = [
+            libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: done_read,           events: libc::POLLIN, revents: 0 },
+        ];
+        'outer: loop {
+            let ready = unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, -1) };
+            if ready <= 0 {
                 break;
             }
-            let mut off = 0usize;
-            while off < n as usize {
-                let w = unsafe {
-                    libc::write(
-                        stream_dup,
-                        buf[off..n as usize].as_ptr() as *const libc::c_void,
-                        n as usize - off,
+            // done_read fired (write end closed by t_out → session over)
+            if poll_fds[1].revents != 0 {
+                break;
+            }
+            // stdin has data
+            if poll_fds[0].revents & libc::POLLIN != 0 {
+                let n = unsafe {
+                    libc::read(
+                        libc::STDIN_FILENO,
+                        buf.as_mut_ptr() as *mut libc::c_void,
+                        buf.len(),
                     )
                 };
-                if w <= 0 {
+                if n <= 0 {
                     break;
                 }
-                off += w as usize;
-            }
-            if off < n as usize {
-                break;
+                let mut off = 0usize;
+                while off < n as usize {
+                    let w = unsafe {
+                        libc::write(
+                            stream_dup,
+                            buf[off..n as usize].as_ptr() as *const libc::c_void,
+                            n as usize - off,
+                        )
+                    };
+                    if w <= 0 {
+                        break 'outer;
+                    }
+                    off += w as usize;
+                }
+                if off < n as usize {
+                    break;
+                }
             }
         }
+        unsafe { libc::close(done_read) };
         // Signal to the guest that there is no more input.
         unsafe { libc::shutdown(stream_dup, libc::SHUT_WR) };
         unsafe { libc::close(stream_dup) };

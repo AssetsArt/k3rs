@@ -11,7 +11,7 @@
 //!
 //! ## Boot design
 //!
-//! The kernel is launched with `root=virtiofs:rootfs rw init=/sbin/init`.
+//! The kernel is launched with `root=virtiofs:rootfs rw init=/sbin/k3rs-init`.
 //! No separate initrd is required. Before booting, this backend injects
 //! the `k3rs-init` binary into the OCI rootfs at `sbin/init` and writes a
 //! `config.json` at the rootfs root. The kernel mounts the virtiofs share
@@ -170,12 +170,13 @@ impl VirtualizationBackend {
 
     /// Prepare a rootfs directory so the VM kernel can boot it directly.
     ///
-    /// The kernel cmdline `root=virtiofs:rootfs init=/sbin/init` causes Linux
-    /// to mount the virtiofs share as `/` and execute `/sbin/init`. This
+    /// The kernel cmdline `root=virtiofs:rootfs init=/sbin/k3rs-init` causes Linux
+    /// to mount the virtiofs share as `/` and execute `/sbin/k3rs-init`. This
     /// method makes that work by:
     ///
     ///  1. Ensuring required guest directories exist.
-    ///  2. Injecting `k3rs-init` as `/sbin/init` in the rootfs.
+    ///  2. Injecting `k3rs-init` as `/sbin/k3rs-init` in the rootfs (avoids
+    ///     overwriting the container's own `/sbin/k3rs-init`).
     ///  3. Writing `/config.json` (read by k3rs-init to find the entrypoint).
     async fn prepare_rootfs(
         &self,
@@ -200,7 +201,7 @@ impl VirtualizationBackend {
             tokio::fs::create_dir_all(rootfs.join(dir)).await.ok();
         }
 
-        // ── 2. Inject k3rs-init as /sbin/init ────────────────────────────────
+        // ── 2. Inject k3rs-init as /sbin/k3rs-init ────────────────────────────────
         let init_dest = rootfs.join(GUEST_INIT_PATH); // sbin/init
         match find_k3rs_init() {
             Some(init_src) => {
@@ -212,6 +213,10 @@ impl VirtualizationBackend {
                             init_src.display(),
                             init_dest.display()
                         )
+                    })
+                    .map_err(|e| {
+                        tracing::error!("Failed to copy k3rs-init: {}", e);
+                        e
                     })?;
                 #[cfg(unix)]
                 {
@@ -226,7 +231,7 @@ impl VirtualizationBackend {
             }
             None => {
                 tracing::warn!(
-                    "[virt] k3rs-init not found — guest will use existing /sbin/init. \
+                    "[virt] k3rs-init not found — guest will use existing /sbin/k3rs-init. \
                      Run `scripts/build-kernel.sh` to build it."
                 );
             }
@@ -410,7 +415,7 @@ impl RuntimeBackend for VirtualizationBackend {
     /// Create a container from an OCI bundle directory.
     ///
     /// Injects k3rs-init + config.json into the OCI rootfs so the VM kernel
-    /// can boot it directly via `root=virtiofs:rootfs init=/sbin/init`.
+    /// can boot it directly via `root=virtiofs:rootfs init=/sbin/k3rs-init`.
     async fn create(&self, id: &str, bundle: &Path) -> Result<()> {
         tracing::info!("[virt] create: id={} bundle={}", id, bundle.display());
 
