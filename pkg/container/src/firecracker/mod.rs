@@ -585,11 +585,14 @@ impl FirecrackerBackend {
 
     // ─── Exec via vsock ──────────────────────────────────────────────
 
-    /// Execute a one-shot command via Firecracker vsock.
+    /// Open a host→guest vsock connection via the Firecracker vsock UDS.
     ///
-    /// Connects to the vsock UDS at `{uds_path}_{port}` and uses
-    /// the same protocol as k3rs-init: `cmd\0arg1\0arg2\n`.
-    async fn exec_via_vsock(&self, id: &str, command: &[&str]) -> Result<String> {
+    /// Firecracker vsock protocol for host-initiated connections:
+    /// 1. Connect to the main UDS at `{uds_path}`
+    /// 2. Send `CONNECT {port}\n`
+    /// 3. Read `OK {local_port}\n`
+    /// 4. Connection is now bridged to the guest listener on that port
+    async fn vsock_connect(&self, id: &str, port: u32) -> Result<tokio::net::UnixStream> {
         let vsock_uds = {
             let instances = self.instances.read().await;
             instances
@@ -599,12 +602,42 @@ impl FirecrackerBackend {
                 .clone()
         };
 
-        // Firecracker vsock UDS convention: {uds_path}_{port}
-        let connect_path = format!("{}_{}", vsock_uds.display(), VSOCK_EXEC_PORT);
-
-        let mut stream = tokio::net::UnixStream::connect(&connect_path)
+        let mut stream = tokio::net::UnixStream::connect(&vsock_uds)
             .await
-            .with_context(|| format!("failed to connect to vsock at {}", connect_path))?;
+            .with_context(|| format!("failed to connect to vsock UDS at {}", vsock_uds.display()))?;
+
+        // CONNECT handshake
+        stream
+            .write_all(format!("CONNECT {}\n", port).as_bytes())
+            .await?;
+
+        let mut ok_buf = vec![0u8; 64];
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read(&mut ok_buf),
+        )
+        .await
+        .context("vsock CONNECT handshake timeout (5s)")?
+        .context("reading vsock CONNECT response")?;
+
+        let response = String::from_utf8_lossy(&ok_buf[..n]);
+        if !response.starts_with("OK ") {
+            anyhow::bail!(
+                "vsock CONNECT to port {} failed: {}",
+                port,
+                response.trim()
+            );
+        }
+
+        Ok(stream)
+    }
+
+    /// Execute a one-shot command via Firecracker vsock.
+    ///
+    /// Connects host→guest on VSOCK_EXEC_PORT and uses the k3rs-init
+    /// protocol: `cmd\0arg1\0arg2\n`.
+    async fn exec_via_vsock(&self, id: &str, command: &[&str]) -> Result<String> {
+        let mut stream = self.vsock_connect(id, VSOCK_EXEC_PORT).await?;
 
         // Send command: cmd\0arg1\0arg2\n
         let payload = format!("{}\n", command.join("\0"));
@@ -914,9 +947,7 @@ impl RuntimeBackend for FirecrackerBackend {
                 .clone()
         };
 
-        let connect_path = format!("{}_{}", vsock_uds.display(), VSOCK_EXEC_PORT);
-
-        // Build the command payload
+        // Build the exec payload
         let cmd_args: Vec<&str> = if command.is_empty() {
             vec!["/bin/sh"]
         } else {
@@ -926,17 +957,45 @@ impl RuntimeBackend for FirecrackerBackend {
         let prefix = if tty { "\x01" } else { "" };
         let payload = format!("{}{}\n", prefix, cmd_args.join("\0"));
 
-        // Use socat as a stdio ↔ Unix socket bridge.
-        // socat provides a Child process with piped stdin/stdout.
+        // Use socat to connect to the main vsock UDS.
         let mut child = tokio::process::Command::new("socat")
-            .args(["STDIO", &format!("UNIX-CONNECT:{}", connect_path)])
+            .args(["STDIO", &format!("UNIX-CONNECT:{}", vsock_uds.display())])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .context("failed to spawn socat for vsock bridge (is socat installed?)")?;
 
-        // Write the command prefix through stdin
+        // Perform CONNECT handshake through socat before returning to caller.
+        // socat bridges stdio ↔ the vsock UDS, so we write/read the handshake
+        // through the child's piped stdin/stdout.
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            stdin
+                .write_all(format!("CONNECT {}\n", VSOCK_EXEC_PORT).as_bytes())
+                .await?;
+
+            let stdout = child.stdout.as_mut().unwrap();
+            let mut ok_buf = vec![0u8; 64];
+            let n = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stdout.read(&mut ok_buf),
+            )
+            .await
+            .context("vsock CONNECT handshake timeout (5s)")?
+            .context("reading vsock CONNECT response")?;
+
+            let response = String::from_utf8_lossy(&ok_buf[..n]);
+            if !response.starts_with("OK ") {
+                anyhow::bail!(
+                    "vsock CONNECT to port {} failed: {}",
+                    VSOCK_EXEC_PORT,
+                    response.trim()
+                );
+            }
+        }
+
+        // Send the exec payload after handshake completes
         if let Some(ref mut stdin) = child.stdin {
             stdin.write_all(payload.as_bytes()).await?;
         }
