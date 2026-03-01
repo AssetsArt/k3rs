@@ -211,20 +211,42 @@ impl ContainerRuntime {
                     self.backend.clone()
                 }
             } else if name == "youki" || name == "crun" {
+                // Inside containers (Podman/Docker), youki fails because it
+                // hardcodes cgroup controller enablement (+io, +memory etc.)
+                // which isn't supported in nested cgroup hierarchies.
+                // Auto-fallback to crun which supports --cgroup-manager none.
+                let effective_name = if name == "youki" {
+                    let is_native = std::fs::read_to_string("/proc/1/comm")
+                        .map(|s| s.trim() == "systemd" || s.trim() == "init")
+                        .unwrap_or(false);
+                    if !is_native {
+                        tracing::warn!(
+                            "youki requested but running inside a container — falling back to crun \
+                             (youki requires cgroup controllers not available in nested environments)"
+                        );
+                        "crun"
+                    } else {
+                        name
+                    }
+                } else {
+                    name
+                };
+
                 // Try PATH first; auto-download if not found.
-                match OciBackend::with_name(name, &self.data_dir) {
+                match OciBackend::with_name(effective_name, &self.data_dir) {
                     Ok(b) => Arc::new(b) as Arc<dyn RuntimeBackend>,
                     Err(_) => {
                         info!(
                             "OCI runtime {} not found in PATH or install dir — attempting auto-download...",
-                            name
+                            effective_name
                         );
-                        let downloaded =
-                            crate::installer::RuntimeInstaller::ensure_runtime(Some(name))
-                                .await
-                                .map_err(|e| {
-                                    anyhow::anyhow!("Auto-download failed for {}: {}", name, e)
-                                })?;
+                        let downloaded = crate::installer::RuntimeInstaller::ensure_runtime(Some(
+                            effective_name,
+                        ))
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!("Auto-download failed for {}: {}", effective_name, e)
+                        })?;
                         Arc::new(OciBackend::new(
                             &downloaded.to_string_lossy(),
                             &self.data_dir,

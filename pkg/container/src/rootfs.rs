@@ -374,10 +374,14 @@ impl RootfsManager {
             namespaces.push(serde_json::json!({ "type": "user" }));
         }
 
-        // Only add cgroup namespace if running as root.
-        // In rootless mode, many systems don't have cgroup v2 delegation enabled
-        // for non-root users, leading to permission denied errors.
-        if is_root() {
+        // Cgroup namespace + mount only on native Linux (PID1 = systemd/init).
+        // Inside containers (Podman/Docker), cgroup controllers may not be
+        // available or delegated, causing youki to fail with ENOTSUP.
+        let is_native = std::fs::read_to_string("/proc/1/comm")
+            .map(|s| s.trim() == "systemd" || s.trim() == "init")
+            .unwrap_or(false);
+
+        if is_root() && is_native {
             namespaces.push(serde_json::json!({ "type": "cgroup" }));
         }
 
@@ -437,7 +441,8 @@ impl RootfsManager {
               "options": ["nosuid", "nodev", "mode=755", "size=65536k"] }),
         ];
 
-        if is_root() {
+        // Only mount cgroup filesystem on native Linux
+        if is_root() && is_native {
             mounts.push(serde_json::json!({
                 "destination": "/sys/fs/cgroup",
                 "type": "cgroup",

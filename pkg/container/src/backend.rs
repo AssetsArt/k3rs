@@ -99,8 +99,19 @@ impl OciBackend {
     /// Auto-detect an OCI runtime in $PATH or install directory.
     /// Priority: youki or crun
     pub fn detect(data_dir: &std::path::Path) -> Result<Self> {
-        // Try youki then crun
-        for name in &["youki", "crun"] {
+        // Inside containers, prefer crun (supports --cgroup-manager none).
+        // Youki hardcodes cgroup controller enablement which fails in nested environments.
+        let is_native = std::fs::read_to_string("/proc/1/comm")
+            .map(|s| s.trim() == "systemd" || s.trim() == "init")
+            .unwrap_or(false);
+
+        let runtimes: &[&str] = if is_native {
+            &["youki", "crun"]
+        } else {
+            &["crun", "youki"]
+        };
+
+        for name in runtimes {
             if let Ok(oci) = Self::with_name(name, data_dir) {
                 return Ok(oci);
             }
