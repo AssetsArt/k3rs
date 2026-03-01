@@ -969,7 +969,7 @@ async fn main() -> anyhow::Result<()> {
                                         info!(
                                             "[pod:{}] Container running via {}",
                                             pod.name,
-                                            pod_runtime.backend_name()
+                                            pod_runtime.backend_name_for(&pod.id)
                                         );
                                         let _ = pod_client
                                             .put(&status_url)

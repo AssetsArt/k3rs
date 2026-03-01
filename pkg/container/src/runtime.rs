@@ -170,6 +170,17 @@ impl ContainerRuntime {
         self.backend.name()
     }
 
+    /// The name of the backend used for a specific container.
+    /// Falls back to the default backend name if the container is not tracked.
+    pub fn backend_name_for(&self, container_id: &str) -> &str {
+        if let Some(entry) = self.store.get(container_id) {
+            if entry.runtime_name == "vm" {
+                return "vm";
+            }
+        }
+        self.backend.name()
+    }
+
     /// Returns the path to the OCI runtime binary (e.g. `/usr/local/bin/youki`),
     /// or None for VM backends. Used by the agent for PTY-based exec.
     pub fn oci_runtime_path(&self) -> Option<String> {
@@ -220,33 +231,7 @@ impl ContainerRuntime {
     ) -> Result<()> {
         let backend = if let Some(name) = runtime_name {
             if name == "vm" {
-                match self.get_or_init_vm_backend().await {
-                    Ok(vm) => vm,
-                    Err(e) => {
-                        info!("VM backend init failed: {}, falling back to OCI runtime", e);
-                        // In nested containers, youki fails on cgroup controllers.
-                        // Prefer crun (supports --cgroup-manager none) over youki.
-                        let is_native = std::fs::read_to_string("/proc/1/comm")
-                            .map(|s| {
-                                let t = s.trim();
-                                t == "systemd" || t == "init"
-                            })
-                            .unwrap_or(false);
-                        if !is_native && self.backend.name() == "youki" {
-                            match OciBackend::with_name("crun", &self.data_dir) {
-                                Ok(crun) => {
-                                    info!(
-                                        "Nested container detected — using crun instead of youki"
-                                    );
-                                    Arc::new(crun) as Arc<dyn RuntimeBackend>
-                                }
-                                Err(_) => self.backend.clone(),
-                            }
-                        } else {
-                            self.backend.clone()
-                        }
-                    }
-                }
+                self.get_or_init_vm_backend().await?
             } else if name == "youki" || name == "crun" {
                 // Inside containers (Podman/Docker), youki fails because it
                 // hardcodes cgroup controller enablement (+io, +memory etc.)
