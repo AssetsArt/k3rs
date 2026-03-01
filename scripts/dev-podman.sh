@@ -102,8 +102,23 @@ build_run_args() {
     # KVM passthrough for Firecracker
     if [ "$ENABLE_KVM" = "1" ]; then
         if [ -e /dev/kvm ]; then
+            # Native Linux host — pass through /dev/kvm directly
             args+=(--device /dev/kvm)
             echo -e "${GREEN}🔥 KVM passthrough enabled (/dev/kvm)${NC}" >&2
+        elif [ "$(uname -s)" = "Darwin" ]; then
+            # macOS — check inside Podman machine VM
+            if podman machine ssh -- test -e /dev/kvm 2>/dev/null; then
+                # Podman machine has nested virt + KVM — privileged mode exposes it
+                echo -e "${GREEN}🔥 KVM available inside Podman machine VM${NC}" >&2
+            else
+                echo -e "${YELLOW}⚠ /dev/kvm not found inside Podman machine VM${NC}" >&2
+                echo -e "${YELLOW}  Firecracker requires KVM. To enable nested virtualization:${NC}" >&2
+                echo -e "${YELLOW}    podman machine stop${NC}" >&2
+                echo -e "${YELLOW}    podman machine rm${NC}" >&2
+                echo -e "${YELLOW}    podman machine init --cpus 10 --memory 12000 --disk-size 100 --rootful --now${NC}" >&2
+                echo -e "${YELLOW}  Note: Apple Silicon nested virt requires macOS 15+ and Podman 5.3+${NC}" >&2
+                echo -e "${YELLOW}  If KVM is still unavailable, test on native Linux instead.${NC}" >&2
+            fi
         else
             echo -e "${YELLOW}⚠ /dev/kvm not found — Firecracker will not be available${NC}" >&2
         fi
