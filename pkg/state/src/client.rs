@@ -86,6 +86,22 @@ impl StateStore {
         Ok(results)
     }
 
+    /// Snapshot all registry keys for backup purposes.
+    /// Excludes restore metadata (`/registry/_restore/`), backup metadata
+    /// (`/registry/_backup/`), and lease keys (`/registry/leases/`).
+    pub async fn snapshot(&self) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+        let all = self.list_prefix("/registry/").await?;
+        let filtered = all
+            .into_iter()
+            .filter(|(k, _)| {
+                !k.starts_with("/registry/_restore/")
+                    && !k.starts_with("/registry/_backup/")
+                    && !k.starts_with("/registry/leases/")
+            })
+            .collect();
+        Ok(filtered)
+    }
+
     /// Gracefully close the state store.
     pub async fn close(self) -> anyhow::Result<()> {
         info!("Closing SlateDB state store");

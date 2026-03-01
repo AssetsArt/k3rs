@@ -3784,8 +3784,10 @@ name = "k3rsctl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "crossterm",
+ "flate2",
  "futures-util",
  "pkg-constants",
  "pkg-types",
@@ -5407,6 +5409,7 @@ dependencies = [
  "anyhow",
  "axum 0.8.8",
  "chrono",
+ "flate2",
  "futures-util",
  "pkg-controllers",
  "pkg-metrics",
@@ -5460,9 +5463,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "flate2",
  "pkg-scheduler",
  "pkg-state",
  "pkg-types",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

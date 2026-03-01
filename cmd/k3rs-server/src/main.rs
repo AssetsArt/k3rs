@@ -43,6 +43,18 @@ struct Cli {
     /// OpenTelemetry OTLP endpoint (gRPC)
     #[arg(long, default_value = "http://localhost:4317")]
     otel_endpoint: String,
+
+    /// Directory for automated backup files (backup disabled if not set)
+    #[arg(long)]
+    backup_dir: Option<String>,
+
+    /// Interval between automated backups in seconds (default: 3600)
+    #[arg(long, default_value_t = 3600)]
+    backup_interval_secs: u64,
+
+    /// Number of backup files to keep (default: 5)
+    #[arg(long, default_value_t = 5)]
+    backup_retention: usize,
 }
 
 #[tokio::main]
@@ -93,6 +105,9 @@ async fn main() -> anyhow::Result<()> {
         join_token: token,
         node_name: node_name.clone(),
         server_id: node_name,
+        backup_dir: cli.backup_dir,
+        backup_interval_secs: cli.backup_interval_secs,
+        backup_retention: cli.backup_retention,
     };
 
     start_server(config).await?;

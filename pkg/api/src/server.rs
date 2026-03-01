@@ -4,17 +4,19 @@ use axum::{
 };
 use chrono::Utc;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::AppState;
 use crate::auth::{auth_middleware, rbac_middleware};
 use crate::handlers::{
-    cluster, drain, endpoints, exec, heartbeat, images, processes, register, resources, watch,
+    backup, cluster, drain, endpoints, exec, heartbeat, images, processes, register, resources,
+    watch,
 };
 use crate::request_id::request_id_middleware;
 
+use pkg_controllers::backup::BackupController;
 use pkg_controllers::cronjob::CronJobController;
 use pkg_controllers::daemonset::DaemonSetController;
 use pkg_controllers::deployment::DeploymentController;
@@ -36,6 +38,12 @@ pub struct ServerConfig {
     pub join_token: String,
     pub node_name: String,
     pub server_id: String,
+    /// Directory where automated backups are written (None = disabled).
+    pub backup_dir: Option<String>,
+    /// Interval between automated backups in seconds (default 3600).
+    pub backup_interval_secs: u64,
+    /// Number of backup files to retain (default 5).
+    pub backup_retention: usize,
 }
 
 pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
@@ -58,6 +66,10 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         "Whether this server is the leader (1=leader, 0=follower)",
     );
 
+    // Restore / leader flags shared across AppState clones
+    let restore_in_progress = Arc::new(AtomicBool::new(false));
+    let is_leader = Arc::new(AtomicBool::new(false));
+
     let state = AppState {
         store: store.clone(),
         ca: Arc::new(ca),
@@ -65,6 +77,9 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         listen_addr: config.addr.to_string(),
         scheduler: Some(scheduler.clone()),
         metrics,
+        backup_dir: config.backup_dir.clone(),
+        restore_in_progress: restore_in_progress.clone(),
+        is_leader: is_leader.clone(),
     };
 
     // Seed default namespaces
@@ -80,6 +95,12 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     // Start leader-gated controllers
     let ctrl_store = store.clone();
     let ctrl_scheduler = scheduler.clone();
+    let ctrl_backup_dir = config.backup_dir.clone();
+    let ctrl_backup_interval = config.backup_interval_secs;
+    let ctrl_backup_retention = config.backup_retention;
+    let ctrl_ca_cert_pem = state.ca.ca_cert_pem().to_string();
+    let ctrl_is_leader = is_leader.clone();
+
     tokio::spawn(async move {
         let mut rx = leader_rx;
         loop {
@@ -90,8 +111,10 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
                 }
             }
 
+            ctrl_is_leader.store(true, std::sync::atomic::Ordering::SeqCst);
             info!("Starting controllers (leader mode)");
-            let handles = vec![
+
+            let mut handles = vec![
                 NodeController::new(ctrl_store.clone()).start(),
                 DeploymentController::new(ctrl_store.clone()).start(),
                 ReplicaSetController::new(ctrl_store.clone(), ctrl_scheduler.clone()).start(),
@@ -102,6 +125,18 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
                 EvictionController::new(ctrl_store.clone()).start(),
             ];
 
+            // Start BackupController if a backup directory is configured
+            if let Some(ref dir) = ctrl_backup_dir {
+                let bctl = BackupController::new(
+                    ctrl_store.clone(),
+                    dir.clone(),
+                    ctrl_backup_interval,
+                    ctrl_backup_retention,
+                    ctrl_ca_cert_pem.clone(),
+                );
+                handles.push(bctl.start());
+            }
+
             // Wait until we lose leadership
             while *rx.borrow() {
                 if rx.changed().await.is_err() {
@@ -109,6 +144,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
                 }
             }
 
+            ctrl_is_leader.store(false, std::sync::atomic::Ordering::SeqCst);
             warn!("Lost leadership — stopping controllers");
             for h in handles {
                 h.abort();
@@ -239,6 +275,23 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             "/api/v1/namespaces/{ns}/pvcs",
             post(resources::create_pvc).get(resources::list_pvcs),
         )
+        // Phase 6: backup / restore
+        .route(
+            "/api/v1/cluster/backup",
+            post(backup::create_backup_handler),
+        )
+        .route(
+            "/api/v1/cluster/backup/status",
+            get(backup::backup_status),
+        )
+        .route(
+            "/api/v1/cluster/restore",
+            post(backup::restore_cluster_handler),
+        )
+        .route(
+            "/api/v1/cluster/restore/dry-run",
+            post(backup::restore_dry_run_handler),
+        )
         // Cluster: process list
         .route("/api/v1/processes", get(processes::list_processes))
         // Runtime management
@@ -263,6 +316,11 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             "/api/v1/{resource_type}/{ns}/{name}",
             delete(resources::delete_resource),
         )
+        // Restore-guard: return 503 on all routes while a restore is running
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            backup::restore_guard_middleware,
+        ))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             rbac_middleware,

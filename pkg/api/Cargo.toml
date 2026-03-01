@@ -22,3 +22,4 @@ pkg-metrics = { path = "../metrics" }
 sysinfo = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+flate2 = { workspace = true }

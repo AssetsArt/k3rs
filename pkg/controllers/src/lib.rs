@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod cronjob;
 pub mod daemonset;
 pub mod deployment;

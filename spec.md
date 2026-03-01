@@ -667,13 +667,14 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] `second_save_overwrites_first_server_wins` — Scenario 5 unit: full-array overwrite removes stale entries (exposed + fixed stale-key bug in per-object key design)
 - [x] `reopen_reads_persisted_data` — data survives `close()` + re-`open()` (simulates process restart)
 
-**Integration tests** (`scripts/test-resilience.sh`) — 6 E2E bash scenarios:
+**Integration tests** (`scripts/test-resilience.sh`) — 7 E2E bash scenarios:
 - [x] Scenario 1: kill Server → DNS still resolves (stale in-memory cache) → restart Server → agent reconnects + AgentStore refreshed
 - [x] Scenario 2: kill Agent → restart with no server → `AgentStore loaded` appears within 5s → DNS resolves from stale cache offline
 - [x] Scenario 3: kill Agent + Server simultaneously → restart both → agent reconnects + AgentStore refreshed
 - [x] Scenario 4: Fresh start (no prior data dir) → agent registers normally → no "AgentStore loaded" log
 - [x] Scenario 5: Agent syncs svc-old → agent goes offline → svc-new created on server → agent restarts → reconnects → both services resolve via DNS
 - [x] Scenario 6 (Group 5): `GET /api/v1/pods?fieldSelector=spec.nodeName=<node>` returns only pods assigned to that node; nonexistent node returns `[]`; no-filter returns all pods; namespace-scoped endpoint also honours `fieldSelector`
+- [ ] Scenario 7 (Group 6): `POST /api/v1/cluster/backup` returns gzip file; `POST /api/v1/cluster/restore/dry-run` validates it; `POST /api/v1/cluster/restore` wipes + re-imports; all original pods visible after restore
 
 - [x] Test: kill Agent → verify containers still running → restart Agent → verify pod adoption — `scripts/test-recovery.sh`
 
@@ -920,30 +921,30 @@ k3rsctl restore --from ./backup.gz --resources deployments,services,configmaps
 ### Implementation Checklist
 
 #### Backup
-- [ ] `StateStore::snapshot()` — scan all `/registry/` prefixes, return `Vec<(key, value)>`
-- [ ] `BackupFile` struct — version, metadata, PKI, entries with serde Serialize/Deserialize
-- [ ] `create_backup(state_store, ca)` → compress to `.k3rs-backup.json.gz`
-- [ ] `validate_backup(path)` → parse, verify version and key format
-- [ ] `POST /api/v1/cluster/backup` API endpoint — streaming backup download
-- [ ] `GET /api/v1/cluster/backup/status` API endpoint
-- [ ] `BackupController` — scheduled backup with rotation on leader node
-    - [ ] Interval-based trigger (hour interval, no full cron parser needed)
-    - [ ] Write backup to `--backup-dir` with timestamp filename: `backup-YYYYMMDD-HHmmss.k3rs-backup.json.gz`
-    - [ ] Rotate old backups: keep `--backup-retention` most recent, delete the rest
-    - [ ] Emit cluster event on success/failure
-- [ ] `k3rsctl backup create` CLI command
-- [ ] `k3rsctl backup list` / `k3rsctl backup inspect` CLI commands
-- [ ] Server config: `--backup-dir`, `--backup-interval`, `--backup-retention`
+- [x] `StateStore::snapshot()` — scan all `/registry/` prefixes, return `Vec<(key, value)>`; excludes `_restore/`, `_backup/`, `leases/` — `pkg/state/src/client.rs::snapshot()`
+- [x] `BackupFile` struct — `version`, `created_at`, `cluster_name`, `node_count`, `key_count`, `entries: Vec<BackupEntry>`, `pki: BackupPki`; serde Serialize/Deserialize — `pkg/types/src/backup.rs`
+- [x] `create_backup_bytes(state)` → gzip-compressed JSON bytes; `validate_backup(backup)` → check version + non-empty — `pkg/api/src/handlers/backup.rs`
+- [x] `validate_backup(backup)` → check version string + non-empty entries — `backup.rs::validate_backup()`
+- [x] `POST /api/v1/cluster/backup` API endpoint — snapshot + gzip → stream as `application/gzip` download — `backup.rs::create_backup_handler()`
+- [x] `GET /api/v1/cluster/backup/status` API endpoint — returns last backup metadata from `/registry/_backup/last` — `backup.rs::backup_status()`
+- [x] `BackupController` — scheduled backup with rotation on leader node — `pkg/controllers/src/backup.rs`
+    - [x] Interval-based trigger via `tokio::time::interval` (configurable `--backup-interval-secs`, default 3600s)
+    - [x] Write backup to `--backup-dir` with timestamp filename: `backup-YYYYMMDD-HHmmss.k3rs-backup.json.gz`
+    - [x] Rotate old backups: keep `--backup-retention` most recent, delete the rest — `BackupController::rotate_backups()`
+    - [x] Emit cluster event on success (`/events/backup/success`) / failure (`/events/backup/failure`) via `event_log.emit()`
+- [x] `k3rsctl backup create` CLI command — POST to server, save gzip to local file — `k3rsctl`
+- [x] `k3rsctl backup list` / `k3rsctl backup inspect` / `k3rsctl backup status` CLI commands
+- [x] Server config: `--backup-dir`, `--backup-interval-secs`, `--backup-retention` — `cmd/k3rs-server/src/main.rs` + `ServerConfig`
 
 #### Restore
-- [ ] `POST /api/v1/cluster/restore` endpoint — multipart upload, leader-only
-- [ ] `POST /api/v1/cluster/restore/dry-run` endpoint — validate + diff
-- [ ] Restore engine: pause → wipe → import → reload PKI → bump epoch → resume
-- [ ] `/registry/_restore/epoch` key — monotonic counter for follower detection
-- [ ] `/registry/_restore/status` key — `in_progress` / `completed` with timestamp
-- [ ] Follower: watch `_restore/epoch` → pause → reload → resume
-- [ ] `503 Service Unavailable` during restore window
-- [ ] `k3rsctl restore --from <file>` CLI command (with `--force`, `--dry-run`)
+- [x] `POST /api/v1/cluster/restore` endpoint — upload gzip body, leader-only (returns 403 if not leader) — `backup.rs::restore_cluster_handler()`
+- [x] `POST /api/v1/cluster/restore/dry-run` endpoint — parse + validate + return diff info without writing — `backup.rs::restore_dry_run_handler()`
+- [x] Restore engine: set `restore_in_progress=true` → wipe `/registry/` → import entries → bump epoch → clear flag — `backup.rs::perform_restore()`
+- [x] `/registry/_restore/epoch` key — Unix timestamp bumped after successful restore for follower detection
+- [x] `/registry/_restore/status` key — `in_progress` / `completed` / `failed` written throughout restore
+- [ ] Follower: watch `_restore/epoch` → pause → reload → resume (single-server setup; follower watch loop deferred to multi-server phase)
+- [x] `503 Service Unavailable` during restore window — `restore_guard_middleware` added as route_layer in `server.rs`; checks `AppState::restore_in_progress: Arc<AtomicBool>`
+- [x] `k3rsctl restore --from <file>` CLI command (with `--force`, `--dry-run`) — `cmd/k3rsctl/src/main.rs::Commands::Restore`
 
 
 ## Implementation Phases

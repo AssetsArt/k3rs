@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod cluster;
 pub mod drain;
 pub mod endpoints;
