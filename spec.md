@@ -608,13 +608,13 @@ Agents detect state change via watch/heartbeat
 #### CLI
 
 ```bash
-# Restore (ส่ง backup ไป Server ผ่าน API ทำให้เลย)
+# Restore (sends backup to Server via API)
 k3rsctl restore --from ./cluster-backup.k3rs-backup.json.gz
 
-# Dry-run (แสดงว่าจะ restore อะไรบ้าง ไม่เขียนจริง)
+# Dry-run (show what would be restored without writing)
 k3rsctl restore --from ./cluster-backup.k3rs-backup.json.gz --dry-run
 
-# Force (ไม่ถาม confirm)
+# Force (skip confirmation prompt)
 k3rsctl restore --from ./cluster-backup.k3rs-backup.json.gz --force
 ```
 
@@ -627,7 +627,7 @@ POST /api/v1/cluster/restore/dry-run   → validate + show diff without applying
 
 #### Multi-Server Mode
 
-เมื่อมี Server หลายตัว share SlateDB (object storage):
+When multiple Servers share SlateDB (object storage):
 
 ```
                         ┌─────────────┐
@@ -648,13 +648,13 @@ k3rsctl restore ──────► │  Leader     │  ← restore runs here
             └──────────┘   └──────────┘
 ```
 
-| เรื่อง | วิธีจัดการ |
+| Concern | Handling |
 |---|---|
-| **ใครทำ restore?** | Leader เท่านั้น — followers reject restore request ด้วย `409 Conflict` |
-| **Followers รู้ได้ไง?** | Leader เขียน `/registry/_restore/epoch` key (monotonic counter) — followers watch key นี้ |
-| **Followers ทำอะไร?** | เมื่อเห็น epoch เปลี่ยน → pause controllers → reload state from SlateDB → resume |
-| **ระหว่าง restore?** | Leader ตอบ API requests ด้วย `503 Service Unavailable` (ประมาณ 1-5 วินาที) |
-| **Agent ได้รับผลกระทบ?** | ไม่ — containers ยัง run อยู่ (fail-static), agent reconnect + reconcile หลัง restore |
+| **Who performs restore?** | Leader only — followers reject restore requests with `409 Conflict` |
+| **How do followers detect it?** | Leader writes `/registry/_restore/epoch` key (monotonic counter) — followers watch this key |
+| **What do followers do?** | On epoch change → pause controllers → reload state from SlateDB → resume |
+| **During restore?** | Leader responds to API requests with `503 Service Unavailable` (~1-5 seconds) |
+| **Agent impact?** | None — containers keep running (fail-static), agent reconnects + reconciles after restore |
 
 #### Restore Flow (Leader, Internal)
 
@@ -683,10 +683,10 @@ k3rsctl restore ──────► │  Leader     │  ← restore runs here
 #### Selective Restore (future)
 
 ```bash
-# Restore เฉพาะ namespace
+# Restore specific namespace only
 k3rsctl restore --from ./backup.gz --namespace production
 
-# Restore เฉพาะ resource types
+# Restore specific resource types only
 k3rsctl restore --from ./backup.gz --resources deployments,services,configmaps
 ```
 
