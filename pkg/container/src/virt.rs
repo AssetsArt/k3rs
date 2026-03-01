@@ -472,10 +472,7 @@ impl VirtualizationBackend {
     ///   - False-positive matches on unrelated processes with similar cmdlines.
     ///   - Subprocess overhead of spawning `pgrep` for every VM on each tick.
     ///   - Fragile string parsing of `k3rs-vmm ls` output.
-    async fn restore_from_pid_files(
-        &self,
-        discovered: &mut std::collections::HashSet<String>,
-    ) {
+    async fn restore_from_pid_files(&self, discovered: &mut std::collections::HashSet<String>) {
         let mut dir = match tokio::fs::read_dir(&self.data_dir).await {
             Ok(d) => d,
             Err(_) => return,

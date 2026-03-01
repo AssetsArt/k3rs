@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -16,6 +16,47 @@ use crate::AppState;
 pub struct ListQuery {
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Kubernetes-style field selector, e.g. `spec.nodeName=worker-1` or
+    /// `spec.nodeName=worker-1,status.phase=Running` (comma-separated).
+    #[serde(rename = "fieldSelector", default)]
+    pub field_selector: Option<String>,
+}
+
+/// Parse a comma-separated Kubernetes field selector string into `(field, value)` pairs.
+///
+/// Example: `"spec.nodeName=worker-1,status.phase=Running"`
+/// → `[("spec.nodeName", "worker-1"), ("status.phase", "Running")]`
+fn parse_field_selector(selector: &str) -> Vec<(&str, &str)> {
+    selector
+        .split(',')
+        .filter_map(|kv| {
+            let mut parts = kv.splitn(2, '=');
+            let field = parts.next()?.trim();
+            let value = parts.next()?.trim();
+            if field.is_empty() {
+                None
+            } else {
+                Some((field, value))
+            }
+        })
+        .collect()
+}
+
+/// Apply a parsed field selector to a mutable pod list in-place.
+fn apply_pod_field_selector(pods: &mut Vec<pkg_types::pod::Pod>, selector: &str) {
+    for (field, value) in parse_field_selector(selector) {
+        match field {
+            "spec.nodeName" => {
+                pods.retain(|p| p.node_name.as_deref() == Some(value));
+            }
+            "metadata.namespace" => {
+                pods.retain(|p| p.namespace == value);
+            }
+            unknown => {
+                warn!("Unsupported fieldSelector field '{}' — ignored", unknown);
+            }
+        }
+    }
 }
 
 // ============================================================
@@ -106,13 +147,49 @@ pub async fn create_pod(
 pub async fn list_pods(
     State(state): State<AppState>,
     AxumPath(ns): AxumPath<String>,
+    Query(query): Query<ListQuery>,
 ) -> impl IntoResponse {
     let prefix = format!("/registry/pods/{}/", ns);
     let entries = state.store.list_prefix(&prefix).await.unwrap_or_default();
-    let pods: Vec<pkg_types::pod::Pod> = entries
+    let mut pods: Vec<pkg_types::pod::Pod> = entries
         .into_iter()
         .filter_map(|(_, v)| serde_json::from_slice(&v).ok())
         .collect();
+    if let Some(ref selector) = query.field_selector {
+        apply_pod_field_selector(&mut pods, selector);
+    }
+    (StatusCode::OK, Json(pods)).into_response()
+}
+
+/// GET /api/v1/pods — cluster-wide pod list with optional fieldSelector.
+///
+/// Supported selectors:
+/// - `spec.nodeName=<name>` — filter pods scheduled on a specific node
+/// - `metadata.namespace=<ns>` — filter pods in a specific namespace
+/// - Comma-separated combinations of the above
+///
+/// Example: `GET /api/v1/pods?fieldSelector=spec.nodeName=worker-1`
+pub async fn list_all_pods(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> impl IntoResponse {
+    let entries = state
+        .store
+        .list_prefix("/registry/pods/")
+        .await
+        .unwrap_or_default();
+    let mut pods: Vec<pkg_types::pod::Pod> = entries
+        .into_iter()
+        .filter_map(|(_, v)| serde_json::from_slice::<pkg_types::pod::Pod>(&v).ok())
+        .collect();
+    if let Some(ref selector) = query.field_selector {
+        apply_pod_field_selector(&mut pods, selector);
+    }
+    debug!(
+        "list_all_pods: fieldSelector={:?} → {} pods",
+        query.field_selector,
+        pods.len()
+    );
     (StatusCode::OK, Json(pods)).into_response()
 }
 

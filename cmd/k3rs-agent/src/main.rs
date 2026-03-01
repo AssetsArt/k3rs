@@ -213,7 +213,10 @@ async fn main() -> anyhow::Result<()> {
     let store = match AgentStore::open(&data_dir).await {
         Ok(s) => s,
         Err(e) => {
-            warn!("Failed to open AgentStore at '{}', starting fresh: {}", data_dir, e);
+            warn!(
+                "Failed to open AgentStore at '{}', starting fresh: {}",
+                data_dir, e
+            );
             // Re-open at a temp path so the rest of the code still has a store.
             // In practice this should never happen on a well-formed filesystem.
             AgentStore::open("/tmp/k3rs-agent-fallback").await?
@@ -528,7 +531,7 @@ async fn main() -> anyhow::Result<()> {
 
                     if initial_node_id.is_some() {
                         let url = format!(
-                            "{}/api/v1/nodes/{}/pods",
+                            "{}/api/v1/pods?fieldSelector=spec.nodeName={}",
                             ctrl_server.trim_end_matches('/'),
                             ctrl_node_name
                         );
@@ -724,7 +727,7 @@ async fn main() -> anyhow::Result<()> {
                     };
 
                     let url = format!(
-                        "{}/api/v1/nodes/{}/pods",
+                        "{}/api/v1/pods?fieldSelector=spec.nodeName={}",
                         sync_server.trim_end_matches('/'),
                         sync_node_name
                     );

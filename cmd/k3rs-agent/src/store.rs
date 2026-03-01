@@ -25,9 +25,9 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use pkg_types::{endpoint::Endpoint, ingress::Ingress, pod::Pod, service::Service};
 use serde::{Deserialize, Serialize};
-use slatedb::{Db, WriteBatch};
 use slatedb::object_store::local::LocalFileSystem;
 use slatedb::object_store::path::Path;
+use slatedb::{Db, WriteBatch};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
@@ -210,12 +210,9 @@ impl AgentStore {
         &self,
         key: &[u8],
     ) -> anyhow::Result<Vec<T>> {
-        match self
-            .db
-            .get(key)
-            .await
-            .map_err(|e| anyhow::anyhow!("AgentStore get {:?}: {}", String::from_utf8_lossy(key), e))?
-        {
+        match self.db.get(key).await.map_err(|e| {
+            anyhow::anyhow!("AgentStore get {:?}: {}", String::from_utf8_lossy(key), e)
+        })? {
             Some(b) => Ok(serde_json::from_slice(&b)?),
             None => Ok(Vec::new()),
         }

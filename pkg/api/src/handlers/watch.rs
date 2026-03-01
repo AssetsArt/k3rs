@@ -1,7 +1,10 @@
 use axum::{
     Json,
     extract::{Query, State},
-    response::{IntoResponse, sse::{Event, KeepAlive, Sse}},
+    response::{
+        IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
 use pkg_state::watch::WatchEvent;
 use serde::Deserialize;

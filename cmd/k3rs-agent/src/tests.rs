@@ -134,7 +134,11 @@ mod backoff_tests {
     fn heartbeat_backoff_is_1s_on_first_retry() {
         // fail_count=1 after first failure → saturating_sub(1) = 0 → 1s
         let first = ConnectivityManager::backoff_duration(1u32.saturating_sub(1));
-        assert_eq!(first, Duration::from_secs(1), "first heartbeat retry must be 1s");
+        assert_eq!(
+            first,
+            Duration::from_secs(1),
+            "first heartbeat retry must be 1s"
+        );
 
         // fail_count=2 → index 1 → 2s
         let second = ConnectivityManager::backoff_duration(2u32.saturating_sub(1));
@@ -242,7 +246,8 @@ mod cache_derivation_tests {
         let dns = c.derive_dns_map();
 
         assert_eq!(
-            dns.get("nginx.default.svc.cluster.local").map(String::as_str),
+            dns.get("nginx.default.svc.cluster.local")
+                .map(String::as_str),
             Some("10.0.0.1"),
             "nginx FQDN must map to ClusterIP"
         );
@@ -275,21 +280,36 @@ mod cache_derivation_tests {
     #[test]
     fn derive_routes_map_basic_single_backend() {
         let mut c = AgentStateCache::new("node".to_string());
-        c.services = vec![make_service("svc-1", "nginx", "default", "10.0.0.1", 80, 8080)];
-        c.endpoints = vec![make_endpoint("ep-1", "svc-1", "nginx", "default", "192.168.1.10")];
+        c.services = vec![make_service(
+            "svc-1", "nginx", "default", "10.0.0.1", 80, 8080,
+        )];
+        c.endpoints = vec![make_endpoint(
+            "ep-1",
+            "svc-1",
+            "nginx",
+            "default",
+            "192.168.1.10",
+        )];
 
         let routes = c.derive_routes_map();
-        let backends = routes.get("10.0.0.1:80").expect("route 10.0.0.1:80 must exist");
+        let backends = routes
+            .get("10.0.0.1:80")
+            .expect("route 10.0.0.1:80 must exist");
         assert_eq!(backends, &vec!["192.168.1.10:8080".to_string()]);
     }
 
     #[test]
     fn derive_routes_map_multiple_backends() {
         let mut c = AgentStateCache::new("node".to_string());
-        c.services = vec![make_service("svc-1", "nginx", "default", "10.0.0.1", 80, 8080)];
+        c.services = vec![make_service(
+            "svc-1", "nginx", "default", "10.0.0.1", 80, 8080,
+        )];
         let mut ep = make_endpoint("ep-1", "svc-1", "nginx", "default", "192.168.1.10");
-        ep.addresses
-            .push(EndpointAddress { ip: "192.168.1.11".to_string(), node_name: None, pod_id: None });
+        ep.addresses.push(EndpointAddress {
+            ip: "192.168.1.11".to_string(),
+            node_name: None,
+            pod_id: None,
+        });
         c.endpoints = vec![ep];
 
         let routes = c.derive_routes_map();
@@ -305,7 +325,13 @@ mod cache_derivation_tests {
         let mut svc = make_service("svc-1", "nginx", "default", "dummy", 80, 8080);
         svc.cluster_ip = None;
         c.services = vec![svc];
-        c.endpoints = vec![make_endpoint("ep-1", "svc-1", "nginx", "default", "192.168.1.10")];
+        c.endpoints = vec![make_endpoint(
+            "ep-1",
+            "svc-1",
+            "nginx",
+            "default",
+            "192.168.1.10",
+        )];
 
         assert!(
             c.derive_routes_map().is_empty(),
@@ -316,7 +342,9 @@ mod cache_derivation_tests {
     #[test]
     fn derive_routes_map_no_backends_when_no_matching_endpoints() {
         let mut c = AgentStateCache::new("node".to_string());
-        c.services = vec![make_service("svc-1", "nginx", "default", "10.0.0.1", 80, 8080)];
+        c.services = vec![make_service(
+            "svc-1", "nginx", "default", "10.0.0.1", 80, 8080,
+        )];
         // No endpoints → no backends → route key omitted entirely
         assert!(
             c.derive_routes_map().get("10.0.0.1:80").is_none(),
@@ -327,10 +355,17 @@ mod cache_derivation_tests {
     #[test]
     fn derive_routes_map_ignores_endpoints_from_different_namespace() {
         let mut c = AgentStateCache::new("node".to_string());
-        c.services = vec![make_service("svc-1", "nginx", "default", "10.0.0.1", 80, 8080)];
+        c.services = vec![make_service(
+            "svc-1", "nginx", "default", "10.0.0.1", 80, 8080,
+        )];
         // Endpoint is in "other-ns" — different namespace → should not match
-        c.endpoints =
-            vec![make_endpoint("ep-1", "svc-1", "nginx", "other-ns", "192.168.1.10")];
+        c.endpoints = vec![make_endpoint(
+            "ep-1",
+            "svc-1",
+            "nginx",
+            "other-ns",
+            "192.168.1.10",
+        )];
 
         assert!(
             c.derive_routes_map().get("10.0.0.1:80").is_none(),
@@ -406,7 +441,11 @@ mod agent_store_tests {
         let loaded = store.load().await.unwrap().unwrap();
 
         assert_eq!(loaded.services.len(), 2, "service count must be preserved");
-        assert_eq!(loaded.endpoints.len(), 2, "endpoint count must be preserved");
+        assert_eq!(
+            loaded.endpoints.len(),
+            2,
+            "endpoint count must be preserved"
+        );
 
         let nginx = loaded.services.iter().find(|s| s.name == "nginx").unwrap();
         assert_eq!(nginx.cluster_ip.as_deref(), Some("10.0.0.1"));
@@ -425,20 +464,41 @@ mod agent_store_tests {
         let store = AgentStore::open(&dir).await.unwrap();
 
         let mut cache = AgentStateCache::new("node".to_string());
-        cache.services = vec![make_service("svc-1", "nginx", "default", "10.0.0.50", 80, 8080)];
-        cache.endpoints =
-            vec![make_endpoint("ep-1", "svc-1", "nginx", "default", "192.168.1.5")];
+        cache.services = vec![make_service(
+            "svc-1",
+            "nginx",
+            "default",
+            "10.0.0.50",
+            80,
+            8080,
+        )];
+        cache.endpoints = vec![make_endpoint(
+            "ep-1",
+            "svc-1",
+            "nginx",
+            "default",
+            "192.168.1.5",
+        )];
 
         store.save(&cache).await.unwrap();
 
         // Fast path: load_routes / load_dns_records (Scenario 2 bootstrap)
-        let routes = store.load_routes().await.unwrap().expect("routes must be stored");
+        let routes = store
+            .load_routes()
+            .await
+            .unwrap()
+            .expect("routes must be stored");
         assert!(routes.contains_key("10.0.0.50:80"), "route key must exist");
         assert_eq!(routes["10.0.0.50:80"], vec!["192.168.1.5:8080"]);
 
-        let dns = store.load_dns_records().await.unwrap().expect("dns must be stored");
+        let dns = store
+            .load_dns_records()
+            .await
+            .unwrap()
+            .expect("dns must be stored");
         assert_eq!(
-            dns.get("nginx.default.svc.cluster.local").map(String::as_str),
+            dns.get("nginx.default.svc.cluster.local")
+                .map(String::as_str),
             Some("10.0.0.50")
         );
 
@@ -455,12 +515,21 @@ mod agent_store_tests {
         // First sync: service A only
         let mut cache = AgentStateCache::new("node".to_string());
         cache.server_seq = 1;
-        cache.services = vec![make_service("svc-a", "svc-a", "default", "10.0.0.1", 80, 8080)];
+        cache.services = vec![make_service(
+            "svc-a", "svc-a", "default", "10.0.0.1", 80, 8080,
+        )];
         store.save(&cache).await.unwrap();
 
         // Second sync: service A replaced by service B (simulates server-wins re-sync)
         cache.server_seq = 99;
-        cache.services = vec![make_service("svc-b", "svc-b", "default", "10.0.0.99", 80, 8080)];
+        cache.services = vec![make_service(
+            "svc-b",
+            "svc-b",
+            "default",
+            "10.0.0.99",
+            80,
+            8080,
+        )];
         store.save(&cache).await.unwrap();
 
         let loaded = store.load().await.unwrap().unwrap();
@@ -470,7 +539,10 @@ mod agent_store_tests {
             1,
             "stale svc-a must be gone — full-array overwrite replaces entire collection"
         );
-        assert_eq!(loaded.services[0].name, "svc-b", "svc-b must be present after re-sync");
+        assert_eq!(
+            loaded.services[0].name, "svc-b",
+            "svc-b must be present after re-sync"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -491,9 +563,16 @@ mod agent_store_tests {
         // Simulate process restart: open a new store handle to the same path
         {
             let store2 = AgentStore::open(&dir).await.unwrap();
-            let loaded = store2.load().await.unwrap().expect("data must survive close+reopen");
+            let loaded = store2
+                .load()
+                .await
+                .unwrap()
+                .expect("data must survive close+reopen");
             assert_eq!(loaded.node_name, "persistent-node");
-            assert_eq!(loaded.server_seq, 77, "server_seq must persist across restart");
+            assert_eq!(
+                loaded.server_seq, 77,
+                "server_seq must persist across restart"
+            );
         }
 
         std::fs::remove_dir_all(&dir).ok();

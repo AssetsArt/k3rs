@@ -28,7 +28,7 @@ use block2::RcBlock;
 use dispatch2::{MainThreadBound, run_on_main};
 use objc2::rc::Retained;
 use objc2_foundation::NSError;
-use objc2_virtualization::{VZVirtualMachine, VZVirtioSocketConnection, VZVirtioSocketDevice};
+use objc2_virtualization::{VZVirtioSocketConnection, VZVirtioSocketDevice, VZVirtualMachine};
 use tracing::{error, info};
 
 /// vsock port k3rs-init listens on for exec commands.
@@ -122,8 +122,7 @@ pub fn exec_streaming_via_vsock(
     let t_vsock_to_ipc = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
-            let n =
-                unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
                 break;
             }
@@ -155,13 +154,8 @@ pub fn exec_streaming_via_vsock(
     let t_ipc_to_vsock = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
-            let n = unsafe {
-                libc::read(
-                    ipc_fd_dup,
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
-                )
-            };
+            let n =
+                unsafe { libc::read(ipc_fd_dup, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
                 break;
             }
@@ -198,9 +192,7 @@ pub fn exec_streaming_via_vsock(
 /// Connect to vsock port 5555 in the guest, returning a dup'd file descriptor.
 ///
 /// Must be called from a non-main thread; uses `run_on_main` internally.
-fn connect_vsock(
-    vm: &Arc<MainThreadBound<Retained<VZVirtualMachine>>>,
-) -> Result<i32, String> {
+fn connect_vsock(vm: &Arc<MainThreadBound<Retained<VZVirtualMachine>>>) -> Result<i32, String> {
     type Pair = (Mutex<Option<Result<i32, String>>>, Condvar);
     let pair: Arc<Pair> = Arc::new((Mutex::new(None), Condvar::new()));
     let pair_for_block = Arc::clone(&pair);

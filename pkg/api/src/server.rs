@@ -126,7 +126,9 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             put(heartbeat::node_heartbeat),
         )
         // Phase 2: watch stream
-        // Node-scoped pod listing (all namespaces)
+        // Cluster-wide pod listing with optional ?fieldSelector=spec.nodeName=<name>
+        .route("/api/v1/pods", get(resources::list_all_pods))
+        // Node-scoped pod listing (all namespaces) — legacy, kept for backward compat
         .route("/api/v1/nodes/{name}/pods", get(resources::list_node_pods))
         .route("/api/v1/watch", get(watch::watch_events))
         .route("/api/v1/events", get(watch::list_events))
