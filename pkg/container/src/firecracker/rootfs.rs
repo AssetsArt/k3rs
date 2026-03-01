@@ -1,19 +1,19 @@
 //! Dual rootfs handler: ext4 block device + virtiofsd shared directory.
 //!
 //! Firecracker supports two rootfs strategies:
-//! - **ext4 block device**: Traditional approach, requires root for loop mount.
+//! - **ext4 block device**: Uses `mkfs.ext4 -d` to populate directly (no root needed).
 //! - **virtiofsd**: Shared directory via vhost-user-fs (Firecracker v1.5+).
 //!
 //! This module auto-detects virtiofsd availability and falls back to ext4.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use tracing::{info, warn};
+use tracing::info;
 
 /// Rootfs mode for a Firecracker VM.
 #[derive(Debug, Clone)]
 pub enum FcRootfsMode {
-    /// ext4 block device image (dd + mkfs.ext4 + mount -o loop)
+    /// ext4 block device image (mkfs.ext4 -d, no root required)
     Ext4 {
         image_path: PathBuf,
     },
@@ -50,11 +50,8 @@ impl FcRootfsManager {
 
     /// Create an ext4 rootfs image from an OCI rootfs directory.
     ///
-    /// Steps:
-    /// 1. Calculate directory size + headroom
-    /// 2. Create sparse file with `truncate`
-    /// 3. Format as ext4 with `mkfs.ext4`
-    /// 4. Mount via loop, copy rootfs contents, unmount
+    /// Uses `mkfs.ext4 -d` to populate the filesystem directly from the source
+    /// directory at format time, avoiding loop mounts that require root.
     pub async fn create_ext4_image(rootfs_dir: &Path, img_path: &Path) -> Result<PathBuf> {
         let dir_size = Self::dir_size(rootfs_dir).await?;
         let img_size_mb = std::cmp::max((dir_size / 1_048_576) + 64, 128); // min 128MB
@@ -66,7 +63,7 @@ impl FcRootfsManager {
             rootfs_dir.display()
         );
 
-        // Create sparse file (much faster than dd)
+        // Create sparse file
         let output = tokio::process::Command::new("truncate")
             .args([
                 "-s",
@@ -83,67 +80,25 @@ impl FcRootfsManager {
             );
         }
 
-        // Format as ext4
+        // Format as ext4 and populate from rootfs directory in one step.
+        // The -d flag copies the directory contents into the image at format time,
+        // avoiding mount -o loop which requires root privileges.
         let output = tokio::process::Command::new("mkfs.ext4")
-            .args(["-F", "-q", &img_path.to_string_lossy()])
+            .args([
+                "-F",
+                "-q",
+                "-d",
+                &rootfs_dir.to_string_lossy(),
+                &img_path.to_string_lossy(),
+            ])
             .output()
             .await
             .context("mkfs.ext4 failed")?;
         if !output.status.success() {
             anyhow::bail!(
-                "mkfs.ext4 failed: {}",
+                "mkfs.ext4 -d failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-        }
-
-        // Mount, copy contents, unmount
-        let mount_point = img_path.with_extension("mnt");
-        tokio::fs::create_dir_all(&mount_point).await?;
-
-        let output = tokio::process::Command::new("mount")
-            .args([
-                "-o",
-                "loop",
-                &img_path.to_string_lossy(),
-                &mount_point.to_string_lossy(),
-            ])
-            .output()
-            .await
-            .context("mount -o loop failed")?;
-        if !output.status.success() {
-            // Clean up on failure
-            let _ = tokio::fs::remove_dir(&mount_point).await;
-            anyhow::bail!(
-                "mount -o loop failed (requires root): {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        // Copy rootfs contents (preserve permissions, symlinks, etc.)
-        let cp_result = tokio::process::Command::new("cp")
-            .args([
-                "-a",
-                &format!("{}/.", rootfs_dir.display()),
-                &mount_point.to_string_lossy(),
-            ])
-            .output()
-            .await;
-
-        // Always unmount, even if cp failed
-        let _ = tokio::process::Command::new("umount")
-            .arg(&mount_point)
-            .output()
-            .await;
-        let _ = tokio::fs::remove_dir(&mount_point).await;
-
-        // Check cp result after unmount
-        if let Ok(output) = cp_result {
-            if !output.status.success() {
-                warn!(
-                    "[fc-rootfs] cp warning: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-            }
         }
 
         info!(
