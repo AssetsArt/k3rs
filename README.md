@@ -5,7 +5,7 @@
 
 **A lightweight container orchestration platform written in Rust.**
 
-Inspired by [K3s](https://k3s.io/), powered by [Cloudflare Pingora](https://github.com/cloudflare/pingora), [Axum](https://docs.rs/axum), and [SlateDB](https://slatedb.io/).
+Inspired by [K3s](https://k3s.io/), powered by [Cloudflare Pingora](https://github.com/cloudflare/pingora), [Axum](https://docs.rs/axum), and [SlateDB](https://slatedb.io/). See the full [specification](spec.md) for architecture details, API reference, and store schema.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
