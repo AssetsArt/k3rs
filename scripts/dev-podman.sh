@@ -94,12 +94,9 @@ build_run_args() {
         # Environment
         -e "RUST_LOG=debug"
         -e "K3RS_RUNTIME=$RUNTIME"
-        # Capabilities for container runtime
-        --cap-add SYS_ADMIN
-        --cap-add NET_ADMIN
-        --cap-add SYS_PTRACE
-        --security-opt seccomp=unconfined
-        --security-opt apparmor=unconfined
+        # Privileged mode — required for nested OCI containers
+        # (mounting proc/sysfs, creating namespaces, cgroup management)
+        --privileged
     )
 
     # KVM passthrough for Firecracker
