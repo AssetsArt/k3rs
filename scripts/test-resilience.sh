@@ -71,6 +71,7 @@ start_agent() {
         --proxy-port "$PROXY_PORT" \
         --service-proxy-port "$SVC_PROXY_PORT" \
         --dns-port "$DNS_PORT" \
+        --data-dir "$data_dir" \
         > "$log_file" 2>&1 &
     echo $!
 }
@@ -194,10 +195,11 @@ scenario_1_server_down() {
     # Create a service to give the agent real routing data
     create_service_and_endpoint "nginx" "default" "10.100.1.1" "172.16.0.1"
 
-    # Wait for route sync (agent syncs every 10s)
+    # Wait for route sync to save at least 1 DNS entry (proves real service data was synced).
+    # Using "[1-9][0-9]* dns" avoids matching the registration save (which has "0 dns").
     log "  Waiting for agent to sync service data…"
-    if ! wait_for_log "${dir}/agent.log" "AgentStore saved" 25; then
-        fail "S1: AgentStore never saved after route sync"
+    if ! wait_for_log "${dir}/agent.log" "[1-9][0-9]* dns" 25; then
+        fail "S1: AgentStore never saved real service data after route sync"
         kill_pid "$agent_pid"; kill_pid "$srv_pid"; return
     fi
     pass "S1: Agent synced and persisted service to AgentStore"
@@ -264,8 +266,10 @@ scenario_2_agent_restart_offline() {
 
     create_service_and_endpoint "cache-svc" "default" "10.100.2.2" "172.16.0.2"
 
-    if ! wait_for_log "${dir}/agent.log" "AgentStore saved" 25; then
-        fail "S2: AgentStore never saved (prerequisite)"
+    # Wait for a save that actually contains service data ("[1-9][0-9]* dns" means ≥1 DNS entry).
+    # The registration save has "0 dns" and must not be matched here.
+    if ! wait_for_log "${dir}/agent.log" "[1-9][0-9]* dns" 25; then
+        fail "S2: AgentStore never saved real service data (prerequisite)"
         kill_pid "$agent_pid"; kill_pid "$srv_pid"; return
     fi
     pass "S2: Setup complete — service synced and persisted"
@@ -388,8 +392,9 @@ scenario_5_stale_resync() {
     fi
 
     create_service_and_endpoint "svc-old" "default" "10.100.5.1" "172.16.0.5"
-    if ! wait_for_log "${dir}/agent.log" "AgentStore saved" 25; then
-        fail "S5: Initial sync never persisted"
+    # Wait until a route sync with real data is saved (not just the registration save).
+    if ! wait_for_log "${dir}/agent.log" "[1-9][0-9]* dns" 25; then
+        fail "S5: Initial sync never persisted real service data"
         kill_pid "$agent_pid"; kill_pid "$srv_pid"; return
     fi
     pass "S5: Initial state synced (svc-old → 10.100.5.1)"

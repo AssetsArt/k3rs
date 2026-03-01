@@ -55,6 +55,10 @@ struct Cli {
     /// Log format: 'text' or 'json'
     #[arg(long, default_value = "text")]
     log_format: String,
+
+    /// Path to the local data directory (AgentStore / SlateDB location)
+    #[arg(long, default_value_t = pkg_constants::paths::DATA_DIR.to_string())]
+    data_dir: String,
 }
 
 /// Attempt registration with the server. Returns (node_id, agent_api_port, response) on success.
@@ -205,10 +209,11 @@ async fn main() -> anyhow::Result<()> {
     // =========================================================================
     // Phase A: Open AgentStore (SlateDB) and load cached state
     // =========================================================================
-    let store = match AgentStore::open(pkg_constants::paths::DATA_DIR).await {
+    let data_dir = cli.data_dir.clone();
+    let store = match AgentStore::open(&data_dir).await {
         Ok(s) => s,
         Err(e) => {
-            warn!("Failed to open AgentStore, starting fresh: {}", e);
+            warn!("Failed to open AgentStore at '{}', starting fresh: {}", data_dir, e);
             // Re-open at a temp path so the rest of the code still has a store.
             // In practice this should never happen on a well-formed filesystem.
             AgentStore::open("/tmp/k3rs-agent-fallback").await?
