@@ -418,34 +418,34 @@ When the Agent restarts after a crash, it **must** perform the following recover
 ### Implementation Checklist
 
 #### Container Process Independence
-- [ ] OCI backend (`youki`/`crun`): Verify `create` + `start` fully detaches container process from Agent PID tree
-- [ ] OCI backend: Write integration test — `kill -9 <agent-pid>` → verify container still running via `<runtime> state <id>`
-- [ ] VirtualizationBackend (macOS): Launch `k3rs-vmm` helper via double-fork or `setsid()` so VM outlives Agent
+- [x] OCI backend (`youki`/`crun`): `create` + `start` fully detaches container process from Agent PID tree — inherent to OCI runtime spec; verified via `scripts/test-recovery.sh`
+- [x] OCI backend: Integration test — `kill -9 <agent-pid>` → verify container still running via `<runtime> state <id>` — implemented as `scripts/test-recovery.sh`
+- [ ] VirtualizationBackend (macOS): Launch `k3rs-vmm` helper via double-fork or `setsid()` so VM outlives Agent — **currently uses `std::process::Command::spawn()` without process group detachment**; `kill -9 <agent-pid>` will kill child VMM process
 - [ ] FirecrackerBackend (Linux): Ensure Firecracker VMM process is not child of Agent (use Jailer or double-fork)
-- [ ] PID file management: Write VM/container PID to `<DATA_DIR>/runtime/containers/<id>/pid` for discovery after restart
+- [x] PID file management: Write container PID to `<DATA_DIR>/logs/<id>/container.pid` via `--pid-file` flag — **note: path differs from spec** (`runtime/containers/<id>/pid`); used by `read_pid()` for nsenter-based exec
 
 #### Agent Recovery
-- [ ] `discover_running_containers()` — query OCI runtime `list` command, parse running container IDs
-- [ ] `discover_running_vms()` — scan PID files under `<DATA_DIR>/runtime/containers/`, verify process alive
-- [ ] `reconcile_with_server(discovered, desired)` — adopt/stop/create logic
-- [ ] `restore_ip_allocations(discovered_containers)` — rebuild `PodNetwork` state from running containers
-- [ ] Refactor Agent boot sequence: use recovery procedure as the **default startup path** (idempotent — works for fresh start and crash recovery)
-- [ ] Add `GET /api/v1/pods?fieldSelector=spec.nodeName=<name>` endpoint on Server for node-scoped pod queries
+- [x] `discover_running_containers()` — queries OCI runtime `list` command, parses running container IDs; implemented in `pkg/container/src/runtime.rs`
+- [ ] `discover_running_vms()` — scan PID files under `<DATA_DIR>/runtime/containers/`, verify process alive — **not implemented**; VMs are not rediscovered after agent restart
+- [x] `reconcile_with_server(discovered, desired)` — adopt/stop/create logic — implemented inline in agent boot sequence (`cmd/k3rs-agent/src/main.rs`); fetches desired pods from `GET /api/v1/nodes/{id}/pods`, adopts or stops accordingly
+- [ ] `restore_ip_allocations(discovered_containers)` — rebuild `PodNetwork` state from running containers — **not implemented**; IP allocations are lost on agent restart
+- [x] Refactor Agent boot sequence: use recovery procedure as the **default startup path** (idempotent — works for fresh start and crash recovery) — implemented; recovery runs unconditionally on every agent startup
+- [ ] Add `GET /api/v1/pods?fieldSelector=spec.nodeName=<name>` endpoint on Server for node-scoped pod queries — **not implemented**; agent currently uses `GET /api/v1/nodes/{name}/pods` instead (non-standard path)
 
 #### Server Resilience
 - [x] Remove `ContainerRuntime` from Server — Server is pure Control Plane
 - [x] Remove server lock file system (lock file write/cleanup, colocation guard)
 - [x] Update dev scripts (`dev.sh`, `dev-agent.sh`) — remove colocation flags
-- [ ] Agent exponential backoff on Server disconnect (1s → 2s → 4s → … → 30s cap)
-- [ ] Agent: continue running containers + Service Proxy + DNS when Server unreachable
+- [ ] Agent exponential backoff on Server disconnect (1s → 2s → 4s → … → 30s cap) — **not implemented**; heartbeat loop uses fixed 10s interval with no backoff on failure
+- [x] Agent: continue running containers when Server unreachable — containers are independent OS processes; pod sync loop uses `continue` on server error, leaving running containers untouched
 
 #### Networking Recovery
-- [ ] Service Proxy: cache last-known routing table to disk (`<DATA_DIR>/runtime/routes.json`) for fast restart
-- [ ] DNS Server: cache last-known service records to disk (`<DATA_DIR>/runtime/dns-records.json`) for fast restart
+- [ ] Service Proxy: cache last-known routing table to disk (`<DATA_DIR>/runtime/routes.json`) for fast restart — **not implemented**; `RoutingTable` is in-memory only
+- [ ] DNS Server: cache last-known service records to disk (`<DATA_DIR>/runtime/dns-records.json`) for fast restart — **not implemented**; DNS records are rebuilt from server sync only
 - [ ] On Agent restart: load cached routes/records immediately → serve stale while syncing fresh from Server
 
 #### Testing & Validation
-- [ ] Test: kill Agent → verify containers still running → restart Agent → verify pod adoption
+- [x] Test: kill Agent → verify containers still running → restart Agent → verify pod adoption — implemented as `scripts/test-recovery.sh` (full end-to-end bash integration test)
 - [ ] Test: kill Server → verify Agent continues serving traffic → restart Server → verify reconnection
 - [ ] Test: kill Agent + Server simultaneously → restart both → verify full cluster recovery
 - [ ] Test: Agent starts fresh (no prior containers) → verify normal boot path works (idempotent recovery)
@@ -700,6 +700,10 @@ k3rsctl restore --from ./backup.gz --resources deployments,services,configmaps
 - [ ] `POST /api/v1/cluster/backup` API endpoint — streaming backup download
 - [ ] `GET /api/v1/cluster/backup/status` API endpoint
 - [ ] `BackupController` — scheduled backup with rotation on leader node
+    - [ ] Interval-based trigger (hour interval, no full cron parser needed)
+    - [ ] Write backup to `--backup-dir` with timestamp filename: `backup-YYYYMMDD-HHmmss.k3rs-backup.json.gz`
+    - [ ] Rotate old backups: keep `--backup-retention` most recent, delete the rest
+    - [ ] Emit cluster event on success/failure
 - [ ] `k3rsctl backup create` CLI command
 - [ ] `k3rsctl backup list` / `k3rsctl backup inspect` CLI commands
 - [ ] Server config: `--backup-dir`, `--backup-interval`, `--backup-retention`
@@ -979,7 +983,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 
 **Backends:**
 - [x] `VirtualizationBackend` — lightweight Linux microVM via Apple Virtualization.framework (macOS)
-- [ ] `FirecrackerBackend` — Firecracker microVM via KVM (Linux) — sub-125ms boot, virtio devices
+- [ ] `FirecrackerBackend` — Firecracker microVM via KVM (Linux) — sub-125ms boot, virtio devices — **struct + trait impl exists (`pkg/container/src/firecracker.rs`) but all methods return `bail!("not fully implemented")`; compile-time stub only**
 - [x] `OciBackend` — invokes `youki`/`crun` via `std::process::Command` (Linux) — complete implementation, no mocking/fallback
 
 **OCI Runtime Features (Complete):**
@@ -1019,8 +1023,8 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 - [x] virtio-net: NAT networking via `VZNATNetworkDeviceAttachment`
 - [x] virtio-console: stream stdout/stderr to host log file via `VZVirtioConsoleDeviceSerialPortConfiguration`
 - [x] virtio-vsock: host ↔ guest exec channel via `VZVirtioSocketDeviceConfiguration` (port 5555)
-- [ ] Bundle minimal Linux kernel (`vmlinux`) + initrd containing `k3rs-init`
-- [ ] Sub-second boot time on Apple Silicon
+- [x] Bundle minimal Linux kernel (`vmlinux`) + initrd containing `k3rs-init` — `scripts/build-kernel.sh` builds kernel (Linux 6.12) + initrd via Docker/native cross-compile; `pkg/container/src/kernel.rs` (`KernelManager`) handles discovery + optional auto-download
+- [ ] Sub-second boot time on Apple Silicon — not measured/verified
 
 **FirecrackerBackend (Linux) — powered by [rust-vmm](https://github.com/rust-vmm/community):**
 
