@@ -56,8 +56,14 @@ fi
 # Clean up all ports before starting (server, agent proxy, service proxy, DNS)
 ./scripts/cleanup-port.sh "$PORT" 2>/dev/null || true
 
+# Detect container environment — inotify doesn't work on bind mounts, use polling
+WATCH_POLL=""
+if [ -f /.dockerenv ] || [ -f /run/.containerenv ]; then
+    WATCH_POLL="--poll"
+fi
+
 # Watch for changes and restart
-RUST_LOG=debug cargo watch \
+RUST_LOG=debug cargo watch $WATCH_POLL \
     -x "run --bin k3rs-server -- --port $PORT --token $TOKEN --data-dir $DATA_DIR --node-name $NODE_NAME" \
     -w pkg/ \
     -w cmd/k3rs-server \

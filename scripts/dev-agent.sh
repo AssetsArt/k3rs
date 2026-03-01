@@ -27,7 +27,13 @@ if ! command -v cargo-watch &>/dev/null; then
     cargo install cargo-watch
 fi
 
-RUST_LOG=debug cargo watch \
+# Detect container environment — inotify doesn't work on bind mounts, use polling
+WATCH_POLL=""
+if [ -f /.dockerenv ] || [ -f /run/.containerenv ]; then
+    WATCH_POLL="--poll"
+fi
+
+RUST_LOG=debug cargo watch $WATCH_POLL \
     -x "run --bin k3rs-agent -- --server $SERVER --token $TOKEN --node-name $NODE_NAME --proxy-port $PROXY_PORT --service-proxy-port $SERVICE_PROXY_PORT --dns-port $DNS_PORT" \
     -w pkg/ \
     -w cmd/k3rs-agent \

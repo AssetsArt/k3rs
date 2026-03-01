@@ -107,7 +107,7 @@ pub struct VirtualizationBackend {
 
 impl VirtualizationBackend {
     /// Create a new VirtualizationBackend with default configuration.
-    pub async fn new(data_dir: &Path) -> Result<Self> {
+    pub async fn new(_data_dir: &Path) -> Result<Self> {
         #[cfg(not(target_os = "macos"))]
         {
             anyhow::bail!("VirtualizationBackend requires macOS");
@@ -115,6 +115,7 @@ impl VirtualizationBackend {
 
         #[cfg(target_os = "macos")]
         {
+            let data_dir = _data_dir;
             let vm_dir = data_dir.join("vms");
             tokio::fs::create_dir_all(&vm_dir).await?;
 

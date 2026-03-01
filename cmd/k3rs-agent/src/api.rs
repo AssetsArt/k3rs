@@ -85,7 +85,15 @@ async fn handle_socket(
     if tty {
         handle_tty(ws_sender, ws_receiver, container_id, cmd_refs, runtime).await;
     } else {
-        handle_pipe(ws_sender, ws_receiver, container_id, cmd_refs, runtime, false).await;
+        handle_pipe(
+            ws_sender,
+            ws_receiver,
+            container_id,
+            cmd_refs,
+            runtime,
+            false,
+        )
+        .await;
     }
 }
 
