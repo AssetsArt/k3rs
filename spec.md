@@ -975,7 +975,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 | Binary | Purpose |
 |--------|---------|
 | `k3rs-vmm` | Host-side VMM helper — wraps Virtualization.framework via `objc2-virtualization` Rust crate (macOS) |
-| `k3rs-init` | Guest-side PID 1 — mounts pseudo-fs, brings up networking via raw `ioctl`, reaps zombies, parses OCI `config.json`, spawns entrypoint, graceful VM shutdown. **522KB** statically-linked musl binary |
+| `k3rs-init` | Guest-side PID 1 — mounts pseudo-fs, brings up networking via raw `ioctl`, reaps zombies, parses OCI `config.json`, spawns entrypoint, graceful VM shutdown. Statically-linked musl binary |
 
 **Backends:**
 - [x] `VirtualizationBackend` — lightweight Linux microVM via Apple Virtualization.framework (macOS)
@@ -1014,7 +1014,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
   - Reap zombies via `waitpid(-1, WNOHANG)` + `SIGCHLD → SigIgn` auto-reap
   - Parse OCI `config.json` (`process.args/env/cwd`, `hostname`) → spawn entrypoint as child
   - Graceful shutdown: `SIGTERM → SIGKILL → umount2 → sync → reboot(POWER_OFF)`
-  - **522KB** static musl binary, `panic="abort"`, `opt-level="z"`, `lto=true`, `strip=true`
+  - Static musl binary, `panic="abort"`, `opt-level="z"`, `lto=true`, `strip=true`
   - Cross-compile from macOS: `cargo zigbuild --release --target aarch64-unknown-linux-musl -p k3rs-init`
 - [x] virtio-net: NAT networking via `VZNATNetworkDeviceAttachment`
 - [x] virtio-console: stream stdout/stderr to host log file via `VZVirtioConsoleDeviceSerialPortConfiguration`

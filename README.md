@@ -161,7 +161,7 @@ The Podman container includes: Rust toolchain, youki, crun, Firecracker, cargo-w
 ### Build k3rs-init (Guest VM PID 1)
 
 ```bash
-# Cross-compile from macOS → Linux musl (522KB static binary)
+# Cross-compile from macOS → Linux musl (static binary)
 cargo zigbuild --release --target aarch64-unknown-linux-musl -p k3rs-init
 
 # Or build kernel + initrd for microVMs
@@ -310,7 +310,7 @@ k3rs/
 ├── cmd/
 │   ├── k3rs-server/       # Control plane binary
 │   ├── k3rs-agent/        # Data plane binary
-│   ├── k3rs-init/         # Guest PID 1 for microVMs (static musl binary, 522KB)
+│   ├── k3rs-init/         # Guest PID 1 for microVMs (static musl binary)
 │   ├── k3rs-vmm/          # Virtualization.framework helper (macOS, Rust + objc2-virtualization)
 │   ├── k3rs-ui/           # Management UI (Dioxus 0.7)
 │   └── k3rsctl/           # CLI tool
