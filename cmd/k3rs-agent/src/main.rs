@@ -91,6 +91,61 @@ async fn try_register(
     }
 }
 
+/// Try to connect to the server. First attempts a heartbeat probe (if we have
+/// a cached node_id). If the server still knows us, skip registration entirely.
+/// Otherwise fall back to full registration.
+///
+/// Returns `Ok(true)` if we're now connected (either via probe or registration),
+/// `Ok(false)` if we had a cached probe success (node_id already set),
+/// `Err` if both probe and registration failed.
+async fn try_connect(
+    client: &reqwest::Client,
+    server: &str,
+    token: &str,
+    reg_req: &NodeRegistrationRequest,
+    node_name: &str,
+    cached_node_id: Option<&str>,
+) -> anyhow::Result<Option<(String, u16)>> {
+    // If we have a cached node_id, probe the server with a heartbeat first.
+    // This avoids re-registration when the server already knows this node
+    // (e.g. agent restart while server is still running).
+    if let Some(node_id) = cached_node_id {
+        let probe_url = format!(
+            "{}/api/v1/nodes/{}/heartbeat",
+            server.trim_end_matches('/'),
+            node_name
+        );
+        match client
+            .put(&probe_url)
+            .header("Authorization", format!("Bearer {}", token))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                info!(
+                    "Heartbeat probe succeeded — server still knows node_id={}, skipping registration",
+                    node_id
+                );
+                return Ok(None); // Already known, no new node_id/port needed
+            }
+            Ok(resp) => {
+                info!(
+                    "Heartbeat probe returned {} — will re-register",
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                info!("Heartbeat probe failed: {} — will try registration", e);
+            }
+        }
+    }
+
+    // Probe failed or no cached node_id — do full registration
+    let (node_id, port, _resp) = try_register(client, server, reg_req, node_name).await?;
+    Ok(Some((node_id, port)))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -232,19 +287,28 @@ async fn main() -> anyhow::Result<()> {
         capacity: Some(capacity),
     };
 
-    info!(
-        "Registering with server at {}",
-        format!("{}/register", server.trim_end_matches('/'))
-    );
+    info!("Connecting to server at {}", server);
 
-    match try_register(&client, &server, &reg_req, &node_name).await {
-        Ok((node_id, api_port, _resp)) => {
+    let cached_node_id = cache.read().unwrap().node_id.clone();
+    match try_connect(
+        &client,
+        &server,
+        &token,
+        &reg_req,
+        &node_name,
+        cached_node_id.as_deref(),
+    )
+    .await
+    {
+        Ok(new_identity) => {
             connectivity.set_connected();
-            let mut c = cache.write().unwrap();
-            c.node_id = Some(node_id);
-            c.agent_api_port = Some(api_port);
-            if let Err(e) = c.save() {
-                warn!("Failed to save cache after registration: {}", e);
+            if let Some((node_id, api_port)) = new_identity {
+                let mut c = cache.write().unwrap();
+                c.node_id = Some(node_id);
+                c.agent_api_port = Some(api_port);
+                if let Err(e) = c.save() {
+                    warn!("Failed to save cache after registration: {}", e);
+                }
             }
         }
         Err(e) => {
@@ -261,49 +325,7 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
             connectivity.set_offline();
-
-            // Spawn background registration retry
-            let retry_client = client.clone();
-            let retry_server = server.clone();
-            let retry_req = reg_req.clone();
-            let retry_node_name = node_name.clone();
-            let retry_cache = cache.clone();
-            let retry_conn = connectivity.clone();
-
-            tokio::spawn(async move {
-                let mut attempt = 0u32;
-                loop {
-                    let delay = ConnectivityManager::backoff_duration(attempt);
-                    tokio::time::sleep(delay).await;
-
-                    match try_register(&retry_client, &retry_server, &retry_req, &retry_node_name)
-                        .await
-                    {
-                        Ok((node_id, api_port, _resp)) => {
-                            info!(
-                                "Server connection established after {} attempts",
-                                attempt + 1
-                            );
-                            let mut c = retry_cache.write().unwrap();
-                            c.node_id = Some(node_id);
-                            c.agent_api_port = Some(api_port);
-                            if let Err(e) = c.save() {
-                                warn!("Failed to save cache after registration retry: {}", e);
-                            }
-                            retry_conn.set_connected();
-                            break;
-                        }
-                        Err(e) => {
-                            attempt += 1;
-                            let next_delay = ConnectivityManager::backoff_duration(attempt);
-                            warn!(
-                                "Registration retry failed (attempt {}): {}. Next retry in {:?}",
-                                attempt, e, next_delay
-                            );
-                        }
-                    }
-                }
-            });
+            // Reconnect loop in controller thread handles retry (see Phase E)
         }
     }
 
@@ -407,6 +429,8 @@ async fn main() -> anyhow::Result<()> {
     let ctrl_dns_server = dns_server.clone();
     let ctrl_cache = cache.clone();
     let ctrl_conn = connectivity.clone();
+    let ctrl_reg_req = reg_req.clone();
+    let ctrl_node_name = node_name.clone();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -565,6 +589,68 @@ async fn main() -> anyhow::Result<()> {
                                 .await;
                         }
                         Err(e) => warn!("Failed to list images: {}", e),
+                    }
+                }
+            });
+
+            // Reconnect loop — probes and re-registers with the server when not
+            // connected. Handles initial OFFLINE, runtime RECONNECTING, server
+            // restart, and leader election scenarios.
+            let rc_client = client.clone();
+            let rc_server = ctrl_server.clone();
+            let rc_token = ctrl_token.clone();
+            let rc_reg_req = ctrl_reg_req.clone();
+            let rc_node_name = ctrl_node_name.clone();
+            let rc_cache = ctrl_cache.clone();
+            let rc_conn = ctrl_conn.clone();
+            tokio::spawn(async move {
+                let mut attempt = 0u32;
+                loop {
+                    // When connected, idle and reset attempt counter
+                    if rc_conn.is_connected() {
+                        attempt = 0;
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        continue;
+                    }
+
+                    let delay = ConnectivityManager::backoff_duration(attempt);
+                    tokio::time::sleep(delay).await;
+
+                    let cached_node_id = rc_cache.read().unwrap().node_id.clone();
+                    match try_connect(
+                        &rc_client,
+                        &rc_server,
+                        &rc_token,
+                        &rc_reg_req,
+                        &rc_node_name,
+                        cached_node_id.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(new_identity) => {
+                            info!(
+                                "Reconnected to server after {} attempts",
+                                attempt + 1
+                            );
+                            if let Some((node_id, api_port)) = new_identity {
+                                let mut c = rc_cache.write().unwrap();
+                                c.node_id = Some(node_id);
+                                c.agent_api_port = Some(api_port);
+                                if let Err(e) = c.save() {
+                                    warn!("Failed to save cache after reconnect: {}", e);
+                                }
+                            }
+                            rc_conn.set_connected();
+                            attempt = 0;
+                        }
+                        Err(e) => {
+                            attempt += 1;
+                            let age = rc_cache.read().unwrap().age_secs();
+                            warn!(
+                                "Reconnect failed (attempt {}, cache age: {}s): {}",
+                                attempt, age, e
+                            );
+                        }
                     }
                 }
             });
