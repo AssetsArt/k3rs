@@ -372,8 +372,8 @@ Restarting or crashing `k3rs-agent` **must not** terminate running containers:
 | Component | During Agent Crash | After Agent Restart |
 |---|---|---|
 | **Running Containers** | ✅ Continue running (independent processes) | ✅ Reconciled by pod sync loop |
-| **Service Proxy (Pingora)** | ❌ Stops (runs in-process) | ✅ Restarts from `routes.json` cache — serving within milliseconds, before server reconnect |
-| **DNS Server** | ❌ Stops (runs in-process) | ✅ Restarts from `dns-records.json` cache — resolving within milliseconds, before server reconnect |
+| **Service Proxy (Pingora)** | ❌ Stops (runs in-process) | ✅ Restarts from SlateDB (`/agent/routes`) — serving within milliseconds, before server reconnect |
+| **DNS Server** | ❌ Stops (runs in-process) | ✅ Restarts from SlateDB (`/agent/dns-records`) — resolving within milliseconds, before server reconnect |
 | **Pod Networking** | ✅ Existing connections continue | ✅ IP allocations restored from state |
 | **Heartbeat** | ❌ Stops → Server marks node NotReady/Unknown | ✅ Resumes, node transitions back to Ready |
 
@@ -416,11 +416,15 @@ When the Agent restarts after a crash, it **must** perform the following recover
 #### State Data Model
 
 ```rust
-/// Persisted to <DATA_DIR>/agent/state.json after every successful server sync.
-/// This is the single source of truth for offline operation.
+/// In-memory representation of Agent state. Loaded from AgentStore on startup,
+/// written back after every successful server sync.
 struct AgentStateCache {
     /// Node name (from registration)
     node_name: String,
+    /// Assigned node UUID from server registration
+    node_id: Option<String>,
+    /// Port assigned by server for Agent API (exec/logs)
+    agent_api_port: Option<u16>,
     /// Monotonic sequence from server EventLog — used to detect stale/old cache on reconnect
     server_seq: u64,
     /// Timestamp of last successful server sync
@@ -436,32 +440,82 @@ struct AgentStateCache {
 }
 ```
 
-#### Storage Layout
+#### Backing Store: Agent Embedded SlateDB
+
+The Agent stores all persistent state in a **local SlateDB instance** backed by the node's filesystem. This replaces the ad-hoc JSON file approach with a proper embedded KV database — providing ACID transactions, crash-safe writes, and a consistent storage model shared with the Server.
+
+**Why SlateDB on the Agent (not plain JSON files)?**
+
+| Property | JSON files (old) | Agent SlateDB (new) |
+|---|---|---|
+| **Atomicity** | Custom `write→fsync→rename` per file | Single `WriteBatch` for all keys |
+| **Crash safety** | Manual; gaps possible across 3 files | WAL-backed; no partial writes |
+| **Tech consistency** | Diverges from Server storage | Same crate, same mental model |
+| **Future extensibility** | New state = new file | New state = new key prefix |
+| **Concurrent reads** | File locking | MVCC snapshots |
+
+**Backend**: `object_store::local::LocalFileSystem` — no cloud account or network required on edge nodes.
+
+**Storage path**: `<DATA_DIR>/agent/state.db/`
+
+#### Key Schema (Agent SlateDB)
+
+All keys live under the `/agent/` prefix so the database could theoretically be merged with a server-side store in future without collision.
 
 ```
-<DATA_DIR>/agent/
-├── state.json           # Full AgentStateCache — written after every sync
-├── routes.json          # ServiceProxy RoutingTable — fast-path for proxy startup
-└── dns-records.json     # DnsServer A-records — fast-path for DNS startup
+/agent/meta                          → AgentMeta JSON { node_id, node_name, agent_api_port, server_seq, last_synced_at }
+/agent/pods/<pod-id>                 → Pod JSON
+/agent/services/<ns>/<name>          → Service JSON
+/agent/endpoints/<ns>/<name>         → Endpoint JSON
+/agent/ingresses/<ns>/<name>         → Ingress JSON
+/agent/routes                        → RoutingTable JSON  (ServiceProxy derived view)
+/agent/dns-records                   → HashMap<String,String> JSON  (DnsServer derived view)
 ```
 
-`routes.json` and `dns-records.json` are derived views of `state.json`, written atomically alongside it. They exist as separate files so `ServiceProxy` and `DnsServer` can load their own format directly on startup without parsing the full state object.
+`/agent/routes` and `/agent/dns-records` are **derived views** recomputed and committed in the **same `WriteBatch`** as the parent records after every successful sync. No separate file management required.
 
-**Atomic write protocol**: All files written via `write_to_tmp → fsync → rename` to prevent partial reads during agent crash mid-write.
+**Atomic write protocol**: All multi-key updates use a single `WriteBatch` — either all keys commit or none do. SlateDB's WAL ensures crash safety without any application-level temp/fsync/rename logic.
+
+#### AgentStore API
+
+```rust
+/// Thin wrapper around a local SlateDB instance.
+/// Owns all Agent persistent state: identity, pods, services, endpoints, routes, DNS.
+pub struct AgentStore {
+    db: SlateDb,
+}
+
+impl AgentStore {
+    /// Open (or create) the SlateDB at `<data_dir>/agent/state.db/`.
+    pub async fn open(data_dir: &str) -> Result<Self>;
+
+    /// Save full AgentStateCache atomically (single WriteBatch covering all keys).
+    pub async fn save(&self, cache: &AgentStateCache) -> Result<()>;
+
+    /// Load state on startup. Returns None if database is empty (fresh node).
+    pub async fn load(&self) -> Result<Option<AgentStateCache>>;
+
+    /// Read only the RoutingTable (for ServiceProxy bootstrap — avoids full load).
+    pub async fn load_routes(&self) -> Result<Option<RoutingTable>>;
+
+    /// Read only the DNS records (for DnsServer bootstrap — avoids full load).
+    pub async fn load_dns_records(&self) -> Result<Option<HashMap<String, String>>>;
+}
+```
 
 #### Sync Behavior
 
 **Write (normal connected operation):**
 1. Route sync loop fetches services + endpoints from server every 10s
 2. Pod sync loop fetches pod list from server every 10s
-3. After **each successful fetch** → serialize `AgentStateCache` → write atomically to `state.json`
-4. Also derive and write `routes.json` (ClusterIP:port → backends map) and `dns-records.json` (service FQDN → ClusterIP map)
+3. After **each successful fetch** → derive `AgentStateCache` → call `AgentStore::save()` (single `WriteBatch`)
+4. `save()` writes: `/agent/meta`, all pod/service/endpoint keys, `/agent/routes`, `/agent/dns-records`
 
 **Read (startup / server unreachable):**
-1. On agent startup: load `state.json` if it exists → use as initial in-memory state before any server contact
-2. Start `ServiceProxy` with `routes.json` data immediately → serving within milliseconds (stale-while-revalidate)
-3. Start `DnsServer` with `dns-records.json` data immediately → resolving within milliseconds
-4. Attempt server connection in background → on success, full re-sync → overwrite cache with fresh data
+1. On agent startup: call `AgentStore::load()` → hydrate in-memory `AgentStateCache`
+2. Call `AgentStore::load_routes()` → pass to `ServiceProxy` → serving within milliseconds (stale-while-revalidate)
+3. Call `AgentStore::load_dns_records()` → pass to `DnsServer` → resolving within milliseconds
+4. Attempt server connection in background → on success, full re-sync → overwrite all keys with fresh data
 
 #### Agent Connectivity State Machine
 
@@ -500,8 +554,8 @@ struct AgentStateCache {
 |---|---|---|---|
 | **Running pods** | ✅ Server-driven sync | ✅ Keep running (independent processes) | ✅ Keep running (independent processes) |
 | **New pod scheduling** | ✅ Normal | ❌ Skipped (server unreachable) | ❌ Skipped |
-| **Service Proxy routes** | ✅ Live from server | ✅ Last cached in-memory routes | ✅ Loaded from `routes.json` on startup |
-| **DNS resolution** | ✅ Live from server | ✅ Last cached in-memory records | ✅ Loaded from `dns-records.json` on startup |
+| **Service Proxy routes** | ✅ Live from server | ✅ Last cached in-memory routes | ✅ Loaded from SlateDB (`/agent/routes`) on startup |
+| **DNS resolution** | ✅ Live from server | ✅ Last cached in-memory records | ✅ Loaded from SlateDB (`/agent/dns-records`) on startup |
 | **Heartbeat** | ✅ Every 10s | ❌ Failing → server marks node `NotReady` | ❌ No heartbeat |
 | **Cache writes** | ✅ After every sync | ❌ No writes (server unreachable) | ❌ No writes |
 | **Log output** | Normal | `WARN: server unreachable, retrying (attempt N, age: Xs)` | `WARN: starting in offline mode, cache age: Xs` |
@@ -509,11 +563,11 @@ struct AgentStateCache {
 #### Design Principles
 
 1. **Write-through, serve-stale**: Cache is written on every successful sync. An arbitrarily old cache is always preferred over no routing or DNS.
-2. **Atomic writes only**: All cache files written via `write → fsync → rename` — no partial reads possible.
-3. **Server-wins on reconnect**: Full server state overwrites cache — no merging, no conflict resolution needed.
+2. **Atomic writes only**: All cache updates committed via a single SlateDB `WriteBatch` — WAL-backed crash safety, no application-level temp/fsync/rename logic required.
+3. **Server-wins on reconnect**: Full server state overwrites all SlateDB keys — no merging, no conflict resolution needed.
 4. **No cache expiry**: Cache does not expire. Offline agent with 24-hour-old routes is better than offline agent with no routes.
 5. **Cache is advisory for pod desired state**: In OFFLINE/RECONNECTING mode, the Agent does **not** create new containers from cached pod specs. It only keeps already-running containers alive and adopts them via the OCI recovery procedure. New pod creation resumes only after server reconnect.
-6. **Empty cache is valid**: If no `state.json` exists (fresh node), Agent starts with empty in-memory state and waits for first server sync. Service Proxy and DNS start with no routes and populate on first sync.
+6. **Empty cache is valid**: If the Agent SlateDB is empty (fresh node), Agent starts with empty in-memory state and waits for first server sync. Service Proxy and DNS start with no routes and populate on first sync.
 
 ### Design Invariants
 
@@ -545,25 +599,49 @@ struct AgentStateCache {
 - [x] Remove `ContainerRuntime` from Server — Server is pure Control Plane
 - [x] Remove server lock file system (lock file write/cleanup, colocation guard)
 - [x] Update dev scripts (`dev.sh`, `dev-agent.sh`) — remove colocation flags
-- [ ] Agent exponential backoff on Server disconnect (1s → 2s → 4s → … → 30s cap) — **not implemented**; heartbeat loop uses fixed 10s interval with no backoff on failure
+- [x] Agent exponential backoff on Server disconnect (1s → 2s → 4s → … → 30s cap) — implemented in `ConnectivityManager::backoff_duration()` (`cmd/k3rs-agent/src/connectivity.rs`); heartbeat uses backoff on failure, registration retry uses backoff
 - [x] Agent: continue running containers when Server unreachable — containers are independent OS processes; pod sync loop uses `continue` on server error, leaving running containers untouched
 
 #### Agent Local State Cache
-- [ ] Define `AgentStateCache` struct — `node_name`, `server_seq`, `last_synced_at`, `pods`, `services`, `endpoints`, `ingresses`; serde Serialize/Deserialize
-- [ ] `AgentStateCache::save(path)` — atomic write: serialize to JSON → write to `state.json.tmp` → `fsync` → `rename` to `state.json`
-- [ ] `AgentStateCache::load(path)` — deserialize from `state.json`; return `None` if file missing (fresh node)
-- [ ] `AgentStateCache::derive_routes()` → `RoutingTable` (ClusterIP:port → backends); write to `routes.json`
-- [ ] `AgentStateCache::derive_dns()` → `HashMap<String, IpAddr>` (FQDN → ClusterIP); write to `dns-records.json`
-- [ ] Route sync loop: call `AgentStateCache::save()` + `derive_routes()` + `derive_dns()` after **every** successful server sync
-- [ ] Pod sync loop: include fetched pods in `AgentStateCache` and save after every successful fetch
-- [ ] Agent startup: load `state.json` before connecting to server → initialize `ServiceProxy` and `DnsServer` with cached data
-- [ ] `ServiceProxy::load_from_file(routes_path)` — load `routes.json` on startup for zero-delay route serving
-- [ ] `DnsServer::load_from_file(dns_path)` — load `dns-records.json` on startup for zero-delay DNS serving
-- [ ] Connectivity state machine: `CONNECTING → CONNECTED → RECONNECTING → CONNECTED` (log state transitions)
-- [ ] `RECONNECTING` state: continue serving stale in-memory state; log `WARN` with cache age on every retry attempt
-- [ ] `OFFLINE` state: server unreachable at startup; log `WARN: starting in offline mode, cache age: Xs`; keep retrying in background
-- [ ] On reconnect: perform full re-sync from server → overwrite in-memory state and cache files (server-wins, no merging)
-- [ ] Agent startup sequence: `load_cache` → `start_services_with_stale` → `connect_server` → `full_sync` → `overwrite_cache`
+
+The following items describe the **initial JSON-file implementation** (completed). The SlateDB migration section below supersedes the storage layer items.
+
+- [x] Define `AgentStateCache` struct — `node_name`, `node_id`, `agent_api_port`, `server_seq`, `last_synced_at`, `pods`, `services`, `endpoints`, `ingresses`; serde Serialize/Deserialize — `cmd/k3rs-agent/src/cache.rs`
+- [x] `AgentStateCache::save(path)` — atomic write: serialize to JSON → write to `state.json.tmp` → `fsync` → `rename` to `state.json` — `cache.rs::save()` *(superseded by SlateDB)*
+- [x] `AgentStateCache::load(path)` — deserialize from `state.json`; return `None` if file missing (fresh node) — `cache.rs::load()` *(superseded by SlateDB)*
+- [x] `AgentStateCache::derive_routes()` → `RoutingTable` (ClusterIP:port → backends); write to `routes.json` — `cache.rs::derive_routes()` *(superseded by SlateDB)*
+- [x] `AgentStateCache::derive_dns()` → `HashMap<String, IpAddr>` (FQDN → ClusterIP); write to `dns-records.json` — `cache.rs::derive_dns()` *(superseded by SlateDB)*
+- [x] Route sync loop: call `AgentStateCache::save()` + `derive_routes()` + `derive_dns()` after **every** successful server sync — `main.rs` route sync loop
+- [x] Pod sync loop: include fetched pods in `AgentStateCache` and save after every successful fetch — `main.rs` pod sync loop
+- [x] Agent startup: load cached state before connecting to server → initialize `ServiceProxy` and `DnsServer` with cached data — `main.rs` Phase A + B
+- [x] `ServiceProxy::load_from_file(routes_path)` — load `routes.json` on startup for zero-delay route serving — `pkg/proxy/src/service_proxy.rs` *(to be replaced by `load_from_db()`)*
+- [x] `DnsServer::load_from_file(dns_path)` — load `dns-records.json` on startup for zero-delay DNS serving — `pkg/network/src/dns.rs` *(to be replaced by `load_from_db()`)*
+- [x] Connectivity state machine: `CONNECTING → CONNECTED → RECONNECTING → CONNECTED` (log state transitions) — `cmd/k3rs-agent/src/connectivity.rs`
+- [x] `RECONNECTING` state: continue serving stale in-memory state; log `WARN` with cache age on every retry attempt — heartbeat loop in `main.rs`
+- [x] `OFFLINE` state: server unreachable at startup; log `WARN: starting in offline mode, cache age: Xs`; keep retrying in background — `main.rs` Phase C
+- [x] On reconnect: perform full re-sync from server → overwrite in-memory state and cache (server-wins, no merging) — sync loops resume on `is_connected()`, heartbeat sets `CONNECTED` on recovery
+- [x] Agent startup sequence: `load_cache` → `start_services_with_stale` → `connect_server` → `full_sync` → `overwrite_cache` — `main.rs` Phases A→B→C→D→E
+
+#### Agent State Store Migration (JSON → SlateDB)
+
+Replace the ad-hoc JSON file approach with an embedded SlateDB instance. All items below are **pending implementation**.
+
+- [ ] Add `slatedb` + `object_store` (local FS backend) dependencies to `cmd/k3rs-agent/Cargo.toml`
+- [ ] Create `cmd/k3rs-agent/src/store.rs` — implement `AgentStore` struct wrapping a local SlateDB instance
+  - [ ] `AgentStore::open(data_dir)` — open/create SlateDB at `<DATA_DIR>/agent/state.db/` using `LocalFileSystem` backend
+  - [ ] `AgentStore::save(cache)` — single `WriteBatch`: write `/agent/meta`, all pod/service/endpoint/ingress keys, `/agent/routes`, `/agent/dns-records`
+  - [ ] `AgentStore::load()` → `Option<AgentStateCache>` — read all `/agent/*` keys; return `None` if `/agent/meta` missing (fresh node)
+  - [ ] `AgentStore::load_routes()` → `Option<RoutingTable>` — read only `/agent/routes` for fast ServiceProxy bootstrap
+  - [ ] `AgentStore::load_dns_records()` → `Option<HashMap<String,String>>` — read only `/agent/dns-records` for fast DnsServer bootstrap
+- [ ] Migrate `AgentStateCache::save()` to call `AgentStore::save()` via `WriteBatch` (remove custom `atomic_write()` helper)
+- [ ] Migrate `AgentStateCache::load()` to call `AgentStore::load()`; remove `state.json` file path logic
+- [ ] Migrate `AgentStateCache::derive_routes()` / `derive_dns()` — write derived keys inside the same `WriteBatch` as parent records (no separate file writes)
+- [ ] Replace `ServiceProxy::load_from_file()` with `ServiceProxy::load_from_db(store)` — reads `/agent/routes` via `AgentStore::load_routes()`
+- [ ] Replace `DnsServer::load_from_file()` with `DnsServer::load_from_db(store)` — reads `/agent/dns-records` via `AgentStore::load_dns_records()`
+- [ ] Update `main.rs` Phase A: open `AgentStore` → call `store.load()` (replaces JSON file read)
+- [ ] Update `main.rs` Phase B: call `store.load_routes()` / `store.load_dns_records()` for zero-delay proxy/DNS bootstrap
+- [ ] Remove `cache::routes_path()`, `cache::dns_path()`, `cache::state_path()` path helpers once migration is complete
+- [ ] Remove `routes.json`, `state.json`, `dns-records.json` file cleanup from `scripts/dev-agent.sh` (no longer applicable)
 
 #### Testing & Validation
 - [x] Test: kill Agent → verify containers still running → restart Agent → verify pod adoption — implemented as `scripts/test-recovery.sh` (full end-to-end bash integration test)

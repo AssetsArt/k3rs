@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use pingora::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7,7 +8,7 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 /// A routing table entry: maps `ClusterIP:port` to a list of backend pod addresses.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutingTable {
     /// Key: "clusterIP:port", Value: list of "podIP:targetPort"
     pub routes: HashMap<String, Vec<String>>,
@@ -127,6 +128,17 @@ impl ServiceProxy {
         let mut table = self.routing_table.write().await;
         *table = RoutingTable { routes: new_routes };
         info!("ServiceProxy routing table updated: {} routes", route_count);
+    }
+
+    /// Load routing table from a JSON file (for cache-based startup).
+    /// Returns the number of routes loaded.
+    pub async fn load_from_file(&self, path: &str) -> anyhow::Result<usize> {
+        let data = std::fs::read_to_string(path)?;
+        let routes: HashMap<String, Vec<String>> = serde_json::from_str(&data)?;
+        let count = routes.len();
+        let mut table = self.routing_table.write().await;
+        *table = RoutingTable { routes };
+        Ok(count)
     }
 
     /// Start the Pingora-based service proxy in a background task.

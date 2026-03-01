@@ -16,7 +16,7 @@ impl Scheduler {
         }
     }
 
-    /// Schedule a pod to a node. Returns the node ID if a suitable node is found.
+    /// Schedule a pod to a node. Returns the node name if a suitable node is found.
     pub fn schedule(&self, pod: &Pod, nodes: &[Node]) -> Option<String> {
         let eligible: Vec<&Node> = nodes
             .iter()
@@ -36,7 +36,7 @@ impl Scheduler {
             "Scheduled pod {}/{} → node {} ({})",
             pod.namespace, pod.name, selected.name, selected.id
         );
-        Some(selected.id.clone())
+        Some(selected.name.clone())
     }
 
     /// Check if a node is eligible to run this pod.
@@ -211,7 +211,7 @@ mod tests {
         let pod = make_pod("test-pod");
 
         let result = scheduler.schedule(&pod, &nodes);
-        assert_eq!(result, Some("node-2-id".to_string()));
+        assert_eq!(result, Some("node-2".to_string()));
     }
 
     #[test]
