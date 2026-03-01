@@ -32,6 +32,7 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
 
 // ============================================================
 // OCI Runtime Spec (minimal subset of config.json)
@@ -93,6 +94,18 @@ const VIRTIOFS_TAG: &str = "rootfs";
 const VSOCK_EXEC_PORT: u32 = 5555;
 
 // ============================================================
+// Boot mode detection
+// ============================================================
+
+/// True when k3rs-init is running from an initrd (must mount virtiofs + chroot).
+/// False when the kernel has already mounted virtiofs as the root filesystem.
+static INITRD_MODE: OnceLock<bool> = OnceLock::new();
+
+fn is_initrd_mode() -> bool {
+    *INITRD_MODE.get().unwrap_or(&false)
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -117,8 +130,18 @@ fn linux_main() {
         log_error!("failed to mount filesystems: {}", e);
     }
 
-    // 1b. Mount virtio-fs shared rootfs from host
-    mount_virtiofs();
+    // Detect boot mode: if /config.json already exists we are running directly
+    // from the container rootfs (no-initrd). If not, we are in the initrd and
+    // must mount virtiofs before we can reach the container filesystem.
+    let initrd_mode = !Path::new("/config.json").exists();
+    let _ = INITRD_MODE.set(initrd_mode);
+
+    // 1b. Mount virtio-fs shared rootfs from host (initrd mode only)
+    if initrd_mode {
+        mount_virtiofs();
+    } else {
+        log_info!("no-initrd mode: virtiofs is already the root filesystem");
+    }
 
     // 2. Set hostname
     if let Err(e) = nix::unistd::sethostname(DEFAULT_HOSTNAME) {
@@ -354,31 +377,45 @@ fn handle_vsock_exec(fd: i32) {
     } else {
         log_info!("vsock exec: {:?}", args);
 
-        // Diagnostic: verify rootfs mount is accessible before exec
-        let rootfs_ok = Path::new("/mnt/rootfs/bin").exists();
-        log_info!("rootfs /mnt/rootfs/bin exists: {}", rootfs_ok);
-
         // One-shot: run command, write combined output, close.
-        // Chroot into container rootfs if mounted.
+        // In initrd mode chroot into the virtiofs-mounted container rootfs first;
+        // in no-initrd mode virtiofs IS already the root so no chroot is needed.
         let output = unsafe {
             Command::new(args[0]).args(&args[1..])
-                .pre_exec(chroot_into_rootfs)
+                .pre_exec(|| {
+                    if is_initrd_mode() { chroot_into_rootfs() } else { Ok(()) }
+                })
                 .output()
         };
         match output {
-            Ok(out) => unsafe {
-                libc::write(
-                    fd,
-                    out.stdout.as_ptr() as *const libc::c_void,
+            Ok(out) => {
+                log_info!(
+                    "exec done: status={:?} stdout={} stderr={}",
+                    out.status.code(),
                     out.stdout.len(),
+                    out.stderr.len()
                 );
-                libc::write(
-                    fd,
-                    out.stderr.as_ptr() as *const libc::c_void,
-                    out.stderr.len(),
-                );
-            },
+                unsafe {
+                    if !out.stdout.is_empty() {
+                        let n = libc::write(
+                            fd,
+                            out.stdout.as_ptr() as *const libc::c_void,
+                            out.stdout.len(),
+                        );
+                        log_info!("vsock write stdout: n={}", n);
+                    }
+                    if !out.stderr.is_empty() {
+                        let n = libc::write(
+                            fd,
+                            out.stderr.as_ptr() as *const libc::c_void,
+                            out.stderr.len(),
+                        );
+                        log_info!("vsock write stderr: n={}", n);
+                    }
+                }
+            }
             Err(e) => {
+                log_error!("exec failed: {}", e);
                 let msg = format!("exec error: {}\n", e);
                 unsafe { libc::write(fd, msg.as_ptr() as *const libc::c_void, msg.len()) };
             }
@@ -447,8 +484,9 @@ fn handle_vsock_pty_exec(vsock_fd: i32, args: &[&str]) {
             .stdout(Stdio::from_raw_fd(libc::dup(slave)))
             .stderr(Stdio::from_raw_fd(libc::dup(slave)))
             .pre_exec(|| {
-                // Chroot into container rootfs if mounted.
-                chroot_into_rootfs()?;
+                if is_initrd_mode() {
+                    chroot_into_rootfs()?;
+                }
                 libc::setsid();
                 libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0);
                 Ok(())
@@ -776,9 +814,14 @@ fn run_entrypoint(process: OciProcess) {
         }
     }
 
-    // Spawn the entrypoint as a child process, chrooted into the container rootfs.
+    // Spawn the entrypoint. In initrd mode chroot into the virtiofs-mounted rootfs
+    // first; in no-initrd mode we are already running inside the container rootfs.
     // PID 1 stays alive to continue reaping orphaned zombies.
-    match unsafe { Command::new(program).args(args).pre_exec(chroot_into_rootfs).spawn() } {
+    match unsafe {
+        Command::new(program).args(args).pre_exec(|| {
+            if is_initrd_mode() { chroot_into_rootfs() } else { Ok(()) }
+        }).spawn()
+    } {
         Ok(mut child) => {
             let child_pid = child.id();
             log_info!("entrypoint spawned (pid={})", child_pid);

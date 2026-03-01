@@ -291,8 +291,11 @@ fn exec_on_fd(fd: i32, cmd: &str) -> String {
         written += n as usize;
     }
 
-    // Shutdown write direction so k3rs-init knows the full request has arrived
-    unsafe { libc::shutdown(fd, libc::SHUT_WR) };
+    // NOTE: do NOT shutdown(SHUT_WR) here.  Apple's Virtualization.framework
+    // vsock does not support half-duplex shutdown — calling shutdown(SHUT_WR)
+    // closes the entire connection, causing the guest's write-back to fail
+    // silently and the host to read an empty response.  The '\n' terminator
+    // already tells k3rs-init that the full request has arrived.
 
     // Read response until EOF (k3rs-init closes the connection after writing output)
     let mut output = Vec::new();
