@@ -586,7 +586,7 @@ impl AgentStore {
 - [x] OCI backend (`youki`/`crun`): `create` + `start` fully detaches container process from Agent PID tree — inherent to OCI runtime spec; verified via `scripts/test-recovery.sh`
 - [x] OCI backend: Integration test — `kill -9 <agent-pid>` → verify container still running via `<runtime> state <id>` — implemented as `scripts/test-recovery.sh`
 - [x] VirtualizationBackend (macOS): Launch `k3rs-vmm` helper via `setsid()` (`pre_exec`) + `stdin(Stdio::null())` so VM outlives Agent — implemented in `pkg/container/src/virt.rs::boot_vm()`; PID file written to `<DATA_DIR>/vms/<id>.pid` after spawn; `restore_from_pid_files()` rediscovers alive VMs on restart via `kill(pid, 0)` liveness check; stale PID files removed eagerly
-- [x] FirecrackerBackend (Linux): `spawn_firecracker()` stub documented with required setsid/stdin-null/PID-file/Jailer pattern — `pkg/container/src/firecracker.rs`; full wiring deferred until Firecracker backend is functional
+- [x] FirecrackerBackend (Linux): `spawn_firecracker()` fully implemented with `setsid()` + `stdin(Stdio::null())` + PID file for process independence — `pkg/container/src/firecracker/mod.rs`; `restore_from_pid_files()` rediscovers alive VMs on restart via `kill(pid, 0)` liveness check; stale PID files removed eagerly
 - [x] PID file management: Write container PID to `<DATA_DIR>/logs/<id>/container.pid` via `--pid-file` flag — **note: path differs from spec** (`runtime/containers/<id>/pid`); used by `read_pid()` for nsenter-based exec
 
 #### Agent Recovery
@@ -1198,7 +1198,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 | `backend.rs` | — | `RuntimeBackend` trait + Virtualization/Firecracker/OCI backends + PID tracking + `state()` query |
 | `state.rs` | `dashmap` | In-process container state tracking (`ContainerStore`) — lifecycle: Created → Running → Stopped/Failed |
 | `virt.rs` | `objc2-virtualization` | macOS Virtualization.framework microVM backend |
-| `firecracker.rs` | `kvm-ioctls`, `vm-memory`, `linux-loader` | Linux Firecracker microVM backend (KVM) via [rust-vmm](https://github.com/rust-vmm/community) |
+| `firecracker/` | `reqwest`, `flate2`, `tar` | Linux Firecracker microVM backend — spawns `firecracker` binary, configures via REST API over Unix socket, ext4 rootfs via `mkfs.ext4 -d`, TAP+NAT networking, vsock exec |
 | `runtime.rs` | — | `ContainerRuntime` facade with platform detection, `ContainerStore` integration, `exec_in_container`, `cleanup_container` |
 | `installer.rs` | `reqwest` | Auto-download youki/crun/firecracker from GitHub Releases (Linux) |
 
@@ -1211,7 +1211,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 
 **Backends:**
 - [x] `VirtualizationBackend` — lightweight Linux microVM via Apple Virtualization.framework (macOS)
-- [ ] `FirecrackerBackend` — Firecracker microVM via KVM (Linux) — sub-125ms boot, virtio devices — **struct + trait impl exists (`pkg/container/src/firecracker.rs`) but all methods return `bail!("not fully implemented")`; compile-time stub only**
+- [x] `FirecrackerBackend` — Firecracker microVM via KVM (Linux) — sub-125ms boot, virtio devices — `pkg/container/src/firecracker/mod.rs` with full `RuntimeBackend` impl: create, start, stop, delete, list, logs, exec, spawn_exec, state; spawns `firecracker` binary via REST API, ext4 rootfs via `mkfs.ext4 -d` (no root), TAP+NAT networking with kernel `ip=` config, vsock exec, PID-file recovery, process independence via `setsid()`
 - [x] `OciBackend` — invokes `youki`/`crun` via `std::process::Command` (Linux) — complete implementation, no mocking/fallback
 
 **OCI Runtime Features (Complete):**
@@ -1254,38 +1254,35 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 - [x] Bundle minimal Linux kernel (`vmlinux`) + initrd containing `k3rs-init` — `scripts/build-kernel.sh` builds kernel (Linux 6.12) + initrd via Docker/native cross-compile; `pkg/container/src/kernel.rs` (`KernelManager`) handles discovery + optional auto-download
 - [ ] Sub-second boot time on Apple Silicon — not measured/verified
 
-**FirecrackerBackend (Linux) — powered by [rust-vmm](https://github.com/rust-vmm/community):**
+**FirecrackerBackend (Linux) — spawns pre-built Firecracker binary, configures via REST API:**
 
-| rust-vmm Crate | Purpose in k3rs |
-|----------------|-----------------|
-| `kvm-ioctls` | Safe Rust KVM API (create VM, vCPU, memory regions) |
-| `kvm-bindings` | KVM FFI bindings |
-| `linux-loader` | Load `vmlinux`/`bzImage` kernel into guest memory |
-| `vm-memory` | Guest memory management (GPA → HVA mapping) |
-| `virtio-queue` | Virtqueue ring buffer for all virtio devices |
-| `virtio-vsock` | vsock device for host ↔ guest exec channel |
-| `vm-superio` | Legacy UART serial console for log streaming |
-| `seccompiler` | Seccomp BPF filter generation for Jailer sandboxing |
-| `event-manager` | epoll-based event loop for device I/O |
-| `vmm-reference` | Reference VMM starting point — fork & customize |
+| Module | Purpose |
+|--------|---------|
+| `firecracker/mod.rs` | `RuntimeBackend` trait impl — full VM lifecycle, vsock exec, PID-file recovery |
+| `firecracker/api.rs` | Lightweight HTTP/1.1 client over Unix socket (PUT/GET to Firecracker REST API) |
+| `firecracker/installer.rs` | KVM detection (`/dev/kvm`), auto-download Firecracker+Jailer from GitHub Releases |
+| `firecracker/network.rs` | TAP device creation, /30 subnets, iptables NAT masquerade |
+| `firecracker/rootfs.rs` | ext4 image via `mkfs.ext4 -d` (no root required), virtiofsd daemon for other VMMs |
+| `firecracker/jailer.rs` | Jailer wrapper — chroot + seccomp + cgroups + daemonize |
 
-- [ ] `firecracker.rs` — implement `RuntimeBackend` trait using `rust-vmm` crates
-- [ ] KVM setup via `kvm-ioctls`: create VM, configure vCPUs, map guest memory via `vm-memory`
-- [ ] Kernel loading via `linux-loader`: parse & load `vmlinux` into guest memory
-- [ ] Firecracker binary auto-download via `installer.rs`
-- [ ] KVM detection (`/dev/kvm` availability check)
-- [ ] **virtiofsd** shared FS: mount host rootfs folder as guest `/` via FUSE → virtio-fs
-- [ ] `virtio-net` via `virtio-queue`: TAP-based networking with iptables NAT
-- [ ] Serial console via `vm-superio`: stdout/stderr log streaming
-- [ ] `vsock` via `virtio-vsock`: exec channel (host CID 2 ↔ guest)
+- [x] `firecracker/mod.rs` — full `RuntimeBackend` trait implementation (create, start, stop, delete, list, logs, exec, spawn_exec, state)
+- [x] KVM detection: `FcInstaller::kvm_available()` checks `/dev/kvm` read+write access — `firecracker/installer.rs`
+- [x] Firecracker binary auto-download from GitHub Releases (`firecracker-v{VERSION}-{ARCH}.tgz`) — `firecracker/installer.rs`
+- [x] Kernel loading via Firecracker REST API (`/boot-source`) — kernel path from `KernelManager` shared with VZ backend
+- [x] `ext4` rootfs: `mkfs.ext4 -d` populates image at format time (no loop mount, no root) — `firecracker/rootfs.rs`
+- [x] `virtio-net`: TAP device per VM with /30 subnet + iptables NAT masquerade — `firecracker/network.rs`; guest IP configured via kernel `ip=` boot parameter
+- [x] Serial console: `console=ttyS0` in boot args, Firecracker stdout/stderr redirected to log file
+- [x] `vsock`: host ↔ guest exec channel via Firecracker vsock UDS `{path}_{5555}` — one-shot (`exec_via_vsock`) + streaming PTY via `socat` (`spawn_exec`)
 - [x] `k3rs-init` as PID 1 inside guest (same binary as macOS backend, cross-compiled via `cargo-zigbuild`)
-- [ ] Jailer via `seccompiler`: production hardening (chroot + seccomp + cgroups)
-- [ ] Platform detection: Linux + `/dev/kvm` → FirecrackerBackend → OCI fallback
-- [ ] Sub-125ms boot time, ~5MB memory overhead per microVM
-- [ ] Support x86_64 and aarch64
+- [x] Jailer module: chroot + seccomp + cgroups + UID/GID mapping + daemonize — `firecracker/jailer.rs` (available, not wired as default; direct spawn used for development)
+- [x] Platform detection: Linux + `/dev/kvm` → FirecrackerBackend → OCI fallback — `runtime.rs` lines 88-144
+- [x] Process independence: `setsid()` via `pre_exec`, PID file at `{vm_dir}/{id}.pid`, `restore_from_pid_files()` for post-restart recovery
+- [x] Guest DNS: `/etc/resolv.conf` injected into rootfs with public DNS (8.8.8.8, 8.8.4.4)
+- [ ] Sub-125ms boot time measurement/verification (boot timer exists in `configure_and_boot()`)
+- [x] Support x86_64 and aarch64 (installer auto-detects arch via `std::env::consts::ARCH`)
 
 **Auto-download (Linux):**
-- [ ] firecracker latest from `github.com/firecracker-microvm/firecracker/releases`
+- [x] firecracker v1.14.2 from `github.com/firecracker-microvm/firecracker/releases` — `firecracker/installer.rs`
 - [x] youki v0.6.0 from `github.com/youki-dev/youki/releases`
 - [x] crun 1.26 from `github.com/containers/crun/releases`
 - [x] Configurable: `ensure_runtime(Some("crun"))` — default: youki
@@ -1342,7 +1339,7 @@ k3rs/
 ├── pkg/
 │   ├── api/                    # Axum HTTP API & handlers
 │   ├── constants/              # Centralized constants (paths, network, runtime, auth, state, vm)
-│   ├── container/              # Container runtime (Virtualization.framework on macOS, Firecracker/youki/crun on Linux)
+│   ├── container/              # Container runtime (Virtualization.framework on macOS, Firecracker/youki/crun on Linux; firecracker/ submodule: mod.rs, api.rs, installer.rs, jailer.rs, network.rs, rootfs.rs)
 │   ├── controllers/            # Control loops (Deployment, ReplicaSet, DaemonSet, Job, CronJob, HPA)
 │   ├── metrics/                # Prometheus-format metrics registry
 │   ├── network/                # CNI (pod networking) & DNS (svc.cluster.local)
@@ -1360,7 +1357,7 @@ k3rs/
 - **Management UI**: `dioxus` 0.7 (Rust-native fullstack web framework, WASM SPA)
 - **Container Runtime**: Platform-aware with pluggable `RuntimeBackend` trait
   - **macOS**: Virtualization.framework microVM backend via `objc2-virtualization` (lightweight Linux VMs)
-  - **Linux (microVM)**: [rust-vmm](https://github.com/rust-vmm/community) crates (`kvm-ioctls`, `vm-memory`, `linux-loader`, `virtio-queue`, `virtio-vsock`, `vm-superio`, `seccompiler`)
+  - **Linux (microVM)**: Firecracker binary + REST API over Unix socket (auto-downloaded from GitHub Releases); ext4 rootfs, TAP+NAT networking, vsock exec
   - **Linux (OCI)**: `youki` / `crun` — auto-download from GitHub Releases (fallback when KVM unavailable)
   - **Image Pull**: `oci-client` (OCI Distribution spec — Docker Hub, GHCR, etc.)
   - **Rootfs**: `tar` + `flate2` (extract image layers → host folder), mounted in guest via `virtio-fs`

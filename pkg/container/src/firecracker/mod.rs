@@ -1,19 +1,22 @@
 //! Firecracker microVM backend for Linux.
 //!
-//! Provides KVM-based lightweight VM isolation using Firecracker.
+//! Provides KVM-based lightweight VM isolation using the pre-built Firecracker
+//! binary, configured via its REST API over a Unix socket.
+//!
 //! Each container runs inside its own microVM with:
 //!
-//! - **virtio-blk** or **virtiofs**: OCI rootfs shared as guest filesystem
-//! - **virtio-net**: TAP + iptables NAT for pod connectivity
-//! - **serial console**: stdout/stderr streaming to host log file
-//! - **vsock**: host ↔ guest exec channel (port 5555)
+//! - **virtio-blk**: ext4 rootfs image created via `mkfs.ext4 -d` (no root required)
+//! - **virtio-net**: TAP device per VM with /30 subnet + iptables NAT; guest IP
+//!   configured via kernel `ip=` boot parameter
+//! - **serial console**: stdout/stderr streaming to host log file (`console=ttyS0`)
+//! - **vsock**: host ↔ guest exec channel (port 5555) via Firecracker vsock UDS
 //!
-//! ## Boot design
+//! ## Boot flow
 //!
-//! Firecracker is configured via its REST API (Unix socket), then started.
-//! The kernel boots with `root=/dev/vda init=/sbin/k3rs-init` (ext4 mode) or
-//! mounts virtiofs from a virtiofsd daemon. k3rs-init reads `/config.json`
-//! and execs the container entrypoint.
+//! 1. Spawn Firecracker process with `setsid()` for process independence
+//! 2. Configure via REST API: machine config, boot source, drive, vsock, network
+//! 3. Boot: kernel loads with `root=/dev/vda init=/sbin/k3rs-init ip=...`
+//! 4. k3rs-init reads `/config.json` and execs the container entrypoint
 //!
 //! ## Exec
 //!
@@ -23,10 +26,9 @@
 //!
 //! ## Requirements
 //! - Linux with `/dev/kvm` access
-//! - `firecracker` binary (auto-downloaded if not in PATH)
+//! - `firecracker` binary (auto-downloaded from GitHub Releases if not in PATH)
 //! - Linux kernel at kernel directory (shared KernelManager)
 //! - Optional: `jailer` for chroot + seccomp + cgroups
-//! - Optional: `virtiofsd` for shared directory rootfs
 
 pub mod api;
 pub mod installer;
@@ -41,7 +43,7 @@ use anyhow::{Context, Result};
 use api::FcApiClient;
 use async_trait::async_trait;
 use installer::FcInstaller;
-use rootfs::{FcRootfsManager, FcRootfsMode, RootfsStrategy};
+use rootfs::{FcRootfsManager, FcRootfsMode};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -84,7 +86,7 @@ enum FcVmState {
 /// Firecracker microVM backend.
 ///
 /// Each container runs inside a lightweight Linux microVM using KVM.
-/// Supports both ext4 block device and virtiofsd shared directory modes.
+/// Uses ext4 block device rootfs (virtio-blk) — Firecracker does not support virtio-fs.
 pub struct FirecrackerBackend {
     /// Directory for VM runtime data
     data_dir: PathBuf,
@@ -103,8 +105,8 @@ pub struct FirecrackerBackend {
     kernel_manager: KernelManager,
     /// Counter for unique guest CIDs
     next_cid: Arc<tokio::sync::Mutex<u32>>,
-    /// Detected rootfs strategy
-    rootfs_strategy: RootfsStrategy,
+    /// Cached version string
+    version_string: String,
 }
 
 impl FirecrackerBackend {
@@ -139,17 +141,14 @@ impl FirecrackerBackend {
                 )
             });
 
-        // 5. Detect rootfs strategy
-        let rootfs_strategy = FcRootfsManager::detect_mode();
-
-        // 6. Setup NAT (once, globally)
+        // 5. Setup NAT (once, globally)
         if let Err(e) = network::FcNetworkManager::setup_nat().await {
             tracing::warn!("[fc] NAT setup failed: {} (networking may not work)", e);
         }
 
         let kernel_exists = tokio::fs::metadata(&kernel_path).await.is_ok();
         tracing::info!(
-            "FirecrackerBackend: kernel={}{} firecracker={} jailer={} rootfs={:?} cpus={} mem={}MB",
+            "FirecrackerBackend: kernel={}{} firecracker={} jailer={} rootfs=Ext4 cpus={} mem={}MB",
             kernel_path.display(),
             if kernel_exists { " ✓" } else { " ✗" },
             fc_bin.display(),
@@ -157,7 +156,6 @@ impl FirecrackerBackend {
                 .as_ref()
                 .map(|p| format!("{} ✓", p.display()))
                 .unwrap_or_else(|| "none".to_string()),
-            rootfs_strategy,
             DEFAULT_CPU_COUNT,
             DEFAULT_MEMORY_MB,
         );
@@ -171,7 +169,10 @@ impl FirecrackerBackend {
             instances: Arc::new(RwLock::new(HashMap::new())),
             kernel_manager,
             next_cid: Arc::new(tokio::sync::Mutex::new(FC_GUEST_CID)),
-            rootfs_strategy,
+            version_string: format!(
+                "firecracker-{}",
+                pkg_constants::runtime::FIRECRACKER_VERSION
+            ),
         })
     }
 
@@ -195,10 +196,6 @@ impl FirecrackerBackend {
 
     fn rootfs_img_path(&self, id: &str) -> PathBuf {
         self.data_dir.join(format!("{}-rootfs.ext4", id))
-    }
-
-    fn virtiofsd_socket_path(&self, id: &str) -> PathBuf {
-        self.data_dir.join(format!("{}-virtiofsd.sock", id))
     }
 
     fn pid_file_path(&self, id: &str) -> PathBuf {
@@ -228,25 +225,12 @@ impl FirecrackerBackend {
         // Inject k3rs-init and write config.json (same as VZ backend)
         Self::inject_init_and_config(rootfs_dir, id, command, env).await?;
 
-        match self.rootfs_strategy {
-            RootfsStrategy::Ext4 => {
-                let img_path = self.rootfs_img_path(id);
-                FcRootfsManager::create_ext4_image(rootfs_dir, &img_path).await?;
-                Ok(FcRootfsMode::Ext4 {
-                    image_path: img_path,
-                })
-            }
-            RootfsStrategy::Virtiofsd => {
-                let socket_path = self.virtiofsd_socket_path(id);
-                let pid =
-                    FcRootfsManager::start_virtiofsd(rootfs_dir, &socket_path).await?;
-                Ok(FcRootfsMode::Virtiofsd {
-                    shared_dir: rootfs_dir.to_path_buf(),
-                    socket_path,
-                    virtiofsd_pid: Some(pid),
-                })
-            }
-        }
+        // Always ext4 — Firecracker only supports virtio-blk root devices.
+        let img_path = self.rootfs_img_path(id);
+        FcRootfsManager::create_ext4_image(rootfs_dir, &img_path).await?;
+        Ok(FcRootfsMode::Ext4 {
+            image_path: img_path,
+        })
     }
 
     /// Inject k3rs-init binary and config.json into the rootfs.
@@ -324,6 +308,12 @@ impl FirecrackerBackend {
         tokio::fs::write(&config_dest, serde_json::to_string_pretty(&config)?)
             .await
             .with_context(|| format!("write config.json to {}", config_dest.display()))?;
+
+        // Write /etc/resolv.conf so the guest can resolve DNS names.
+        let resolv_dest = rootfs_dir.join("etc/resolv.conf");
+        tokio::fs::write(&resolv_dest, "nameserver 8.8.8.8\nnameserver 8.8.4.4\n")
+            .await
+            .ok();
 
         Ok(())
     }
@@ -411,17 +401,22 @@ impl FirecrackerBackend {
         api.set_machine_config(DEFAULT_CPU_COUNT, DEFAULT_MEMORY_MB)
             .await?;
 
-        // 2. Boot source
-        let boot_args = match rootfs_mode {
-            FcRootfsMode::Ext4 { .. } => {
-                "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/sbin/k3rs-init"
-                    .to_string()
-            }
-            FcRootfsMode::Virtiofsd { .. } => {
-                "console=ttyS0 reboot=k panic=1 pci=off root=virtiofs:rootfs rw init=/sbin/k3rs-init"
-                    .to_string()
-            }
+        // 2. Boot source — ext4 root device via virtio-blk.
+        // Includes kernel ip= parameter for TAP networking when a TAP is attached.
+        let ip_cfg = if let Some(tap) = tap_name {
+            let _ = tap; // used only to decide whether to include ip=
+            let guest = network::FcNetworkManager::guest_ip(guest_cid);
+            let gw = network::FcNetworkManager::host_ip(guest_cid);
+            format!(" ip={}::{}:255.255.255.252::eth0:off", guest, gw)
+        } else {
+            String::new()
         };
+
+        let boot_args = format!(
+            "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/sbin/k3rs-init{}",
+            ip_cfg,
+        );
+
         api.set_boot_source(
             &self.kernel_path.to_string_lossy(),
             &boot_args,
@@ -432,19 +427,12 @@ impl FirecrackerBackend {
         )
         .await?;
 
-        // 3. Root device
-        match rootfs_mode {
-            FcRootfsMode::Ext4 { image_path } => {
-                api.add_drive("rootfs", &image_path.to_string_lossy(), true, false)
-                    .await?;
-            }
-            FcRootfsMode::Virtiofsd { .. } => {
-                // virtiofsd uses vhost-user-fs — configured separately
-                // The Firecracker API for this is not yet standard;
-                // for now, fall back to ext4 if virtiofs config fails
-                tracing::info!("[fc] virtiofsd mode: rootfs shared via vhost-user-fs");
-            }
-        }
+        // 3. Root device — ext4 block device via virtio-blk
+        let FcRootfsMode::Ext4 { image_path } = rootfs_mode else {
+            anyhow::bail!("Firecracker only supports ext4 rootfs (virtio-blk)");
+        };
+        api.add_drive("rootfs", &image_path.to_string_lossy(), true, false)
+            .await?;
 
         // 4. vsock
         let vsock_uds = self.vsock_uds_path(id);
@@ -639,7 +627,7 @@ impl RuntimeBackend for FirecrackerBackend {
     }
 
     fn version(&self) -> &str {
-        "firecracker-1.12.0"
+        &self.version_string
     }
 
     async fn create(&self, id: &str, bundle: &Path) -> Result<()> {
@@ -985,7 +973,7 @@ mod tests {
             instances: Arc::new(RwLock::new(HashMap::new())),
             kernel_manager: KernelManager::with_dir(Path::new("/tmp/test")),
             next_cid: Arc::new(tokio::sync::Mutex::new(FC_GUEST_CID)),
-            rootfs_strategy: RootfsStrategy::Ext4,
+            version_string: format!("firecracker-{}", pkg_constants::runtime::FIRECRACKER_VERSION),
         };
 
         assert_eq!(

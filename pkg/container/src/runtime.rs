@@ -29,6 +29,10 @@ pub struct ContainerRuntime {
     data_dir: PathBuf,
     /// In-process container state tracker.
     store: ContainerStore,
+    /// Cached VM backend (Firecracker on Linux, Virtualization.framework on macOS).
+    /// Lazily initialized on first use so the in-memory instance map persists
+    /// across create → start → stop → delete calls.
+    vm_backend: tokio::sync::OnceCell<Arc<dyn RuntimeBackend>>,
 }
 
 impl ContainerRuntime {
@@ -145,11 +149,19 @@ impl ContainerRuntime {
         };
         let image_manager = ImageManager::new(&data_dir);
 
+        // Pre-populate the VM backend cache if the default backend is already a VM backend,
+        // so all code paths share the same instance.
+        let vm_backend = tokio::sync::OnceCell::new();
+        if backend.name() == "vm" {
+            let _ = vm_backend.set(backend.clone());
+        }
+
         Ok(Self {
             backend,
             image_manager,
             data_dir,
             store: ContainerStore::new(),
+            vm_backend,
         })
     }
 
@@ -208,48 +220,32 @@ impl ContainerRuntime {
     ) -> Result<()> {
         let backend = if let Some(name) = runtime_name {
             if name == "vm" {
-                if cfg!(target_os = "macos") {
-                    if self.backend.name() == "vm" {
-                        self.backend.clone()
-                    } else {
-                        Arc::new(crate::virt::VirtualizationBackend::new(&self.data_dir).await?)
-                            as Arc<dyn RuntimeBackend>
-                    }
-                } else if cfg!(target_os = "linux") {
-                    if self.backend.name() == "vm" {
-                        self.backend.clone()
-                    } else {
-                        match crate::firecracker::FirecrackerBackend::new(&self.data_dir).await {
-                            Ok(fc) => Arc::new(fc) as Arc<dyn RuntimeBackend>,
-                            Err(e) => {
-                                info!("Firecracker init failed: {}, falling back to OCI runtime", e);
-                                // In nested containers, youki fails on cgroup controllers.
-                                // Prefer crun (supports --cgroup-manager none) over youki.
-                                let is_native = std::fs::read_to_string("/proc/1/comm")
-                                    .map(|s| {
-                                        let t = s.trim();
-                                        t == "systemd" || t == "init"
-                                    })
-                                    .unwrap_or(false);
-                                if !is_native && self.backend.name() == "youki" {
-                                    match OciBackend::with_name("crun", &self.data_dir) {
-                                        Ok(crun) => {
-                                            info!(
-                                                "Nested container detected — using crun instead of youki"
-                                            );
-                                            Arc::new(crun) as Arc<dyn RuntimeBackend>
-                                        }
-                                        Err(_) => self.backend.clone(),
-                                    }
-                                } else {
-                                    self.backend.clone()
+                match self.get_or_init_vm_backend().await {
+                    Ok(vm) => vm,
+                    Err(e) => {
+                        info!("VM backend init failed: {}, falling back to OCI runtime", e);
+                        // In nested containers, youki fails on cgroup controllers.
+                        // Prefer crun (supports --cgroup-manager none) over youki.
+                        let is_native = std::fs::read_to_string("/proc/1/comm")
+                            .map(|s| {
+                                let t = s.trim();
+                                t == "systemd" || t == "init"
+                            })
+                            .unwrap_or(false);
+                        if !is_native && self.backend.name() == "youki" {
+                            match OciBackend::with_name("crun", &self.data_dir) {
+                                Ok(crun) => {
+                                    info!(
+                                        "Nested container detected — using crun instead of youki"
+                                    );
+                                    Arc::new(crun) as Arc<dyn RuntimeBackend>
                                 }
+                                Err(_) => self.backend.clone(),
                             }
+                        } else {
+                            self.backend.clone()
                         }
                     }
-                } else {
-                    info!("Requested vm runtime not supported on this platform, using default");
-                    self.backend.clone()
                 }
             } else if name == "youki" || name == "crun" {
                 // Inside containers (Podman/Docker), youki fails because it
@@ -364,29 +360,34 @@ impl ContainerRuntime {
         Ok(())
     }
 
+    /// Get or lazily initialize the cached VM backend.
+    ///
+    /// Returns the same instance across all calls so that the in-memory
+    /// VM instance map (e.g. Firecracker's `instances` HashMap) persists
+    /// across create → start → stop → delete.
+    async fn get_or_init_vm_backend(&self) -> Result<Arc<dyn RuntimeBackend>> {
+        self.vm_backend
+            .get_or_try_init(|| async {
+                if cfg!(target_os = "macos") {
+                    let virt =
+                        crate::virt::VirtualizationBackend::new(&self.data_dir).await?;
+                    Ok(Arc::new(virt) as Arc<dyn RuntimeBackend>)
+                } else {
+                    let fc =
+                        crate::firecracker::FirecrackerBackend::new(&self.data_dir).await?;
+                    Ok(Arc::new(fc) as Arc<dyn RuntimeBackend>)
+                }
+            })
+            .await
+            .cloned()
+    }
+
     /// Helper to get the correct backend for a specific container.
     async fn get_backend_for_container(&self, id: &str) -> Arc<dyn RuntimeBackend> {
         if let Some(entry) = self.store.get(id) {
             if entry.runtime_name == "vm" {
-                if cfg!(target_os = "macos") {
-                    if self.backend.name() == "vm" {
-                        return self.backend.clone();
-                    } else {
-                        // This shouldn't happen often, but handle fallback
-                        if let Ok(virt) =
-                            crate::virt::VirtualizationBackend::new(&self.data_dir).await
-                        {
-                            return Arc::new(virt);
-                        }
-                    }
-                } else if cfg!(target_os = "linux") {
-                    if self.backend.name() == "vm" {
-                        return self.backend.clone();
-                    } else if let Ok(fc) =
-                        crate::firecracker::FirecrackerBackend::new(&self.data_dir).await
-                    {
-                        return Arc::new(fc);
-                    }
+                if let Ok(vm) = self.get_or_init_vm_backend().await {
+                    return vm;
                 }
             } else if (entry.runtime_name == "youki" || entry.runtime_name == "crun")
                 && let Ok(oci) = OciBackend::with_name(&entry.runtime_name, &self.data_dir)
