@@ -590,7 +590,7 @@ impl AgentStore {
 - [x] PID file management: Write container PID to `<DATA_DIR>/logs/<id>/container.pid` via `--pid-file` flag — **note: path differs from spec** (`runtime/containers/<id>/pid`); used by `read_pid()` for nsenter-based exec
 
 #### Agent Recovery
-- [x] `discover_running_containers()` — queries OCI runtime `list` command, parses running container IDs; implemented in `pkg/container/src/runtime.rs`
+- [x] `discover_running_containers()` — queries both OCI and VM backends; VM backend lazily initialized via `OnceCell`, FC `list()` calls `restore_from_pid_files()` to recover VMs; tracks each container with correct `runtime_name` — `pkg/container/src/runtime.rs`
 - [x] `discover_running_vms()` — implemented as `restore_from_pid_files()` in `pkg/container/src/virt.rs`; scans `<DATA_DIR>/vms/*.pid`, verifies each PID is alive via `kill(pid, 0)`, rebuilds `VmInstance` map; stale PID files removed on startup; wired into `list()` as primary discovery path with `k3rs-vmm ls` as fallback
 - [x] `reconcile_with_server(discovered, desired)` — adopt/stop/create logic — implemented inline in agent boot sequence (`cmd/k3rs-agent/src/main.rs`); fetches desired pods from `GET /api/v1/pods?fieldSelector=spec.nodeName=<self>` (Kubernetes-standard endpoint), adopts or stops accordingly
 - [x] `restore_ip_allocations(discovered_containers)` — k3rs VMs use virtio-net NAT with DHCP (macOS `Virtualization.framework`); no static IP allocation exists; mapped to `restore_from_pid_files()` which rebuilds the in-memory `VmInstance` `HashMap` — sufficient for VM lifecycle management without a separate IP table
@@ -1211,7 +1211,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 
 **Backends:**
 - [x] `VirtualizationBackend` — lightweight Linux microVM via Apple Virtualization.framework (macOS)
-- [x] `FirecrackerBackend` — Firecracker microVM via KVM (Linux) — sub-125ms boot, virtio devices — `pkg/container/src/firecracker/mod.rs` with full `RuntimeBackend` impl: create, start, stop, delete, list, logs, exec, spawn_exec, state; spawns `firecracker` binary via REST API, ext4 rootfs via `mkfs.ext4 -d` (no root), TAP+NAT networking with kernel `ip=` config, vsock exec, PID-file recovery, process independence via `setsid()`
+- [x] `FirecrackerBackend` — Firecracker microVM via KVM (Linux) — sub-125ms boot, virtio devices — `pkg/container/src/firecracker/mod.rs` with full `RuntimeBackend` impl: create, start, stop, delete, list, logs, exec, spawn_exec, state; spawns `firecracker` binary via REST API, ext4 rootfs via `mkfs.ext4 -d` (no root), TAP+NAT networking with kernel `ip=` config, vsock exec via host→guest CONNECT handshake, PID-file recovery, process independence via `setsid()`, VM backend cached in `OnceCell` for cross-call state persistence
 - [x] `OciBackend` — invokes `youki`/`crun` via `std::process::Command` (Linux) — complete implementation, no mocking/fallback
 
 **OCI Runtime Features (Complete):**
@@ -1258,8 +1258,8 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 
 | Module | Purpose |
 |--------|---------|
-| `firecracker/mod.rs` | `RuntimeBackend` trait impl — full VM lifecycle, vsock exec, PID-file recovery |
-| `firecracker/api.rs` | Lightweight HTTP/1.1 client over Unix socket (PUT/GET to Firecracker REST API) |
+| `firecracker/mod.rs` | `RuntimeBackend` trait impl — full VM lifecycle, vsock exec (host→guest CONNECT handshake), PID-file recovery |
+| `firecracker/api.rs` | Lightweight HTTP/1.1 client over Unix socket — proper response parsing (no `shutdown()` race), 30s timeout |
 | `firecracker/installer.rs` | KVM detection (`/dev/kvm`), auto-download Firecracker+Jailer from GitHub Releases |
 | `firecracker/network.rs` | TAP device creation, /30 subnets, iptables NAT masquerade |
 | `firecracker/rootfs.rs` | ext4 image via `mkfs.ext4 -d` (no root required), virtiofsd daemon for other VMMs |
@@ -1272,12 +1272,16 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 - [x] `ext4` rootfs: `mkfs.ext4 -d` populates image at format time (no loop mount, no root) — `firecracker/rootfs.rs`
 - [x] `virtio-net`: TAP device per VM with /30 subnet + iptables NAT masquerade — `firecracker/network.rs`; guest IP configured via kernel `ip=` boot parameter
 - [x] Serial console: `console=ttyS0` in boot args, Firecracker stdout/stderr redirected to log file
-- [x] `vsock`: host ↔ guest exec channel via Firecracker vsock UDS `{path}_{5555}` — one-shot (`exec_via_vsock`) + streaming PTY via `socat` (`spawn_exec`)
+- [x] `vsock`: host ↔ guest exec channel via Firecracker vsock — host-initiated `CONNECT {port}\n` handshake on main UDS; one-shot (`exec_via_vsock`) + streaming PTY via `socat` (`spawn_exec`)
 - [x] `k3rs-init` as PID 1 inside guest (same binary as macOS backend, cross-compiled via `cargo-zigbuild`)
 - [x] Jailer module: chroot + seccomp + cgroups + UID/GID mapping + daemonize — `firecracker/jailer.rs` (available, not wired as default; direct spawn used for development)
-- [x] Platform detection: Linux + `/dev/kvm` → FirecrackerBackend → OCI fallback — `runtime.rs` lines 88-144
+- [x] Platform detection: Linux + `/dev/kvm` → FirecrackerBackend (no OCI fallback for `runtime: vm`) — `runtime.rs`
 - [x] Process independence: `setsid()` via `pre_exec`, PID file at `{vm_dir}/{id}.pid`, `restore_from_pid_files()` for post-restart recovery
 - [x] Guest DNS: `/etc/resolv.conf` injected into rootfs with public DNS (8.8.8.8, 8.8.4.4)
+- [x] VM backend instance caching: `OnceCell<Arc<dyn RuntimeBackend>>` in `ContainerRuntime` ensures in-memory VM state persists across create → start → stop → delete calls — `runtime.rs`
+- [x] API client: proper HTTP response parsing (headers → Content-Length → body) instead of `shutdown()` + `read_to_end()` which raced with Firecracker's `micro_http` — `firecracker/api.rs`
+- [x] Interactive exec routing: `handle_tty()` checks `backend_name_for(id)` to correctly route VM containers through vsock PTY path instead of OCI runtime — `api.rs`
+- [x] Agent restart VM recovery: `discover_running_containers()` queries both OCI and VM backends; FC backend's `list()` → `restore_from_pid_files()` recovers running VMs — `runtime.rs`
 - [ ] Sub-125ms boot time measurement/verification (boot timer exists in `configure_and_boot()`)
 - [x] Support x86_64 and aarch64 (installer auto-detects arch via `std::env::consts::ARCH`)
 
