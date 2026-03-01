@@ -624,24 +624,28 @@ The following items describe the **initial JSON-file implementation** (completed
 
 #### Agent State Store Migration (JSON → SlateDB)
 
-Replace the ad-hoc JSON file approach with an embedded SlateDB instance. All items below are **pending implementation**.
+Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 
-- [ ] Add `slatedb` + `object_store` (local FS backend) dependencies to `cmd/k3rs-agent/Cargo.toml`
-- [ ] Create `cmd/k3rs-agent/src/store.rs` — implement `AgentStore` struct wrapping a local SlateDB instance
-  - [ ] `AgentStore::open(data_dir)` — open/create SlateDB at `<DATA_DIR>/agent/state.db/` using `LocalFileSystem` backend
-  - [ ] `AgentStore::save(cache)` — single `WriteBatch`: write `/agent/meta`, all pod/service/endpoint/ingress keys, `/agent/routes`, `/agent/dns-records`
-  - [ ] `AgentStore::load()` → `Option<AgentStateCache>` — read all `/agent/*` keys; return `None` if `/agent/meta` missing (fresh node)
-  - [ ] `AgentStore::load_routes()` → `Option<RoutingTable>` — read only `/agent/routes` for fast ServiceProxy bootstrap
-  - [ ] `AgentStore::load_dns_records()` → `Option<HashMap<String,String>>` — read only `/agent/dns-records` for fast DnsServer bootstrap
-- [ ] Migrate `AgentStateCache::save()` to call `AgentStore::save()` via `WriteBatch` (remove custom `atomic_write()` helper)
-- [ ] Migrate `AgentStateCache::load()` to call `AgentStore::load()`; remove `state.json` file path logic
-- [ ] Migrate `AgentStateCache::derive_routes()` / `derive_dns()` — write derived keys inside the same `WriteBatch` as parent records (no separate file writes)
-- [ ] Replace `ServiceProxy::load_from_file()` with `ServiceProxy::load_from_db(store)` — reads `/agent/routes` via `AgentStore::load_routes()`
-- [ ] Replace `DnsServer::load_from_file()` with `DnsServer::load_from_db(store)` — reads `/agent/dns-records` via `AgentStore::load_dns_records()`
-- [ ] Update `main.rs` Phase A: open `AgentStore` → call `store.load()` (replaces JSON file read)
-- [ ] Update `main.rs` Phase B: call `store.load_routes()` / `store.load_dns_records()` for zero-delay proxy/DNS bootstrap
-- [ ] Remove `cache::routes_path()`, `cache::dns_path()`, `cache::state_path()` path helpers once migration is complete
-- [ ] Remove `routes.json`, `state.json`, `dns-records.json` file cleanup from `scripts/dev-agent.sh` (no longer applicable)
+- [x] Add `slatedb` dependency to `cmd/k3rs-agent/Cargo.toml` (uses workspace version; `object_store` with `LocalFileSystem` is bundled with SlateDB)
+- [x] Create `cmd/k3rs-agent/src/store.rs` — implement `AgentStore` struct wrapping a local SlateDB instance
+  - [x] `AgentStore::open(data_dir)` — open/create SlateDB at `<DATA_DIR>/agent/state.db/` using `LocalFileSystem` backend
+  - [x] `AgentStore::save(cache)` — single `WriteBatch`: write `/agent/meta`, all pod/service/endpoint/ingress keys, `/agent/routes`, `/agent/dns-records`
+  - [x] `AgentStore::load()` → `Option<AgentStateCache>` — reads `/agent/meta` first (fast fresh-node check), then `scan_prefix` for each collection; returns `None` if `/agent/meta` missing (fresh node)
+  - [x] `AgentStore::load_routes()` → `Option<HashMap<String,Vec<String>>>` — read only `/agent/routes` for fast ServiceProxy bootstrap (future use)
+  - [x] `AgentStore::load_dns_records()` → `Option<HashMap<String,String>>` — read only `/agent/dns-records` for fast DnsServer bootstrap (future use)
+  - [x] `AgentStore::close()` — flush WAL gracefully on shutdown; called in `main.rs` Ctrl-C handler
+- [x] Migrate `AgentStateCache::save()` / `load()` — removed; persistence now via `AgentStore::save()` / `AgentStore::load()`
+- [x] Remove custom `atomic_write()` helper from `cache.rs` — replaced by SlateDB `WriteBatch`
+- [x] Migrate `AgentStateCache::derive_routes()` / `derive_dns()` — replaced by `derive_routes_map()` / `derive_dns_map()` (pure computation, no file I/O); called inside `AgentStore::save()` to populate `/agent/routes` + `/agent/dns-records` in the same `WriteBatch`
+- [x] Bootstrap proxy/DNS without `load_from_file()` — Phase B now calls `service_proxy.update_routes(&cache.services, &cache.endpoints)` and `dns_server.update_records(&cache.services)` directly from the loaded `AgentStateCache`; no separate file load needed
+- [x] Update `main.rs` Phase A: `AgentStore::open()` + `store.load()` (replaces `AgentStateCache::load()` from JSON)
+- [x] Update `main.rs` Phase B: bootstrap ServiceProxy + DnsServer with cached services/endpoints via `update_routes()` / `update_records()` (replaces `load_from_file()`)
+- [x] Update `main.rs` Phase C (registration): update in-memory cache under lock → clone snapshot → `store.save(&snapshot).await` outside lock
+- [x] Update `main.rs` reconnect loop: same pattern — update lock → clone → `store.save()`
+- [x] Update `main.rs` pod sync loop: same pattern — update lock → clone → `store.save()`
+- [x] Update `main.rs` route sync loop: same pattern — update lock → clone → `store.save()` (replaces `c.save()` + `derive_routes()` + `derive_dns()`)
+- [x] Remove `cache::routes_path()`, `cache::dns_path()`, `cache::state_path()` path helpers — removed from `cache.rs`
+- [ ] Remove `routes.json`, `state.json`, `dns-records.json` file cleanup from `scripts/dev-agent.sh` (no longer written; cleanup is harmless but should be removed for clarity)
 
 #### Testing & Validation
 - [x] Test: kill Agent → verify containers still running → restart Agent → verify pod adoption — implemented as `scripts/test-recovery.sh` (full end-to-end bash integration test)
