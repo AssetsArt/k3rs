@@ -14,7 +14,7 @@ use tracing::{error, info, warn};
 #[command(name = "k3rs-agent", about = "k3rs node agent (data plane)")]
 struct Cli {
     /// Path to YAML config file
-    #[arg(long, short, default_value = pkg_constants::paths::DEFAULT_AGENT_CONFIG)]
+    #[arg(long, short, default_value_t = format!("{}/agent-config.yaml", pkg_constants::paths::CONFIG_DIR))]
     config: String,
 
     /// Server API endpoint
@@ -152,11 +152,7 @@ async fn main() -> anyhow::Result<()> {
                 );
 
                 // Store certs to disk for future mTLS connections
-                let cert_dir = format!(
-                    "{}{}",
-                    pkg_constants::paths::AGENT_CERT_DIR_PREFIX,
-                    node_name
-                );
+                let cert_dir = format!("{}/certs/{}", pkg_constants::paths::CONFIG_DIR, node_name);
                 tokio::fs::create_dir_all(&cert_dir).await?;
                 tokio::fs::write(format!("{}/node.crt", cert_dir), &reg_resp.certificate).await?;
                 tokio::fs::write(format!("{}/node.key", cert_dir), &reg_resp.private_key).await?;

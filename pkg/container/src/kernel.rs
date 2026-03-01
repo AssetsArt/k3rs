@@ -59,8 +59,12 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
-/// Default kernel/initrd location
-use pkg_constants::paths::{INITRD_FILENAME, KERNEL_DIR, KERNEL_FILENAME};
+use pkg_constants::paths::DATA_DIR;
+
+/// Kernel binary filename inside the kernel directory.
+const KERNEL_FILENAME: &str = "vmlinux";
+/// Initrd image filename inside the kernel directory.
+const INITRD_FILENAME: &str = "initrd.img";
 
 /// Manages kernel + initrd assets for microVM backends.
 pub struct KernelManager {
@@ -80,7 +84,7 @@ impl KernelManager {
     /// Create a KernelManager with the default directory (`/var/lib/k3rs`).
     pub fn new() -> Self {
         Self {
-            kernel_dir: PathBuf::from(KERNEL_DIR),
+            kernel_dir: PathBuf::from(DATA_DIR),
             download_url: None,
         }
     }

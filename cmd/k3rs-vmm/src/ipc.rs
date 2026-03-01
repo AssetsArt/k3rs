@@ -1,6 +1,6 @@
 //! Unix domain socket IPC for exec forwarding between k3rs-vmm processes.
 //!
-//! The `boot` process creates a listener at `/tmp/k3rs-runtime/vms/vmm-{id}.sock`.
+//! The `boot` process creates a listener at `{DATA_DIR}/runtime/vms/vmm-{id}.sock`.
 //! The `exec` subcommand connects to that socket, sends the command, and reads
 //! the response.
 //!
@@ -24,7 +24,7 @@ use std::{io, thread};
 
 use tracing::{error, info};
 
-use pkg_constants::paths::VMM_SOCKET_DIR;
+use pkg_constants::paths::DATA_DIR;
 
 /// Byte prefix that distinguishes streaming exec from regular one-shot exec.
 const STREAM_PREFIX: u8 = 0x01;
@@ -49,9 +49,14 @@ pub fn cleanup() {
     }
 }
 
+/// Get the socket directory for VMM sockets.
+fn vmm_socket_dir() -> String {
+    format!("{}/runtime/vms", DATA_DIR)
+}
+
 /// Get the socket path for a given VM ID.
 pub fn socket_path(id: &str) -> String {
-    format!("{}/vmm-{}.sock", VMM_SOCKET_DIR, id)
+    format!("{}/vmm-{}.sock", vmm_socket_dir(), id)
 }
 
 /// Start an IPC listener for exec requests on the given VM.
@@ -67,7 +72,7 @@ pub fn start_listener(
 ) {
     let path = socket_path(id);
 
-    let _ = std::fs::create_dir_all(VMM_SOCKET_DIR);
+    let _ = std::fs::create_dir_all(vmm_socket_dir());
     let _ = std::fs::remove_file(&path);
 
     let listener = match std::os::unix::net::UnixListener::bind(&path) {
@@ -179,15 +184,14 @@ fn handle_connection(
         let parts: Vec<String> = cmd_line.split('\0').map(|s| s.to_string()).collect();
         info!("IPC exec request for VM {}: {:?}", id, parts);
 
-        let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            exec_handler(&parts)
-        })) {
-            Ok(out) => out,
-            Err(_) => {
-                error!("IPC exec handler panicked for VM {}", id);
-                "exec error: handler panicked\n".to_string()
-            }
-        };
+        let output =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| exec_handler(&parts))) {
+                Ok(out) => out,
+                Err(_) => {
+                    error!("IPC exec handler panicked for VM {}", id);
+                    "exec error: handler panicked\n".to_string()
+                }
+            };
         let _ = stream.write_all(output.as_bytes());
     }
 }
@@ -311,8 +315,16 @@ pub fn exec_streaming_via_ipc(id: &str, command: &[String]) -> io::Result<()> {
     let t_in = thread::spawn(move || {
         let mut buf = [0u8; 256];
         let mut poll_fds = [
-            libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 },
-            libc::pollfd { fd: done_read,           events: libc::POLLIN, revents: 0 },
+            libc::pollfd {
+                fd: libc::STDIN_FILENO,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: done_read,
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
         'outer: loop {
             let ready = unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, -1) };
@@ -430,13 +442,12 @@ fn connect_to_ipc(id: &str) -> io::Result<std::os::unix::net::UnixStream> {
         ));
     }
 
-    let stream =
-        std::os::unix::net::UnixStream::connect(&path).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("failed to connect to VM '{}' IPC socket: {}", id, e),
-            )
-        })?;
+    let stream = std::os::unix::net::UnixStream::connect(&path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("failed to connect to VM '{}' IPC socket: {}", id, e),
+        )
+    })?;
 
     Ok(stream)
 }

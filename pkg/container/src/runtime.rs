@@ -38,8 +38,9 @@ impl ContainerRuntime {
     /// - macOS: VirtualizationBackend (Apple Virtualization.framework microVM)
     /// - Linux: OCI (youki/crun in PATH) → auto-download
     pub async fn new(data_dir: Option<&str>) -> Result<Self> {
-        let data_dir =
-            PathBuf::from(data_dir.unwrap_or(pkg_constants::paths::DEFAULT_RUNTIME_DATA_DIR));
+        let data_dir = PathBuf::from(
+            data_dir.unwrap_or(&format!("{}/runtime", pkg_constants::paths::DATA_DIR)),
+        );
         tokio::fs::create_dir_all(&data_dir).await.map_err(|e| {
             tracing::error!("[runtime] create_dir_all error: {}", e);
             e

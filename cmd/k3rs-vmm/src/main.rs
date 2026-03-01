@@ -283,7 +283,12 @@ fn cmd_exec(args: ExecArgs) {
         args.command.clone()
     };
 
-    info!("exec in VM {} tty={}: {}", args.id, args.tty, command.join(" "));
+    info!(
+        "exec in VM {} tty={}: {}",
+        args.id,
+        args.tty,
+        command.join(" ")
+    );
 
     if args.tty {
         // Streaming PTY mode: bidirectional relay through IPC → vsock → guest PTY.
@@ -320,9 +325,9 @@ fn cmd_state(args: StateArgs) {
 // ── List command ────────────────────────────────────────────────────────
 
 fn cmd_list() {
-    let vms_dir = "/tmp/k3rs-runtime/vms";
+    let vms_dir = format!("{}/runtime/vms", pkg_constants::paths::DATA_DIR);
 
-    let entries = match std::fs::read_dir(vms_dir) {
+    let entries = match std::fs::read_dir(&vms_dir) {
         Ok(e) => e,
         Err(_) => {
             println!("No VMs found");

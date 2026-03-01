@@ -42,9 +42,12 @@ use crate::backend::RuntimeBackend;
 use crate::kernel::KernelManager;
 use crate::state::ContainerStateInfo;
 
-use pkg_constants::paths::{
-    GUEST_CONFIG_PATH, GUEST_INIT_PATH, K3RS_INIT_SYSTEM_PATH, K3RS_INIT_USER_PATH,
-};
+use pkg_constants::paths::DATA_DIR;
+
+/// Path where k3rs-init is injected inside the guest rootfs.
+const GUEST_INIT_PATH: &str = "sbin/k3rs-init";
+/// Standard config.json path inside guest rootfs (read by k3rs-init).
+const GUEST_CONFIG_PATH: &str = "config.json";
 use pkg_constants::runtime::{DEFAULT_CPU_COUNT, DEFAULT_MEMORY_MB};
 
 /// Per-VM resource configuration.
@@ -762,13 +765,13 @@ async fn which_vmm() -> Option<String> {
         }
     }
 
-    for path in &[
-        "./target/release/k3rs-vmm",
-        "./target/debug/k3rs-vmm",
-        "/usr/local/bin/k3rs-vmm",
-        "/opt/k3rs/bin/k3rs-vmm",
-        "./k3rs-vmm",
-    ] {
+    let candidates = [
+        "./target/release/k3rs-vmm".to_string(),
+        "./target/debug/k3rs-vmm".to_string(),
+        format!("{}/bin/k3rs-vmm", DATA_DIR),
+        "./k3rs-vmm".to_string(),
+    ];
+    for path in &candidates {
         if tokio::fs::metadata(path).await.is_ok() {
             return Some(path.to_string());
         }
@@ -784,12 +787,13 @@ async fn which_vmm() -> Option<String> {
 /// 2. User-local (`~/.k3rs/bin/k3rs-init`)
 /// 3. Cargo build output for aarch64 and x86_64 musl targets
 pub(crate) fn find_k3rs_init() -> Option<PathBuf> {
-    if let Some(p) = try_path(K3RS_INIT_SYSTEM_PATH) {
+    let system_path = format!("{}/bin/k3rs-init", DATA_DIR);
+    if let Some(p) = try_path(&system_path) {
         return Some(p);
     }
 
     if let Some(home) = std::env::var_os("HOME") {
-        let user_path = PathBuf::from(home).join(K3RS_INIT_USER_PATH);
+        let user_path = PathBuf::from(home).join(".k3rs/bin/k3rs-init");
         if user_path.exists() {
             return Some(user_path);
         }

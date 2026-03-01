@@ -13,7 +13,7 @@ struct Cli {
     config: String,
 
     #[cfg(not(debug_assertions))]
-    #[arg(long, short, default_value = pkg_constants::paths::DEFAULT_SERVER_CONFIG)]
+    #[arg(long, short, default_value_t = format!("{}/config.yaml", pkg_constants::paths::CONFIG_DIR))]
     config: String,
 
     /// Port to listen on
@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
     let data_dir = cli
         .data_dir
         .or(file_cfg.data_dir)
-        .unwrap_or_else(|| pkg_constants::paths::DEFAULT_SERVER_DATA_DIR.to_string());
+        .unwrap_or_else(|| format!("{}/server", pkg_constants::paths::DATA_DIR));
     let token = cli
         .token
         .or(file_cfg.token)

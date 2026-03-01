@@ -81,7 +81,7 @@ impl RuntimeInstaller {
     /// Get the install directory — prefers /usr/local/bin/k3rs-runtime,
     /// falls back to $HOME/.k3rs/bin/ if no write access.
     pub fn install_dir() -> PathBuf {
-        let system_dir = PathBuf::from(paths::RUNTIME_INSTALL_DIR);
+        let system_dir = PathBuf::from(format!("{}/bin", paths::DATA_DIR));
         if std::fs::create_dir_all(&system_dir).is_ok() {
             // Test write access
             let test_file = system_dir.join(".write_test");
@@ -93,7 +93,7 @@ impl RuntimeInstaller {
 
         // Fall back to home directory
         if let Ok(home) = std::env::var("HOME") {
-            let home_dir = PathBuf::from(home).join(paths::RUNTIME_FALLBACK_DIR);
+            let home_dir = PathBuf::from(home).join(".k3rs/bin");
             let _ = std::fs::create_dir_all(&home_dir);
             return home_dir;
         }
