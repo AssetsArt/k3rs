@@ -106,16 +106,19 @@ async fn handle_tty(
     command: Vec<&str>,
     runtime: Arc<ContainerRuntime>,
 ) {
-    // We need to know how to spawn a command inside the container.
-    // Prefer nsenter (no cgroup permissions needed) over youki exec.
+    // VM backends have no host-side container PID or OCI runtime — exec goes
+    // through vsock to k3rs-init's PTY listener inside the guest.
+    if runtime.backend_name_for(&container_id) == "vm" {
+        handle_pipe(ws_sender, ws_receiver, container_id, command, runtime, true).await;
+        return;
+    }
+
+    // OCI path: prefer nsenter (no cgroup permissions needed) over youki exec.
     // Get the container's main process PID (written by youki at create time).
     let container_pid = runtime.container_pid(&container_id);
     let runtime_bin = runtime.oci_runtime_path();
 
     if container_pid.is_none() && runtime_bin.is_none() {
-        // VM backend: no host-side PTY possible. Fall through to pipe mode with
-        // tty=true so the VM backend spawns k3rs-vmm exec --tty, which connects
-        // via vsock to k3rs-init's PTY listener inside the guest.
         handle_pipe(ws_sender, ws_receiver, container_id, command, runtime, true).await;
         return;
     }
