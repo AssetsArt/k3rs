@@ -22,6 +22,10 @@ impl FcApiClient {
     }
 
     /// Send a PUT request to the Firecracker API and return the response body.
+    ///
+    /// Parses the HTTP response incrementally (headers → Content-Length → body)
+    /// instead of relying on `shutdown()` + `read_to_end()`, which can race with
+    /// Firecracker's micro_http server and cause connection resets.
     async fn put(&self, path: &str, body: &serde_json::Value) -> Result<String> {
         let mut stream = UnixStream::connect(&self.socket_path)
             .await
@@ -46,48 +50,85 @@ impl FcApiClient {
         );
 
         stream.write_all(request.as_bytes()).await?;
-        stream.shutdown().await?;
 
-        // Read response
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).await?;
-        let response_str = String::from_utf8_lossy(&response).to_string();
-
-        // Parse HTTP status line
-        let status_line = response_str
-            .lines()
-            .next()
-            .unwrap_or("HTTP/1.1 500 Internal Server Error");
-
-        let status_code: u16 = status_line
-            .split_whitespace()
-            .nth(1)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(500);
+        let (status_code, response_body) = Self::read_http_response(&mut stream)
+            .await
+            .with_context(|| format!("PUT {}", path))?;
 
         if !(200..300).contains(&status_code) {
-            // Extract body after \r\n\r\n
-            let body_part = response_str
-                .split("\r\n\r\n")
-                .nth(1)
-                .unwrap_or("")
-                .to_string();
             anyhow::bail!(
                 "Firecracker API error: HTTP {} for PUT {} — {}",
                 status_code,
                 path,
-                body_part.trim()
+                response_body.trim()
             );
         }
 
-        // Extract response body
-        let body_part = response_str
-            .split("\r\n\r\n")
-            .nth(1)
-            .unwrap_or("")
-            .to_string();
+        Ok(response_body)
+    }
 
-        Ok(body_part)
+    /// Read a complete HTTP response by parsing headers to find Content-Length,
+    /// then reading exactly that many body bytes. Uses a timeout to avoid blocking
+    /// indefinitely if Firecracker crashes mid-response.
+    async fn read_http_response(stream: &mut UnixStream) -> Result<(u16, String)> {
+        let mut buf = Vec::with_capacity(4096);
+        let mut tmp = [0u8; 4096];
+        let timeout_dur = std::time::Duration::from_secs(30);
+
+        loop {
+            let n = tokio::time::timeout(timeout_dur, stream.read(&mut tmp))
+                .await
+                .context("Firecracker API response timeout (30s)")?
+                .context("reading Firecracker API response")?;
+
+            if n == 0 {
+                // EOF before complete response
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+
+            // Look for end-of-headers marker
+            if let Some(hdr_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let header_str = String::from_utf8_lossy(&buf[..hdr_end]);
+
+                let content_length: usize = header_str
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0);
+
+                let body_start = hdr_end + 4;
+                let body_received = buf.len().saturating_sub(body_start);
+
+                if body_received >= content_length {
+                    // Complete response received — parse and return
+                    let status: u16 = header_str
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(500);
+
+                    let body = if content_length > 0 && body_start + content_length <= buf.len() {
+                        String::from_utf8_lossy(&buf[body_start..body_start + content_length])
+                            .to_string()
+                    } else {
+                        String::new()
+                    };
+
+                    return Ok((status, body));
+                }
+                // else: keep reading to get remaining body bytes
+            }
+        }
+
+        // EOF before complete response
+        let partial = String::from_utf8_lossy(&buf);
+        anyhow::bail!(
+            "Firecracker closed connection before sending a complete response: {}",
+            partial.chars().take(200).collect::<String>()
+        );
     }
 
     /// Configure VM machine resources (vCPUs + memory).
@@ -206,18 +247,9 @@ impl FcApiClient {
                        \r\n";
 
         stream.write_all(request.as_bytes()).await?;
-        stream.shutdown().await?;
 
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).await?;
-        let response_str = String::from_utf8_lossy(&response).to_string();
-
-        let body = response_str
-            .split("\r\n\r\n")
-            .nth(1)
-            .unwrap_or("{}");
-
-        Ok(serde_json::from_str(body).unwrap_or(serde_json::json!({})))
+        let (_status, body) = Self::read_http_response(&mut stream).await?;
+        Ok(serde_json::from_str(&body).unwrap_or(serde_json::json!({})))
     }
 }
 

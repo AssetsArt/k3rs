@@ -734,8 +734,34 @@ impl RuntimeBackend for FirecrackerBackend {
         };
 
         // 3. Configure via REST API and boot
-        self.configure_and_boot(id, &rootfs_mode, guest_cid, tap_name.as_deref())
-            .await?;
+        if let Err(e) = self
+            .configure_and_boot(id, &rootfs_mode, guest_cid, tap_name.as_deref())
+            .await
+        {
+            // Check if Firecracker is still alive for better diagnostics
+            let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+            let log_tail = tokio::fs::read_to_string(self.log_path(id))
+                .await
+                .unwrap_or_default();
+            let log_tail: String = log_tail.lines().rev().take(10).collect::<Vec<_>>().join("\n");
+
+            if !alive {
+                anyhow::bail!(
+                    "Firecracker process (pid={}) crashed during boot configuration: {}\n\
+                     --- firecracker log (last 10 lines) ---\n{}",
+                    pid,
+                    e,
+                    if log_tail.is_empty() { "(empty)" } else { &log_tail }
+                );
+            } else {
+                anyhow::bail!(
+                    "Firecracker API error during boot configuration: {}\n\
+                     --- firecracker log (last 10 lines) ---\n{}",
+                    e,
+                    if log_tail.is_empty() { "(empty)" } else { &log_tail }
+                );
+            }
+        }
 
         // 4. Update state
         let mut instances = self.instances.write().await;
