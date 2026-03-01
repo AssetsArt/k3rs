@@ -126,20 +126,30 @@ Names must be `[a-z0-9-]`, max 63 characters, no leading/trailing hyphens (RFC 1
 UUIDs are stored as `.id` fields for internal reference only.
 
 ```
-/registry/nodes/<node-name>                        → Node metadata & status (id = UUID)
-/registry/namespaces/<ns>                          → Namespace definition
-/registry/pods/<ns>/<pod-name>                     → Pod spec & status
-/registry/services/<ns>/<service-name>             → Service definition
-/registry/endpoints/<ns>/<endpoint-name>           → Endpoint slice
-/registry/deployments/<ns>/<deployment-name>       → Deployment spec & status
-/registry/replicasets/<ns>/<rs-name>               → ReplicaSet spec & status
-/registry/configmaps/<ns>/<cm-name>                → ConfigMap data
-/registry/secrets/<ns>/<secret-name>               → Secret data (encrypted at rest)
-/registry/rbac/roles/<ns>/<role-name>              → Role definitions
-/registry/rbac/bindings/<ns>/<binding-name>        → RoleBinding definitions
-/registry/leases/<lease-id>                        → Leader election leases
-/events/<ns>/<timestamp>-<event-id>                → Cluster events (TTL-based)
+/registry/nodes/<node-name>                          → Node metadata & status
+/registry/namespaces/<ns>                             → Namespace definition
+/registry/pods/<ns>/<pod-name>                        → Pod spec & status
+/registry/services/<ns>/<service-name>                → Service definition
+/registry/endpoints/<ns>/<endpoint-name>              → Endpoint slice
+/registry/ingresses/<ns>/<ingress-name>               → Ingress routing rules
+/registry/deployments/<ns>/<deployment-name>          → Deployment spec & status
+/registry/replicasets/<ns>/<rs-name>                  → ReplicaSet spec & status
+/registry/daemonsets/<ns>/<ds-name>                   → DaemonSet spec & status
+/registry/jobs/<ns>/<job-name>                        → Job spec & status
+/registry/cronjobs/<ns>/<cj-name>                     → CronJob spec & status
+/registry/configmaps/<ns>/<cm-name>                   → ConfigMap data
+/registry/secrets/<ns>/<secret-name>                  → Secret data (encrypted at rest)
+/registry/hpa/<ns>/<hpa-name>                         → Horizontal Pod Autoscaler
+/registry/resourcequotas/<ns>/<quota-name>            → Namespace resource quota
+/registry/networkpolicies/<ns>/<policy-name>          → Network policy
+/registry/pvcs/<ns>/<pvc-name>                        → Persistent volume claim
+/registry/images/<node-name>                          → Per-node image list
+/registry/leases/controller-leader                    → Leader election lease
 ```
+
+> [!NOTE]
+> - RBAC keys (`/registry/rbac/roles/`, `/registry/rbac/bindings/`) are referenced in the auth middleware but not yet persisted — RBAC enforcement is currently done with hardcoded built-in roles.
+> - Events are stored in an in-memory ring buffer (`EventLog`, 10K events) with `tokio::sync::broadcast`, not in the key-value store.
 
 #### Name Validation (`pkg/types/src/validate.rs`)
 - [x] `validate_name(name) -> Result<()>` — `[a-z0-9-]`, max 63 chars, no leading/trailing `-`
@@ -154,7 +164,104 @@ UUIDs are stored as `.id` fields for internal reference only.
 ### Consistency & Watch
 - **Read-after-write consistency**: Guaranteed by SlateDB's LSM-tree with WAL on object storage.
 - **Watch mechanism**: Server maintains an in-memory event log with sequence numbers. Clients (Agents, Controllers) subscribe to change streams filtered by key prefix — similar to etcd watch but implemented at the application layer.
-- **Compaction**: SlateDB handles background compaction automatically. TTL-based keys (events, leases) are garbage-collected during compaction.
+- **Compaction**: SlateDB handles background compaction automatically. TTL-based keys (leases) are garbage-collected during compaction.
+
+## API Reference
+
+### Public (Unauthenticated)
+
+| Method | Path | Handler | Description |
+|--------|------|---------|-------------|
+| `POST` | `/register` | `register::register_node` | Agent join with token → receive mTLS cert |
+| `GET` | `/api/v1/cluster/info` | `cluster::cluster_info` | Cluster metadata (endpoint, version, node count) |
+| `GET` | `/metrics` | `metrics_handler` | Prometheus text exposition |
+
+### Protected (Authenticated + RBAC)
+
+**Nodes**
+
+| Method | Path | Handler | Description |
+|--------|------|---------|-------------|
+| `GET` | `/api/v1/nodes` | `cluster::list_nodes` | List all nodes |
+| `PUT` | `/api/v1/nodes/{name}/heartbeat` | `heartbeat::node_heartbeat` | Agent heartbeat |
+| `GET` | `/api/v1/nodes/{name}/pods` | `resources::list_node_pods` | List pods on a node (all namespaces) |
+| `POST` | `/api/v1/nodes/{name}/cordon` | `drain::cordon_node` | Mark node unschedulable |
+| `POST` | `/api/v1/nodes/{name}/uncordon` | `drain::uncordon_node` | Remove unschedulable flag |
+| `POST` | `/api/v1/nodes/{name}/drain` | `drain::drain_node` | Cordon + evict all pods |
+| `PUT` | `/api/v1/nodes/{name}/images` | `images::report_node_images` | Agent reports per-node images |
+
+**Namespaces**
+
+| Method | Path | Handler |
+|--------|------|--------|
+| `POST` | `/api/v1/namespaces` | `resources::create_namespace` |
+| `GET` | `/api/v1/namespaces` | `resources::list_namespaces` |
+
+**Pods**
+
+| Method | Path | Handler |
+|--------|------|--------|
+| `POST` | `/api/v1/namespaces/{ns}/pods` | `resources::create_pod` |
+| `GET` | `/api/v1/namespaces/{ns}/pods` | `resources::list_pods` |
+| `GET` | `/api/v1/namespaces/{ns}/pods/{pod_name}` | `resources::get_pod` |
+| `DELETE` | `/api/v1/namespaces/{ns}/pods/{pod_name}` | `resources::delete_pod` |
+| `PUT` | `/api/v1/namespaces/{ns}/pods/{pod_name}/status` | `resources::update_pod_status` |
+| `GET` | `/api/v1/namespaces/{ns}/pods/{pod_name}/logs` | `resources::pod_logs` |
+| `GET` | `/api/v1/namespaces/{ns}/pods/{pod_name}/exec` | `exec::exec_into_pod` (WebSocket) |
+
+**Workloads**
+
+| Method | Path | Handler |
+|--------|------|--------|
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/deployments` | `create_deployment` / `list_deployments` |
+| `GET`/`PUT` | `/api/v1/namespaces/{ns}/deployments/{name}` | `get_deployment` / `update_deployment` |
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/replicasets` | `create_replicaset` / `list_replicasets` |
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/daemonsets` | `create_daemonset` / `list_daemonsets` |
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/jobs` | `create_job` / `list_jobs` |
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/cronjobs` | `create_cronjob` / `list_cronjobs` |
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/hpa` | `create_hpa` / `list_hpas` |
+
+**Networking**
+
+| Method | Path | Handler |
+|--------|------|--------|
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/services` | `create_service` / `list_services` |
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/endpoints` | `create_endpoint` / `list_endpoints` |
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/ingresses` | `create_ingress` / `list_ingresses` |
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/networkpolicies` | `create_network_policy` / `list_network_policies` |
+
+**Configuration & Storage**
+
+| Method | Path | Handler |
+|--------|------|--------|
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/configmaps` | `create_configmap` / `list_configmaps` |
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/secrets` | `create_secret` / `list_secrets` |
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/resourcequotas` | `create_resource_quota` / `list_resource_quotas` |
+| `POST`/`GET` | `/api/v1/namespaces/{ns}/pvcs` | `create_pvc` / `list_pvcs` |
+
+**Images & Runtime**
+
+| Method | Path | Handler |
+|--------|------|--------|
+| `GET` | `/api/v1/images` | `images::list_images` |
+| `POST` | `/api/v1/images/pull` | `images::pull_image` |
+| `DELETE` | `/api/v1/images/{image_id}` | `images::delete_image` |
+| `GET` | `/api/v1/runtime` | `runtime::get_runtime_info` |
+| `PUT` | `/api/v1/runtime/upgrade` | `runtime::upgrade_runtime` |
+
+**Events & Watch**
+
+| Method | Path | Handler |
+|--------|------|--------|
+| `GET` | `/api/v1/watch?prefix=...&seq=...` | `watch::watch_events` (SSE) |
+| `GET` | `/api/v1/events` | `watch::list_events` |
+
+**System**
+
+| Method | Path | Handler |
+|--------|------|--------|
+| `GET` | `/api/v1/processes` | `processes::list_processes` |
+| `DELETE` | `/api/v1/{resource_type}/{ns}/{name}` | `resources::delete_resource` (generic) |
 
 ## Namespaces & Multi-tenancy
 
@@ -315,11 +422,11 @@ When the Agent restarts after a crash, it **must** perform the following recover
 - [ ] OCI backend: Write integration test — `kill -9 <agent-pid>` → verify container still running via `<runtime> state <id>`
 - [ ] VirtualizationBackend (macOS): Launch `k3rs-vmm` helper via double-fork or `setsid()` so VM outlives Agent
 - [ ] FirecrackerBackend (Linux): Ensure Firecracker VMM process is not child of Agent (use Jailer or double-fork)
-- [ ] PID file management: Write VM/container PID to `/var/run/k3rs/containers/<id>/pid` for discovery after restart
+- [ ] PID file management: Write VM/container PID to `<DATA_DIR>/runtime/containers/<id>/pid` for discovery after restart
 
 #### Agent Recovery
 - [ ] `discover_running_containers()` — query OCI runtime `list` command, parse running container IDs
-- [ ] `discover_running_vms()` — scan PID files under `/var/run/k3rs/containers/`, verify process alive
+- [ ] `discover_running_vms()` — scan PID files under `<DATA_DIR>/runtime/containers/`, verify process alive
 - [ ] `reconcile_with_server(discovered, desired)` — adopt/stop/create logic
 - [ ] `restore_ip_allocations(discovered_containers)` — rebuild `PodNetwork` state from running containers
 - [ ] Refactor Agent boot sequence: use recovery procedure as the **default startup path** (idempotent — works for fresh start and crash recovery)
@@ -333,8 +440,8 @@ When the Agent restarts after a crash, it **must** perform the following recover
 - [ ] Agent: continue running containers + Service Proxy + DNS when Server unreachable
 
 #### Networking Recovery
-- [ ] Service Proxy: cache last-known routing table to disk (`/var/run/k3rs/routes.json`) for fast restart
-- [ ] DNS Server: cache last-known service records to disk (`/var/run/k3rs/dns-records.json`) for fast restart
+- [ ] Service Proxy: cache last-known routing table to disk (`<DATA_DIR>/runtime/routes.json`) for fast restart
+- [ ] DNS Server: cache last-known service records to disk (`<DATA_DIR>/runtime/dns-records.json`) for fast restart
 - [ ] On Agent restart: load cached routes/records immediately → serve stale while syncing fresh from Server
 
 #### Testing & Validation
@@ -635,7 +742,7 @@ k3rsctl restore --from ./backup.gz --resources deployments,services,configmaps
     - `ClusterCA` generates self-signed root CA via `rcgen::CertificateParams` (IsCa::Ca)
     - `issue_node_cert(node_name)` creates X.509 cert signed by CA with node SAN
     - Returns PEM-encoded cert + key + CA cert to agent
-    - Agent stores certs to `/tmp/k3rs-agent-<node>/` (node.crt, node.key, ca.crt)
+    - Agent stores certs to `/etc/k3rs/certs/<node>/` (node.crt, node.key, ca.crt)
     - Token validation on server side (rejects empty or mismatched tokens)
 - [x] Implement basic `k3rsctl` CLI with `cluster info` and `node list`.
     - `k3rsctl cluster info` — `GET /api/v1/cluster/info`, displays endpoint, version, state store, node count
@@ -643,15 +750,23 @@ k3rsctl restore --from ./backup.gz --resources deployments,services,configmaps
     - `--server` flag for configurable API endpoint
     - Agent: heartbeat loop (10s interval), registration with real certs, tunnel proxy startup
 - [x] YAML configuration file support (K3s-style).
-    - `--config` / `-c` flag on both `k3rs-server` (default `/etc/k3rs/config.yaml`) and `k3rs-agent` (default `/etc/k3rs/agent-config.yaml`)
+    - `--config` / `-c` flag on both `k3rs-server` (default `<CONFIG_DIR>/config.yaml`) and `k3rs-agent` (default `<CONFIG_DIR>/agent-config.yaml`)
     - 3-layer merge: CLI args > YAML config file > hardcoded defaults
     - Server config keys: `port`, `data-dir`, `token`
     - Agent config keys: `server`, `token`, `node-name`, `proxy-port`, `service-proxy-port`, `dns-port`
     - Gracefully skips missing config file (uses defaults)
+    - **Path constants** (`pkg/constants/src/paths.rs`): Only 3 base directory constants for easy config and uninstall:
+      ```rust
+      pub const CONFIG_DIR: &str = "/etc/k3rs";      // Configuration files, TLS certs
+      pub const DATA_DIR: &str   = "/var/lib/k3rs";   // Persistent data, state, binaries, runtime
+      pub const LOG_DIR: &str    = "/var/logs/k3rs";  // Log files
+      ```
+    - All sub-paths derived at usage site (e.g. `format!("{}/server", DATA_DIR)`, `format!("{}/certs/{}", CONFIG_DIR, node_name)`)
+    - **Uninstall**: `rm -rf /etc/k3rs /var/lib/k3rs /var/logs/k3rs`
     - Example server `config.yaml`:
       ```yaml
       port: 6443
-      data-dir: /var/lib/k3rs/data
+      data-dir: /var/lib/k3rs/server
       token: my-secret-token
       ```
     - Example agent `agent-config.yaml`:
@@ -801,7 +916,7 @@ k3rsctl restore --from ./backup.gz --resources deployments,services,configmaps
     - `POST /api/v1/nodes/:name/uncordon` — remove unschedulable flag + taint, restore Ready
     - `POST /api/v1/nodes/:name/drain` — cordon + evict all pods (reset to Pending for rescheduling)
     - `Node.unschedulable` field used by Scheduler to skip cordoned nodes
-    - Agent handles SIGTERM: clean up lock file on graceful exit
+    - Agent handles SIGTERM: graceful exit
     - `k3rsctl node drain/cordon/uncordon <name>` CLI commands
 - [x] Implement workload rescheduling on node failure.
     - `EvictionController` (30s interval) watches for nodes in `Unknown` state
@@ -850,7 +965,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 | `rootfs.rs` | `tar` + `flate2` | Extract image layers → rootfs + generate production OCI `config.json` (capabilities, mounts, rlimits, masked/readonly paths, env passthrough) |
 | `backend.rs` | — | `RuntimeBackend` trait + Virtualization/Firecracker/OCI backends + PID tracking + `state()` query |
 | `state.rs` | `dashmap` | In-process container state tracking (`ContainerStore`) — lifecycle: Created → Running → Stopped/Failed |
-| `virt.rs` | `virtualization-rs` | macOS Virtualization.framework microVM backend |
+| `virt.rs` | `objc2-virtualization` | macOS Virtualization.framework microVM backend |
 | `firecracker.rs` | `kvm-ioctls`, `vm-memory`, `linux-loader` | Linux Firecracker microVM backend (KVM) via [rust-vmm](https://github.com/rust-vmm/community) |
 | `runtime.rs` | — | `ContainerRuntime` facade with platform detection, `ContainerStore` integration, `exec_in_container`, `cleanup_container` |
 | `installer.rs` | `reqwest` | Auto-download youki/crun/firecracker from GitHub Releases (Linux) |
@@ -859,7 +974,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 
 | Binary | Purpose |
 |--------|---------|
-| `k3rs-vmm` | Host-side VMM helper — wraps Virtualization.framework Obj-C API (macOS) |
+| `k3rs-vmm` | Host-side VMM helper — wraps Virtualization.framework via `objc2-virtualization` Rust crate (macOS) |
 | `k3rs-init` | Guest-side PID 1 — mounts pseudo-fs, brings up networking via raw `ioctl`, reaps zombies, parses OCI `config.json`, spawns entrypoint, graceful VM shutdown. **522KB** statically-linked musl binary |
 
 **Backends:**
@@ -872,7 +987,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 - [x] Container state tracking — `ContainerStore` via `DashMap` (concurrent in-process): tracks lifecycle state, PID, exit code, timestamps, log/bundle paths
 - [x] PID tracking — `--pid-file` flag on create, `--root` custom state directory
 - [x] OCI runtime state query — `state()` method runs `<runtime> state <id>`, parses JSON
-- [x] Log directory management — structured log paths at `/var/run/k3rs/containers/<id>/stdout.log`
+- [x] Log directory management — structured log paths at `<DATA_DIR>/runtime/logs/<id>/stdout.log`
 - [x] Environment variable passthrough — pod `ContainerSpec.env` → OCI `config.json` `process.env`
 - [x] User namespace with 65536 UID/GID range mapping (rootless-compatible)
 - [x] Network namespace isolation
@@ -882,7 +997,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 - [x] Container spec passthrough — command, args, env from pod spec into OCI container
 
 **VirtualizationBackend (macOS):**
-- [x] Apple Virtualization.framework via `virtualization-rs` Rust crate
+- [x] Apple Virtualization.framework via `objc2-virtualization` Rust crate
 - [x] Each pod runs in an isolated lightweight microVM
 - [x] VM lifecycle: create → boot → stop → delete
 - [x] Container logs via log file (virtio-console ready)
@@ -892,7 +1007,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 - [x] **virtio-fs**: mount host rootfs folder directly as guest `/` (no disk image creation — replaces `hdiutil`/`dd`)
   - `VZVirtioFileSystemDeviceConfiguration` + `VZSharedDirectory` → guest mounts via `mount -t virtiofs`
   - Zero overhead: no pre-allocation, no rootfs → block device conversion
-- [x] `k3rs-vmm` helper binary — wraps Virtualization.framework via Swift/ArgumentParser CLI
+- [x] `k3rs-vmm` helper binary — wraps Virtualization.framework via `objc2-virtualization` Rust crate (rewritten from Swift)
 - [x] `k3rs-init` — minimal Rust PID 1 for guest VM (`cmd/k3rs-init/`):
   - Mount `/proc`, `/sys`, `/dev`, `/dev/pts`, `/dev/shm`, `/tmp`, `/run` via `libc::mount()`
   - Set hostname via `nix::unistd::sethostname`, bring up `lo`/`eth0` via raw `ioctl(SIOCSIFFLAGS)`
@@ -989,11 +1104,12 @@ k3rs/
 │   ├── k3rs-server/            # Control plane binary
 │   ├── k3rs-agent/             # Data plane binary
 │   ├── k3rs-init/              # Guest PID 1 — minimal init for microVMs (static musl binary)
-│   ├── k3rs-vmm/               # Host VMM helper — Virtualization.framework Obj-C bridge (macOS)
+│   ├── k3rs-vmm/               # Host VMM helper — Virtualization.framework via objc2-virtualization (macOS, Rust)
 │   ├── k3rs-ui/                # Management UI (Dioxus web app)
 │   └── k3rsctl/                # CLI tool binary
 ├── pkg/
 │   ├── api/                    # Axum HTTP API & handlers
+│   ├── constants/              # Centralized constants (paths, network, runtime, auth, state, vm)
 │   ├── container/              # Container runtime (Virtualization.framework on macOS, Firecracker/youki/crun on Linux)
 │   ├── controllers/            # Control loops (Deployment, ReplicaSet, DaemonSet, Job, CronJob, HPA)
 │   ├── metrics/                # Prometheus-format metrics registry
@@ -1011,7 +1127,7 @@ k3rs/
 - **HTTP API**: `axum`
 - **Management UI**: `dioxus` 0.7 (Rust-native fullstack web framework, WASM SPA)
 - **Container Runtime**: Platform-aware with pluggable `RuntimeBackend` trait
-  - **macOS**: Virtualization.framework microVM backend via `virtualization-rs` (lightweight Linux VMs)
+  - **macOS**: Virtualization.framework microVM backend via `objc2-virtualization` (lightweight Linux VMs)
   - **Linux (microVM)**: [rust-vmm](https://github.com/rust-vmm/community) crates (`kvm-ioctls`, `vm-memory`, `linux-loader`, `virtio-queue`, `virtio-vsock`, `vm-superio`, `seccompiler`)
   - **Linux (OCI)**: `youki` / `crun` — auto-download from GitHub Releases (fallback when KVM unavailable)
   - **Image Pull**: `oci-client` (OCI Distribution spec — Docker Hub, GHCR, etc.)
