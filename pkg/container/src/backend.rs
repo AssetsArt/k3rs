@@ -417,13 +417,13 @@ impl RuntimeBackend for OciBackend {
                 "--ipc".to_string(),
                 "--net".to_string(),
                 "--mount".to_string(),
-                "--user".to_string(),
-                // Rootless containers set /proc/<pid>/setgroups to "deny", so
-                // nsenter must not call setgroups(). --preserve-credentials skips
-                // the uid/gid/setgroups changes when entering the user namespace.
-                "--preserve-credentials".to_string(),
-                "--".to_string(),
             ];
+            // Only enter user namespace if running rootless (root has no user namespace)
+            if unsafe { libc::geteuid() != 0 } {
+                args.push("--user".to_string());
+                args.push("--preserve-credentials".to_string());
+            }
+            args.push("--".to_string());
             args.extend(command.iter().map(|s| s.to_string()));
 
             let output = tokio::process::Command::new("nsenter")
@@ -491,10 +491,12 @@ impl RuntimeBackend for OciBackend {
                 "--ipc".to_string(),
                 "--net".to_string(),
                 "--mount".to_string(),
-                "--user".to_string(),
-                "--preserve-credentials".to_string(),
-                "--".to_string(),
             ];
+            if unsafe { libc::geteuid() != 0 } {
+                args.push("--user".to_string());
+                args.push("--preserve-credentials".to_string());
+            }
+            args.push("--".to_string());
             if command.is_empty() {
                 args.push("/bin/sh".to_string());
             } else {

@@ -166,10 +166,13 @@ async fn handle_tty(
             "--ipc".to_string(),
             "--net".to_string(),
             "--mount".to_string(),
-            "--user".to_string(),
-            "--preserve-credentials".to_string(),
-            "--".to_string(),
         ];
+        // Only enter user namespace if running rootless (root has no user namespace)
+        if unsafe { libc::geteuid() != 0 } {
+            cmd_args_owned.push("--user".to_string());
+            cmd_args_owned.push("--preserve-credentials".to_string());
+        }
+        cmd_args_owned.push("--".to_string());
         if command.is_empty() {
             cmd_args_owned.push("/bin/sh".to_string());
         } else {
