@@ -7,10 +7,13 @@
 //! - `/var/logs/k3rs/`   — log files
 
 /// Base directory for all k3rs configuration files.
-pub const CONFIG_DIR: &str = "/etc/k3rs";
+// pub const CONFIG_DIR: &str = "/etc/k3rs";
+pub const CONFIG_DIR: &str = "/tmp/k3rs-config";
 
 /// Base directory for all k3rs persistent data (state, runtime, binaries, images).
-pub const DATA_DIR: &str = "/var/lib/k3rs";
+// pub const DATA_DIR: &str = "/var/lib/k3rs";
+pub const DATA_DIR: &str = "/tmp/k3rs-data";
 
 /// Base directory for all k3rs log files.
-pub const LOG_DIR: &str = "/var/logs/k3rs";
+// pub const LOG_DIR: &str = "/var/logs/k3rs";
+pub const LOG_DIR: &str = "/tmp/k3rs-logs";

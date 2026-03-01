@@ -24,9 +24,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Container networking
     uidmap slirp4netns \
     # Dev tools
-    tmux curl jq git strace procps \
+    nodejs npm curl jq git strace procps \
     # Cleanup
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g pm2
 
 # ─── Rust targets + tools ────────────────────────────────────────────
 ARG DIOXUS_CLI_VERSION=0.7.3
@@ -82,11 +83,12 @@ RUN ARCH=$(uname -m) && \
 
 # ─── Runtime directories ─────────────────────────────────────────────
 RUN mkdir -p \
-    /var/run/k3rs/containers \
-    /var/lib/k3rs/data \
-    /var/lib/k3rs/backups \
-    /var/lib/k3rs/images \
-    /tmp/k3rs-data
+    /tmp/k3rs-config/certs \
+    /tmp/k3rs-data/server \
+    /tmp/k3rs-data/runtime/containers \
+    /tmp/k3rs-data/runtime/vms \
+    /tmp/k3rs-data/bin \
+    /tmp/k3rs-logs
 
 # ─── Workspace ────────────────────────────────────────────────────────
 WORKDIR /workspace

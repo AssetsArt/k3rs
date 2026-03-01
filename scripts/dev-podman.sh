@@ -5,8 +5,8 @@ set -euo pipefail
 #
 # Usage:
 #   ./scripts/dev-podman.sh                    # interactive shell
-#   ./scripts/dev-podman.sh --all              # server + agent in tmux (KVM enabled)
-#   ./scripts/dev-podman.sh --all --ui         # server + agent + UI in tmux
+#   ./scripts/dev-podman.sh --all              # server + agent via pm2 (KVM enabled)
+#   ./scripts/dev-podman.sh --all --ui         # server + agent + UI via pm2
 #   ./scripts/dev-podman.sh server             # run k3rs-server inside container
 #   ./scripts/dev-podman.sh agent              # run k3rs-agent inside container
 #   ./scripts/dev-podman.sh test               # run cargo test
@@ -132,7 +132,7 @@ run_container() {
             ;;
 
         all)
-            echo -e "${CYAN}🚀 Starting full dev environment (server + agent) in tmux${NC}"
+            echo -e "${CYAN}🚀 Starting full dev environment (server + agent) via pm2${NC}"
             echo -e "   Runtime: ${GREEN}$RUNTIME${NC}"
             echo -e "   KVM: $([ "$ENABLE_KVM" = "1" ] && echo -e "${GREEN}enabled${NC}" || echo -e "${YELLOW}disabled${NC}")"
             echo -e "   UI: $([ "$ENABLE_UI" = "1" ] && echo -e "${GREEN}enabled (port 8080)${NC}" || echo -e "${YELLOW}disabled${NC}")"
@@ -142,47 +142,62 @@ run_container() {
                 echo "🔨 Building workspace first..."
                 cargo build --workspace 2>&1 | tail -3
 
-                SESSION="k3rs"
-                tmux new-session -d -s "$SESSION" -n server \
-                    "RUST_LOG=debug cargo watch \
-                        -x \"run --bin k3rs-server -- --port 6443 --token demo-token-123 --data-dir /var/lib/k3rs/data --node-name master-1\" \
-                        -w pkg/ -w cmd/k3rs-server -i \"target/*\""
+                # Generate pm2 ecosystem config
+                cat > /tmp/ecosystem.config.js <<EOF
+module.exports = {
+  apps: [
+    {
+      name: "server",
+      script: "bash",
+      args: "-c ./scripts/dev-server.sh",
+      cwd: "/workspace",
+      env: { RUST_LOG: "debug" },
+    },
+    {
+      name: "agent",
+      script: "bash",
+      args: "-c ./scripts/dev-agent.sh",
+      cwd: "/workspace",
+      env: { RUST_LOG: "debug" },
+      restart_delay: 5000,
+    },
+  ],
+};
+EOF
 
-                # Wait for server to start
-                sleep 3
-
-                tmux split-window -h -t "$SESSION" \
-                    "RUST_LOG=debug cargo watch \
-                        -x \"run --bin k3rs-agent -- --server http://127.0.0.1:6443 --token demo-token-123 --node-name node-1 --proxy-port 6444 --service-proxy-port 10256 --dns-port 5353\" \
-                        -w pkg/ -w cmd/k3rs-agent -i \"target/*\""
-
-                # UI pane (if enabled)
+                # Add UI process if enabled
                 if [ "${K3RS_UI:-0}" = "1" ]; then
-                    tmux split-window -v -t "$SESSION" \
-                        "cd cmd/k3rs-ui && dx serve --addr 0.0.0.0 --port 8080"
+                    cat >> /tmp/ecosystem.config.js <<UIEOF
+module.exports.apps.push({
+  name: "ui",
+  script: "dx",
+  args: "serve --addr 0.0.0.0 --port 8080",
+  cwd: "/workspace/cmd/k3rs-ui",
+});
+UIEOF
                 fi
 
-                tmux select-pane -t 0
-                exec tmux attach-session -t "$SESSION"
+                echo "🚀 Starting services via pm2..."
+                pm2 start /tmp/ecosystem.config.js
+                sleep 2
+                pm2 status
+                echo ""
+                echo "📋 Commands: pm2 status | pm2 logs | pm2 restart <name> | pm2 stop all"
+                echo ""
+                exec bash
             '
             ;;
 
         server)
             echo -e "${CYAN}🚀 Starting k3rs-server in container${NC}"
             # shellcheck disable=SC2086
-            podman run $run_args "$IMAGE_NAME" \
-                cargo watch \
-                    -x "run --bin k3rs-server -- --port 6443 --token demo-token-123 --data-dir /var/lib/k3rs/data --node-name master-1" \
-                    -w pkg/ -w cmd/k3rs-server -i "target/*"
+            podman run $run_args "$IMAGE_NAME" bash -c "scripts/dev-server.sh"
             ;;
 
         agent)
             echo -e "${CYAN}🤖 Starting k3rs-agent in container${NC}"
             # shellcheck disable=SC2086
-            podman run $run_args "$IMAGE_NAME" \
-                cargo watch \
-                    -x "run --bin k3rs-agent -- --server http://127.0.0.1:6443 --token demo-token-123 --node-name node-1 --proxy-port 6444 --service-proxy-port 10256 --dns-port 5353" \
-                    -w pkg/ -w cmd/k3rs-agent -i "target/*"
+            podman run $run_args "$IMAGE_NAME" bash -c "scripts/dev-agent.sh"
             ;;
 
         test)
@@ -211,7 +226,7 @@ run_container() {
             echo ""
             echo "Modes:"
             echo "  shell    Interactive bash shell (default)"
-            echo "  all      Server + Agent in tmux (KVM auto-enabled)"
+            echo "  all      Server + Agent via pm2 (KVM auto-enabled)"
             echo "  server   Run k3rs-server with cargo-watch"
             echo "  agent    Run k3rs-agent with cargo-watch"
             echo "  test     Run cargo test --workspace"
