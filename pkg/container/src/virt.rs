@@ -972,7 +972,7 @@ fn try_path(s: &str) -> Option<PathBuf> {
 
 /// Parse the OCI bundle config.json to extract command and env vars.
 /// Returns empty vecs on parse failure (k3rs-init defaults to /bin/sh).
-fn parse_bundle_config(bundle: &Path) -> (Vec<String>, Vec<String>) {
+pub(crate) fn parse_bundle_config(bundle: &Path) -> (Vec<String>, Vec<String>) {
     let data = match std::fs::read_to_string(bundle.join("config.json")) {
         Ok(d) => d,
         Err(_) => return (Vec::new(), Vec::new()),

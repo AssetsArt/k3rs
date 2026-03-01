@@ -115,7 +115,23 @@ impl ContainerRuntime {
                                 info!(
                                     "OCI unavailable — falling back to Firecracker microVM runtime"
                                 );
-                                Arc::new(crate::firecracker::FirecrackerBackend::new(&data_dir))
+                                match crate::firecracker::FirecrackerBackend::new(&data_dir).await {
+                                    Ok(fc) => {
+                                        info!(
+                                            "Using Firecracker runtime: {} ({})",
+                                            fc.name(),
+                                            fc.version()
+                                        );
+                                        Arc::new(fc)
+                                    }
+                                    Err(e) => {
+                                        anyhow::bail!(
+                                            "No container runtime available: OCI auto-download failed \
+                                             and Firecracker init failed: {}",
+                                            e
+                                        );
+                                    }
+                                }
                             } else {
                                 anyhow::bail!(
                                     "No container runtime available: OCI auto-download failed \
@@ -203,8 +219,33 @@ impl ContainerRuntime {
                     if self.backend.name() == "vm" {
                         self.backend.clone()
                     } else {
-                        Arc::new(crate::firecracker::FirecrackerBackend::new(&self.data_dir))
-                            as Arc<dyn RuntimeBackend>
+                        match crate::firecracker::FirecrackerBackend::new(&self.data_dir).await {
+                            Ok(fc) => Arc::new(fc) as Arc<dyn RuntimeBackend>,
+                            Err(e) => {
+                                info!("Firecracker init failed: {}, falling back to OCI runtime", e);
+                                // In nested containers, youki fails on cgroup controllers.
+                                // Prefer crun (supports --cgroup-manager none) over youki.
+                                let is_native = std::fs::read_to_string("/proc/1/comm")
+                                    .map(|s| {
+                                        let t = s.trim();
+                                        t == "systemd" || t == "init"
+                                    })
+                                    .unwrap_or(false);
+                                if !is_native && self.backend.name() == "youki" {
+                                    match OciBackend::with_name("crun", &self.data_dir) {
+                                        Ok(crun) => {
+                                            info!(
+                                                "Nested container detected — using crun instead of youki"
+                                            );
+                                            Arc::new(crun) as Arc<dyn RuntimeBackend>
+                                        }
+                                        Err(_) => self.backend.clone(),
+                                    }
+                                } else {
+                                    self.backend.clone()
+                                }
+                            }
+                        }
                     }
                 } else {
                     info!("Requested vm runtime not supported on this platform, using default");
@@ -341,10 +382,10 @@ impl ContainerRuntime {
                 } else if cfg!(target_os = "linux") {
                     if self.backend.name() == "vm" {
                         return self.backend.clone();
-                    } else {
-                        return Arc::new(crate::firecracker::FirecrackerBackend::new(
-                            &self.data_dir,
-                        ));
+                    } else if let Ok(fc) =
+                        crate::firecracker::FirecrackerBackend::new(&self.data_dir).await
+                    {
+                        return Arc::new(fc);
                     }
                 }
             } else if (entry.runtime_name == "youki" || entry.runtime_name == "crun")
