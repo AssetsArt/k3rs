@@ -628,7 +628,7 @@ impl RuntimeBackend for VirtualizationBackend {
     async fn start(&self, id: &str) -> Result<()> {
         tracing::info!("[virt] start VM: {}", id);
 
-        if !tokio::fs::metadata(&self.kernel_path).await.is_ok() {
+        if tokio::fs::metadata(&self.kernel_path).await.is_err() {
             anyhow::bail!(
                 "Kernel missing at {} — run `scripts/build-kernel.sh`",
                 self.kernel_path.display()
@@ -722,33 +722,33 @@ impl RuntimeBackend for VirtualizationBackend {
 
         // Fallback: query k3rs-vmm ls for VMs not caught by PID files.
         // Keeps backward compatibility and handles edge cases (lost PID file).
-        if let Some(vmm) = which_vmm().await {
-            if let Ok(output) = tokio::process::Command::new(&vmm).arg("ls").output().await {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 3 && parts[2] == "running" {
-                        let vm_id = parts[0].to_string();
-                        ids.insert(vm_id.clone());
+        if let Some(vmm) = which_vmm().await
+            && let Ok(output) = tokio::process::Command::new(&vmm).arg("ls").output().await
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 && parts[2] == "running" {
+                    let vm_id = parts[0].to_string();
+                    ids.insert(vm_id.clone());
 
-                        // Populate in-memory tracking if missing (agent restarted)
-                        let mut instances = self.instances.write().await;
-                        if !instances.contains_key(&vm_id) {
-                            tracing::info!(
-                                "[virt] rediscovered VM {} from k3rs-vmm ls (fallback)",
-                                vm_id
-                            );
-                            let vmm_pid = parts[1].parse::<u32>().ok();
-                            instances.insert(
-                                vm_id.clone(),
-                                VmInstance {
-                                    rootfs_dir: self.rootfs_dir(&vm_id),
-                                    vmm_pid,
-                                    state: VmState::Running,
-                                    log_path: self.log_path(&vm_id),
-                                },
-                            );
-                        }
+                    // Populate in-memory tracking if missing (agent restarted)
+                    let mut instances = self.instances.write().await;
+                    if !instances.contains_key(&vm_id) {
+                        tracing::info!(
+                            "[virt] rediscovered VM {} from k3rs-vmm ls (fallback)",
+                            vm_id
+                        );
+                        let vmm_pid = parts[1].parse::<u32>().ok();
+                        instances.insert(
+                            vm_id.clone(),
+                            VmInstance {
+                                rootfs_dir: self.rootfs_dir(&vm_id),
+                                vmm_pid,
+                                state: VmState::Running,
+                                log_path: self.log_path(&vm_id),
+                            },
+                        );
                     }
                 }
             }
