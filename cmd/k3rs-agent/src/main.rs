@@ -2,6 +2,8 @@ mod api;
 mod cache;
 mod connectivity;
 mod store;
+#[cfg(test)]
+mod tests;
 
 use cache::AgentStateCache;
 use chrono::Utc;

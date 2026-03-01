@@ -463,18 +463,20 @@ The Agent stores all persistent state in a **local SlateDB instance** backed by 
 All keys live under the `/agent/` prefix so the database could theoretically be merged with a server-side store in future without collision.
 
 ```
-/agent/meta                          → AgentMeta JSON { node_id, node_name, agent_api_port, server_seq, last_synced_at }
-/agent/pods/<pod-id>                 → Pod JSON
-/agent/services/<ns>/<name>          → Service JSON
-/agent/endpoints/<ns>/<name>         → Endpoint JSON
-/agent/ingresses/<ns>/<name>         → Ingress JSON
-/agent/routes                        → RoutingTable JSON  (ServiceProxy derived view)
-/agent/dns-records                   → HashMap<String,String> JSON  (DnsServer derived view)
+/agent/meta          → AgentMeta JSON  { node_id, node_name, agent_api_port, server_seq, last_synced_at }
+/agent/pods          → Vec<Pod> JSON array
+/agent/services      → Vec<Service> JSON array
+/agent/endpoints     → Vec<Endpoint> JSON array
+/agent/ingresses     → Vec<Ingress> JSON array
+/agent/routes        → HashMap<String,Vec<String>> JSON  (derived: ClusterIP:port → backends)
+/agent/dns-records   → HashMap<String,String> JSON       (derived: FQDN → ClusterIP)
 ```
 
-`/agent/routes` and `/agent/dns-records` are **derived views** recomputed and committed in the **same `WriteBatch`** as the parent records after every successful sync. No separate file management required.
+**Design note**: Each collection is stored as a **single JSON-array value** under a fixed key (not per-object keys). This matches the "always full-overwrite on re-sync" semantics exactly — a `save()` call unconditionally replaces the entire array, so stale entries from removed services/pods automatically disappear. Per-object keys (e.g. `/agent/services/<ns>/<name>`) were considered but rejected because they require explicit deletion of stale keys to avoid accumulation.
 
-**Atomic write protocol**: All multi-key updates use a single `WriteBatch` — either all keys commit or none do. SlateDB's WAL ensures crash safety without any application-level temp/fsync/rename logic.
+`/agent/routes` and `/agent/dns-records` are **derived views** recomputed and written in the **same `WriteBatch`** as the parent collections after every successful sync. No separate file management required.
+
+**Atomic write protocol**: All 7 keys are written in a single `WriteBatch` — either all commit or none do. SlateDB's WAL ensures crash safety without any application-level temp/fsync/rename logic.
 
 #### AgentStore API
 
@@ -650,12 +652,29 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [ ] Remove `routes.json`, `state.json`, `dns-records.json` file cleanup from `scripts/dev-agent.sh` (no longer written; cleanup is harmless but should be removed for clarity)
 
 #### Testing & Validation
-- [x] Test: kill Agent → verify containers still running → restart Agent → verify pod adoption — implemented as `scripts/test-recovery.sh` (full end-to-end bash integration test)
-- [ ] Test: kill Server → verify Agent continues routing (ServiceProxy) + DNS resolving → restart Server → verify reconnect + cache refresh
-- [ ] Test: kill Agent → restart Agent (no server contact) → verify ServiceProxy + DNS serve stale cached state within 1s
-- [ ] Test: kill Agent + Server simultaneously → restart both → verify full cluster recovery
-- [ ] Test: Agent starts fresh (no prior containers, no cache) → verify normal boot path works
-- [ ] Test: Agent starts with stale cache (server seq mismatch) → verify full re-sync on connect
+
+**Unit tests** (`cmd/k3rs-agent/src/tests.rs`) — 24 tests, all passing (`cargo test -p k3rs-agent`):
+- [x] `backoff_sequence_is_correct` — verify 0→1s, 1→2s, 2→4s, 3→8s, 4→16s, 5+→30s
+- [x] `backoff_does_not_panic_on_large_attempt` — regression for shift-overflow panic (Group 2 fix)
+- [x] `heartbeat_backoff_is_1s_on_first_retry` — regression for off-by-one (Group 2 fix)
+- [x] `connectivity_*` — 7 state-machine transition tests (CONNECTING→CONNECTED→RECONNECTING→OFFLINE and back)
+- [x] `derive_dns_map_*` — 3 tests: FQDN format, headless skipped, empty cache
+- [x] `derive_routes_map_*` — 5 tests: single/multi backend, no ClusterIP, no matching endpoints, wrong namespace
+- [x] `fresh_store_load_returns_none` — Scenario 4 unit equivalent: empty DB returns None
+- [x] `roundtrip_identity_fields` — node_name, node_id, agent_api_port, server_seq survive save→load
+- [x] `roundtrip_services_and_endpoints` — collection counts and field values preserved
+- [x] `derived_views_are_stored_and_fast_loadable` — Scenario 2 unit: `/agent/routes` + `/agent/dns-records` readable via fast-path helpers
+- [x] `second_save_overwrites_first_server_wins` — Scenario 5 unit: full-array overwrite removes stale entries (exposed + fixed stale-key bug in per-object key design)
+- [x] `reopen_reads_persisted_data` — data survives `close()` + re-`open()` (simulates process restart)
+
+**Integration tests** (`scripts/test-resilience.sh`) — 5 E2E bash scenarios:
+- [x] Scenario 1: kill Server → DNS still resolves (stale in-memory cache) → restart Server → agent reconnects + AgentStore refreshed
+- [x] Scenario 2: kill Agent → restart with no server → `AgentStore loaded` appears within 5s → DNS resolves from stale cache offline
+- [x] Scenario 3: kill Agent + Server simultaneously → restart both → agent reconnects + AgentStore refreshed
+- [x] Scenario 4: Fresh start (no prior data dir) → agent registers normally → no "AgentStore loaded" log
+- [x] Scenario 5: Agent syncs svc-old → agent goes offline → svc-new created on server → agent restarts → reconnects → both services resolve via DNS
+
+- [x] Test: kill Agent → verify containers still running → restart Agent → verify pod adoption — `scripts/test-recovery.sh`
 
 ## Why Cloudflare Pingora?
 Using Cloudflare Pingora as the backbone for this orchestrator provides several architectural advantages:

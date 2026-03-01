@@ -4,15 +4,22 @@
 //! with a proper KV database: atomic WriteBatch writes, WAL crash-safety, MVCC reads.
 //!
 //! # Key schema
+//!
+//! Each collection is stored as a **single JSON-array value** under a fixed key.
+//! This avoids stale-key accumulation from per-object keys and matches the
+//! "always full-overwrite on re-sync" semantics exactly.
+//!
+//! ```text
+//! /agent/meta          → AgentMeta JSON  (node_id, node_name, agent_api_port, server_seq, last_synced_at)
+//! /agent/pods          → Vec<Pod> JSON array
+//! /agent/services      → Vec<Service> JSON array
+//! /agent/endpoints     → Vec<Endpoint> JSON array
+//! /agent/ingresses     → Vec<Ingress> JSON array
+//! /agent/routes        → HashMap<String,Vec<String>> JSON  (derived: ClusterIP:port → backends)
+//! /agent/dns-records   → HashMap<String,String> JSON       (derived: FQDN → ClusterIP)
 //! ```
-//! /agent/meta                        → AgentMeta JSON (identity fields)
-//! /agent/pods/<id>                   → Pod JSON
-//! /agent/services/<ns>/<name>        → Service JSON
-//! /agent/endpoints/<id>              → Endpoint JSON
-//! /agent/ingresses/<ns>/<name>       → Ingress JSON
-//! /agent/routes                      → HashMap<String,Vec<String>> JSON (derived: ClusterIP:port → backends)
-//! /agent/dns-records                 → HashMap<String,String> JSON (derived: FQDN → ClusterIP)
-//! ```
+//!
+//! All 7 keys are written in a single `WriteBatch` — either all commit or none do.
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -27,32 +34,16 @@ use tracing::info;
 
 use crate::cache::AgentStateCache;
 
-// ---- Key constants ----
+// ---- Key constants (fixed, one key per collection) ----
 const KEY_META: &[u8] = b"/agent/meta";
+const KEY_PODS: &[u8] = b"/agent/pods";
+const KEY_SERVICES: &[u8] = b"/agent/services";
+const KEY_ENDPOINTS: &[u8] = b"/agent/endpoints";
+const KEY_INGRESSES: &[u8] = b"/agent/ingresses";
 const KEY_ROUTES: &[u8] = b"/agent/routes";
 const KEY_DNS: &[u8] = b"/agent/dns-records";
 
-const PREFIX_PODS: &str = "/agent/pods/";
-const PREFIX_SERVICES: &str = "/agent/services/";
-const PREFIX_ENDPOINTS: &str = "/agent/endpoints/";
-const PREFIX_INGRESSES: &str = "/agent/ingresses/";
-
-fn key_pod(id: &str) -> Vec<u8> {
-    format!("/agent/pods/{}", id).into_bytes()
-}
-fn key_service(ns: &str, name: &str) -> Vec<u8> {
-    format!("/agent/services/{}/{}", ns, name).into_bytes()
-}
-fn key_endpoint(id: &str) -> Vec<u8> {
-    format!("/agent/endpoints/{}", id).into_bytes()
-}
-fn key_ingress(ns: &str, name: &str) -> Vec<u8> {
-    format!("/agent/ingresses/{}/{}", ns, name).into_bytes()
-}
-
-/// Minimal identity fields stored under `/agent/meta`.
-/// Separate from the object lists so a fresh agent can read its node_id
-/// without scanning all pods/services.
+/// Identity fields stored under `/agent/meta`.
 #[derive(Serialize, Deserialize)]
 struct AgentMeta {
     node_name: String,
@@ -65,7 +56,7 @@ struct AgentMeta {
 /// Thin wrapper around a local SlateDB instance.
 ///
 /// `AgentStore` is cheaply cloneable (internally Arc-backed) and can be
-/// shared across tokio runtimes / threads without wrapping in Arc.
+/// shared across tokio runtimes / threads without wrapping in `Arc`.
 #[derive(Clone)]
 pub struct AgentStore {
     db: Db,
@@ -73,7 +64,6 @@ pub struct AgentStore {
 
 impl AgentStore {
     /// Open (or create) the SlateDB at `<data_dir>/agent/state.db/`.
-    /// Creates the directory if it does not exist.
     pub async fn open(data_dir: &str) -> anyhow::Result<Self> {
         let path = format!("{}/agent/state.db", data_dir);
         info!("Opening agent SlateDB at {}", path);
@@ -94,14 +84,9 @@ impl AgentStore {
 
     /// Atomically save the full `AgentStateCache` in a single `WriteBatch`.
     ///
-    /// Writes:
-    /// - `/agent/meta` — identity fields
-    /// - `/agent/pods/<id>` for every pod
-    /// - `/agent/services/<ns>/<name>` for every service
-    /// - `/agent/endpoints/<id>` for every endpoint
-    /// - `/agent/ingresses/<ns>/<name>` for every ingress
-    /// - `/agent/routes` — derived routing table (ClusterIP:port → backends)
-    /// - `/agent/dns-records` — derived DNS map (FQDN → ClusterIP)
+    /// Each collection is stored as one JSON-array value. Because we always
+    /// overwrite the entire array, stale entries from previous syncs are
+    /// automatically replaced — no per-key deletion logic required.
     pub async fn save(&self, cache: &AgentStateCache) -> anyhow::Result<()> {
         let meta = AgentMeta {
             node_name: cache.node_name.clone(),
@@ -115,37 +100,11 @@ impl AgentStore {
         let dns = cache.derive_dns_map();
 
         let mut batch = WriteBatch::new();
-
-        // Identity
         batch.put(KEY_META, serde_json::to_vec(&meta)?);
-
-        // Pods
-        for pod in &cache.pods {
-            batch.put(key_pod(&pod.id), serde_json::to_vec(pod)?);
-        }
-
-        // Services
-        for svc in &cache.services {
-            batch.put(
-                key_service(&svc.namespace, &svc.name),
-                serde_json::to_vec(svc)?,
-            );
-        }
-
-        // Endpoints (keyed by id — unique across the cluster)
-        for ep in &cache.endpoints {
-            batch.put(key_endpoint(&ep.id), serde_json::to_vec(ep)?);
-        }
-
-        // Ingresses
-        for ing in &cache.ingresses {
-            batch.put(
-                key_ingress(&ing.namespace, &ing.name),
-                serde_json::to_vec(ing)?,
-            );
-        }
-
-        // Derived views written in the same batch
+        batch.put(KEY_PODS, serde_json::to_vec(&cache.pods)?);
+        batch.put(KEY_SERVICES, serde_json::to_vec(&cache.services)?);
+        batch.put(KEY_ENDPOINTS, serde_json::to_vec(&cache.endpoints)?);
+        batch.put(KEY_INGRESSES, serde_json::to_vec(&cache.ingresses)?);
         batch.put(KEY_ROUTES, serde_json::to_vec(&routes)?);
         batch.put(KEY_DNS, serde_json::to_vec(&dns)?);
 
@@ -168,7 +127,7 @@ impl AgentStore {
     /// Load full `AgentStateCache` on startup.
     /// Returns `None` if the database is empty (fresh node — no `/agent/meta` key).
     pub async fn load(&self) -> anyhow::Result<Option<AgentStateCache>> {
-        // Check for meta first — fast early-return for fresh nodes
+        // Fast fresh-node check: if meta is missing, nothing was ever saved.
         let meta_bytes = match self
             .db
             .get(KEY_META)
@@ -180,11 +139,10 @@ impl AgentStore {
         };
         let meta: AgentMeta = serde_json::from_slice(&meta_bytes)?;
 
-        // Scan object prefixes
-        let pods = self.scan_prefix::<Pod>(PREFIX_PODS).await?;
-        let services = self.scan_prefix::<Service>(PREFIX_SERVICES).await?;
-        let endpoints = self.scan_prefix::<Endpoint>(PREFIX_ENDPOINTS).await?;
-        let ingresses = self.scan_prefix::<Ingress>(PREFIX_INGRESSES).await?;
+        let pods: Vec<Pod> = self.get_collection(KEY_PODS).await?;
+        let services: Vec<Service> = self.get_collection(KEY_SERVICES).await?;
+        let endpoints: Vec<Endpoint> = self.get_collection(KEY_ENDPOINTS).await?;
+        let ingresses: Vec<Ingress> = self.get_collection(KEY_INGRESSES).await?;
 
         let cache = AgentStateCache {
             node_name: meta.node_name,
@@ -208,8 +166,7 @@ impl AgentStore {
         Ok(Some(cache))
     }
 
-    /// Read only the pre-computed routing table for fast `ServiceProxy` bootstrap.
-    /// Avoids deserializing all pods/services/endpoints.
+    /// Read the pre-computed routing table for fast `ServiceProxy` bootstrap.
     #[allow(dead_code)]
     pub async fn load_routes(&self) -> anyhow::Result<Option<HashMap<String, Vec<String>>>> {
         match self
@@ -223,8 +180,7 @@ impl AgentStore {
         }
     }
 
-    /// Read only the pre-computed DNS record map for fast `DnsServer` bootstrap.
-    /// Avoids deserializing all pods/services/endpoints.
+    /// Read the pre-computed DNS record map for fast `DnsServer` bootstrap.
     #[allow(dead_code)]
     pub async fn load_dns_records(&self) -> anyhow::Result<Option<HashMap<String, String>>> {
         match self
@@ -248,29 +204,20 @@ impl AgentStore {
 
     // ---- Private helpers ----
 
-    /// Scan all keys under `prefix` and deserialize values as `T`.
-    /// Logs a warning (and skips) on any deserialization errors.
-    async fn scan_prefix<T: serde::de::DeserializeOwned>(
+    /// Get a collection stored as a JSON array. Returns an empty Vec if the
+    /// key does not exist (e.g. the field was never written on an older schema).
+    async fn get_collection<T: serde::de::DeserializeOwned>(
         &self,
-        prefix: &str,
+        key: &[u8],
     ) -> anyhow::Result<Vec<T>> {
-        let mut results = Vec::new();
-        let mut iter = self
+        match self
             .db
-            .scan_prefix(prefix.as_bytes())
+            .get(key)
             .await
-            .map_err(|e| anyhow::anyhow!("scan_prefix '{}': {}", prefix, e))?;
-
-        while let Ok(Some(kv)) = iter.next().await {
-            match serde_json::from_slice::<T>(&kv.value) {
-                Ok(v) => results.push(v),
-                Err(e) => tracing::warn!(
-                    "AgentStore: failed to deserialize key '{}': {}",
-                    String::from_utf8_lossy(&kv.key),
-                    e
-                ),
-            }
+            .map_err(|e| anyhow::anyhow!("AgentStore get {:?}: {}", String::from_utf8_lossy(key), e))?
+        {
+            Some(b) => Ok(serde_json::from_slice(&b)?),
+            None => Ok(Vec::new()),
         }
-        Ok(results)
     }
 }

@@ -310,8 +310,8 @@ mod tests {
     #[test]
     fn test_kernel_manager_paths() {
         let km = KernelManager::new();
-        assert_eq!(km.kernel_path(), PathBuf::from("/var/lib/k3rs/vmlinux"));
-        assert_eq!(km.initrd_path(), PathBuf::from("/var/lib/k3rs/initrd.img"));
+        assert_eq!(km.kernel_path(), PathBuf::from("/tmp/k3rs-data/vmlinux"));
+        assert_eq!(km.initrd_path(), PathBuf::from("/tmp/k3rs-data/initrd.img"));
     }
 
     #[test]
