@@ -2817,38 +2817,38 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 ### 16.7 Process Manager Checklists
 
 #### Phase 1: Core Infrastructure
-- [ ] Create `cmd/k3rsctl/src/pm/` module directory with `mod.rs` dispatcher
-- [ ] Add `Pm` variant to k3rsctl `Commands` enum (Clap derive) with `PmAction` subcommand
-- [ ] Define `ComponentName` enum (`Server`, `Agent`, `Vpc`, `Ui`, `All`) with `ValueEnum`
-- [ ] Define `PmRegistry` + `ProcessEntry` + `ProcessStatus` structs in `registry.rs` — serde Serialize/Deserialize
-- [ ] `PmRegistry::load(path)` / `save(path)` — atomic JSON file read/write at `~/.k3rs/pm/registry.json`
-- [ ] Ensure PM state directory structure on first use: `~/.k3rs/pm/{bins,pids,logs,configs}/`
+- [x] Create `cmd/k3rsctl/src/pm/` module directory with `mod.rs` dispatcher
+- [x] Add `Pm` variant to k3rsctl `Commands` enum (Clap derive) with `PmAction` subcommand
+- [x] Define `ComponentName` enum (`Server`, `Agent`, `Vpc`, `Ui`, `All`) with `ValueEnum`
+- [x] Define `PmRegistry` + `ProcessEntry` + `ProcessStatus` structs in `registry.rs` — serde Serialize/Deserialize
+- [x] `PmRegistry::load(path)` / `save(path)` — atomic JSON file read/write at `~/.k3rs/pm/registry.json`
+- [x] Ensure PM state directory structure on first use: `~/.k3rs/pm/{bins,pids,logs,configs}/`
 
 #### Phase 2: Install
-- [ ] `pm/install.rs` — `install_component(name, opts)` dispatcher
-- [ ] `--from-source` path: run `cargo build --release --bin k3rs-<component>`, copy to `~/.k3rs/pm/bins/`
-- [ ] `--bin-path` path: copy existing binary to `~/.k3rs/pm/bins/`
+- [x] `pm/install.rs` — `install_component(name, opts)` dispatcher
+- [x] `--from-source` path: run `cargo build --release --bin k3rs-<component>`, copy to `~/.k3rs/pm/bins/`
+- [x] `--bin-path` path: copy existing binary to `~/.k3rs/pm/bins/`
 - [ ] Default path: download pre-built binary from GitHub Releases (stub/future)
 - [ ] Verify binary after install (`--version` flag check)
-- [ ] Generate default config YAML → `~/.k3rs/pm/configs/<component>.yaml`
-- [ ] Register component in `registry.json` with status `Stopped`
+- [x] Generate default config YAML → `~/.k3rs/pm/configs/<component>.yaml`
+- [x] Register component in `registry.json` with status `Stopped`
 
 #### Phase 3: Lifecycle (Start / Stop / Restart)
-- [ ] `pm/lifecycle.rs` — `start_component(name, opts)`: spawn detached process via `setsid()`
-- [ ] Redirect stdout → `~/.k3rs/pm/logs/<component>.log`, stderr → `<component>-error.log`
-- [ ] Write PID to `~/.k3rs/pm/pids/<component>.pid`
+- [x] `pm/lifecycle.rs` — `start_component(name, opts)`: spawn detached process via `setsid()`
+- [x] Redirect stdout → `~/.k3rs/pm/logs/<component>.log`, stderr → `<component>-error.log`
+- [x] Write PID to `~/.k3rs/pm/pids/<component>.pid`
 - [ ] Build CLI args from config + overrides (port, server, token, node-name, data-dir)
-- [ ] Post-start: wait 2s, verify process alive via `kill(pid, 0)`, update registry
-- [ ] `--foreground` mode: run process in foreground (don't daemonize)
-- [ ] `stop_component(name, opts)`: read PID → `SIGTERM` → wait `--timeout` → `SIGKILL` if still alive
-- [ ] Remove PID file, update `registry.json` status to `Stopped`
-- [ ] `--force` flag: send `SIGKILL` immediately
-- [ ] `restart_component(name)`: `stop` + `start` preserving config and auto-restart settings
+- [x] Post-start: wait 2s, verify process alive via `kill(pid, 0)`, update registry
+- [x] `--foreground` mode: run process in foreground (don't daemonize)
+- [x] `stop_component(name, opts)`: read PID → `SIGTERM` → wait `--timeout` → `SIGKILL` if still alive
+- [x] Remove PID file, update `registry.json` status to `Stopped`
+- [x] `--force` flag: send `SIGKILL` immediately
+- [x] `restart_component(name)`: `stop` + `start` preserving config and auto-restart settings
 
 #### Phase 4: List & Status
-- [ ] `pm/list.rs` — `pm_list()`: read `registry.json`, format pm2-style table (name, status, pid, port, uptime, restarts, cpu/mem)
-- [ ] Status indicators: `● run` (green), `○ stop` (gray), `✕ crash` (red), `⟳ install` (yellow)
-- [ ] CPU/memory stats via `/proc/<pid>/stat` (Linux) or `sysinfo` crate
+- [x] `pm/list.rs` — `pm_list()`: read `registry.json`, format pm2-style table (name, status, pid, port, uptime, restarts, cpu/mem)
+- [x] Status indicators: `● run` (green), `○ stop` (gray), `✕ crash` (red), `⟳ install` (yellow)
+- [x] CPU/memory stats via `/proc/<pid>/stat` (Linux) or `sysinfo` crate
 - [ ] `pm/status.rs` — `pm_status()`: detailed per-component output (binary, config, port, uptime, data dir)
 - [ ] Health checks: server → `GET /api/v1/cluster/info`, agent → server connectivity, vpc → socket Ping/Pong
 
