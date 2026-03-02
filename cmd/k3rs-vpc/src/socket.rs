@@ -182,9 +182,36 @@ async fn dispatch(
                 },
             }
         }
-        _ => VpcResponse::Error {
-            code: "not_implemented".to_string(),
-            message: "This command is not yet implemented".to_string(),
-        },
+        VpcRequest::CheckReachability { src_vpc, dst_vpc } => {
+            // Same VPC is always reachable
+            if src_vpc == dst_vpc {
+                return VpcResponse::Reachable { reachable: true };
+            }
+
+            let alloc = allocator.lock().await;
+            match alloc.store().load_peerings().await {
+                Ok(peerings) => {
+                    let reachable = peerings.iter().any(|p| {
+                        if p.status != pkg_types::vpc::PeeringStatus::Active {
+                            return false;
+                        }
+                        match p.direction {
+                            pkg_types::vpc::PeeringDirection::Bidirectional => {
+                                (p.vpc_a == src_vpc && p.vpc_b == dst_vpc)
+                                    || (p.vpc_a == dst_vpc && p.vpc_b == src_vpc)
+                            }
+                            pkg_types::vpc::PeeringDirection::InitiatorOnly => {
+                                p.vpc_a == src_vpc && p.vpc_b == dst_vpc
+                            }
+                        }
+                    });
+                    VpcResponse::Reachable { reachable }
+                }
+                Err(e) => VpcResponse::Error {
+                    code: "store_error".to_string(),
+                    message: format!("Failed to load peerings: {}", e),
+                },
+            }
+        }
     }
 }

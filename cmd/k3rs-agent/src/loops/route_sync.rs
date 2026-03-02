@@ -106,6 +106,20 @@ pub fn start(
                 warn!("Route sync: failed to list VPCs from k3rs-vpc, using unscoped fallback");
             }
 
+            // Fetch VPC peerings for cross-VPC DNS resolution
+            let peerings: Vec<pkg_types::vpc::VpcPeering> = match client
+                .get(format!("{}/api/v1/vpc-peerings", base))
+                .header("Authorization", &auth)
+                .send()
+                .await
+            {
+                Ok(r) => r.json().await.unwrap_or_default(),
+                Err(e) => {
+                    warn!("Route sync: failed to fetch VPC peerings: {}", e);
+                    Vec::new()
+                }
+            };
+
             // Update in-memory routing + DNS (live, in-memory)
             service_proxy
                 .update_routes(&all_services, &all_endpoints, &vpc_pod_ips)
@@ -114,6 +128,7 @@ pub fn start(
             dns_server
                 .update_records_vpc(&all_services, &ip_to_vpc)
                 .await;
+            dns_server.update_peerings(&peerings).await;
 
             // Persist to AgentStore (single WriteBatch: meta + services +
             // endpoints + derived /agent/routes + /agent/dns-records)

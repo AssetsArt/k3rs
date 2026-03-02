@@ -124,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
     // 7. Initialize nftables: create table, rebuild rules from stored allocations
     let mut nft = NftManager::new();
     nft.init_table().await?;
-    nft.rebuild_from_allocations(&cached_vpcs, &stored_allocations)
+    nft.rebuild_from_allocations(&cached_vpcs, &stored_allocations, &cached_peerings)
         .await?;
     if let Ok(snapshot) = nft.snapshot().await {
         if let Err(e) = store.save_nft_snapshot(&snapshot).await {

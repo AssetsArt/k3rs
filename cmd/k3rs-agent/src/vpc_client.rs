@@ -13,6 +13,7 @@ enum VpcRequest {
     Allocate { pod_id: String, vpc_name: String },
     Release { pod_id: String, vpc_name: String },
     GetRoutes { vpc_id: u16 },
+    CheckReachability { src_vpc: String, dst_vpc: String },
     ListVpcs,
     Ping,
 }
@@ -43,6 +44,9 @@ pub enum VpcResponse {
     Released,
     Routes {
         entries: Vec<RouteEntry>,
+    },
+    Reachable {
+        reachable: bool,
     },
     VpcList {
         vpcs: Vec<VpcInfo>,
@@ -171,6 +175,31 @@ impl VpcClient {
             }
             Ok(other) => Err(anyhow::anyhow!(
                 "Unexpected VPC response to GetRoutes: {:?}",
+                other
+            )),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Check if two VPCs can reach each other (via peering or same-VPC).
+    #[allow(dead_code)]
+    pub async fn check_reachability(
+        &self,
+        src_vpc: &str,
+        dst_vpc: &str,
+    ) -> anyhow::Result<bool> {
+        let req = VpcRequest::CheckReachability {
+            src_vpc: src_vpc.to_string(),
+            dst_vpc: dst_vpc.to_string(),
+        };
+
+        match self.request(&req).await {
+            Ok(VpcResponse::Reachable { reachable }) => Ok(reachable),
+            Ok(VpcResponse::Error { code, message }) => {
+                Err(anyhow::anyhow!("VPC check_reachability error [{}]: {}", code, message))
+            }
+            Ok(other) => Err(anyhow::anyhow!(
+                "Unexpected VPC response to CheckReachability: {:?}",
                 other
             )),
             Err(e) => Err(e),

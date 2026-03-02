@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use crate::store::StoredAllocation;
-use pkg_types::vpc::Vpc;
+use pkg_types::vpc::{PeeringDirection, PeeringStatus, Vpc, VpcPeering};
 
 const TABLE_NAME: &str = "inet k3rs_vpc";
 
@@ -221,17 +221,109 @@ impl NftManager {
         Ok(())
     }
 
+    /// Install cross-VPC accept rules for a peering relationship.
+    ///
+    /// Uses `insert rule` so rules go before the drop at end of chain.
+    /// All rules are tagged with comment `peering:<name>` for targeted removal.
+    pub async fn install_peering_rules(
+        &self,
+        peering: &VpcPeering,
+        vpcs: &[Vpc],
+    ) -> Result<()> {
+        if peering.status != PeeringStatus::Active {
+            return Ok(());
+        }
+
+        let vpc_a = vpcs.iter().find(|v| v.name == peering.vpc_a);
+        let vpc_b = vpcs.iter().find(|v| v.name == peering.vpc_b);
+
+        let (vpc_a, vpc_b) = match (vpc_a, vpc_b) {
+            (Some(a), Some(b)) => (a, b),
+            _ => {
+                warn!(
+                    "nftables: peering '{}' references unknown VPC(s) ({}, {})",
+                    peering.name, peering.vpc_a, peering.vpc_b
+                );
+                return Ok(());
+            }
+        };
+
+        let comment = format!("peering:{}", peering.name);
+        let id_a = vpc_a.vpc_id;
+        let id_b = vpc_b.vpc_id;
+        let cidr_a = &vpc_a.ipv4_cidr;
+        let cidr_b = &vpc_b.ipv4_cidr;
+
+        match peering.direction {
+            PeeringDirection::Bidirectional => {
+                // A ingress: accept from B
+                run_nft(&[
+                    "insert", "rule", TABLE_NAME,
+                    &format!("vpc_{}_ingress", id_a),
+                    &format!("ip saddr {} accept comment \"{}\"", cidr_b, comment),
+                ]).await?;
+                // A egress: accept to B
+                run_nft(&[
+                    "insert", "rule", TABLE_NAME,
+                    &format!("vpc_{}_egress", id_a),
+                    &format!("ip daddr {} accept comment \"{}\"", cidr_b, comment),
+                ]).await?;
+                // B ingress: accept from A
+                run_nft(&[
+                    "insert", "rule", TABLE_NAME,
+                    &format!("vpc_{}_ingress", id_b),
+                    &format!("ip saddr {} accept comment \"{}\"", cidr_a, comment),
+                ]).await?;
+                // B egress: accept to A
+                run_nft(&[
+                    "insert", "rule", TABLE_NAME,
+                    &format!("vpc_{}_egress", id_b),
+                    &format!("ip daddr {} accept comment \"{}\"", cidr_a, comment),
+                ]).await?;
+            }
+            PeeringDirection::InitiatorOnly => {
+                // A egress: accept to B
+                run_nft(&[
+                    "insert", "rule", TABLE_NAME,
+                    &format!("vpc_{}_egress", id_a),
+                    &format!("ip daddr {} accept comment \"{}\"", cidr_b, comment),
+                ]).await?;
+                // B ingress: accept from A
+                run_nft(&[
+                    "insert", "rule", TABLE_NAME,
+                    &format!("vpc_{}_ingress", id_b),
+                    &format!("ip saddr {} accept comment \"{}\"", cidr_a, comment),
+                ]).await?;
+            }
+        }
+
+        info!(
+            "nftables: installed peering rules for '{}' ({} <-> {} {:?})",
+            peering.name, peering.vpc_a, peering.vpc_b, peering.direction
+        );
+        Ok(())
+    }
+
+    /// Remove all nftables rules associated with a peering by name.
+    pub async fn remove_peering_rules(&self, peering_name: &str) -> Result<()> {
+        let comment = format!("peering:{}", peering_name);
+        remove_rules_by_comment(&comment).await?;
+        debug!("nftables: removed peering rules for '{}'", peering_name);
+        Ok(())
+    }
+
     /// Snapshot current ruleset: `nft list table inet k3rs_vpc`.
     pub async fn snapshot(&self) -> Result<String> {
         run_nft(&["list", "table", TABLE_NAME]).await
     }
 
-    /// Rebuild all nftables rules from stored VPC definitions and allocations.
+    /// Rebuild all nftables rules from stored VPC definitions, allocations, and peerings.
     /// Called on daemon startup for crash recovery.
     pub async fn rebuild_from_allocations(
         &mut self,
         vpcs: &[Vpc],
         allocations: &[StoredAllocation],
+        peerings: &[VpcPeering],
     ) -> Result<()> {
         // Create VPC chains for all known VPCs
         for vpc in vpcs {
@@ -257,10 +349,21 @@ impl NftManager {
                 })?;
         }
 
+        // Install peering rules for all active peerings
+        for peering in peerings {
+            if let Err(e) = self.install_peering_rules(peering, vpcs).await {
+                warn!(
+                    "nftables: failed to install peering rules for '{}': {}",
+                    peering.name, e
+                );
+            }
+        }
+
         info!(
-            "nftables: rebuilt rules for {} VPCs, {} allocations",
+            "nftables: rebuilt rules for {} VPCs, {} allocations, {} peerings",
             vpcs.len(),
-            allocations.len()
+            allocations.len(),
+            peerings.len()
         );
         Ok(())
     }

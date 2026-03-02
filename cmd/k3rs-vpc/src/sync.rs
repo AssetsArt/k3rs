@@ -1,6 +1,6 @@
 //! VPC sync loop — periodically pulls VPC definitions and peerings from the server.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use crate::allocator::GhostAllocator;
 use crate::nftables::NftManager;
 use crate::store::{VpcDaemonMeta, VpcStore};
-use pkg_types::vpc::{Vpc, VpcPeering};
+use pkg_types::vpc::{PeeringStatus, Vpc, VpcPeering};
 use pkg_vpc::constants::PLATFORM_PREFIX;
 
 /// Start the VPC sync loop. Pulls from the server every `interval_secs` seconds.
@@ -31,6 +31,8 @@ pub fn start_sync_loop(
 
         // Track previous VPC IDs to detect removals
         let mut prev_vpc_ids: HashMap<u16, String> = HashMap::new();
+        // Track previous peering names to detect removals
+        let mut prev_peering_names: HashSet<String> = HashSet::new();
 
         loop {
             interval.tick().await;
@@ -127,6 +129,34 @@ pub fn start_sync_loop(
                 }
 
                 prev_vpc_ids = current_vpc_ids;
+
+                // Enforce peering rules
+                let current_peering_names: HashSet<String> = peerings
+                    .iter()
+                    .filter(|p| p.status == PeeringStatus::Active)
+                    .map(|p| p.name.clone())
+                    .collect();
+
+                // Remove rules for peerings that disappeared or became inactive
+                for name in &prev_peering_names {
+                    if !current_peering_names.contains(name) {
+                        if let Err(e) = nft_mgr.remove_peering_rules(name).await {
+                            warn!("VPC sync: failed to remove peering rules for '{}': {}", name, e);
+                        }
+                    }
+                }
+
+                // Install fresh rules for active peerings (remove old first for idempotency)
+                for peering in peerings.iter().filter(|p| p.status == PeeringStatus::Active) {
+                    if let Err(e) = nft_mgr.remove_peering_rules(&peering.name).await {
+                        warn!("VPC sync: failed to remove old peering rules for '{}': {}", peering.name, e);
+                    }
+                    if let Err(e) = nft_mgr.install_peering_rules(peering, &vpcs).await {
+                        warn!("VPC sync: failed to install peering rules for '{}': {}", peering.name, e);
+                    }
+                }
+
+                prev_peering_names = current_peering_names;
             }
 
             // Update meta

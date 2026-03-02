@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
+
+use pkg_types::vpc::{PeeringDirection, PeeringStatus, VpcPeering};
 
 /// Lightweight embedded DNS server for service discovery.
 ///
@@ -16,6 +18,8 @@ pub struct DnsServer {
     vpc_records: Arc<RwLock<HashMap<String, (String, String)>>>,
     /// pod_ip → vpc_name (for resolving source IP to VPC membership)
     vpc_members: Arc<RwLock<HashMap<String, String>>>,
+    /// Directed peering pairs: (src_vpc, dst_vpc) — src can resolve dst's services
+    peered_vpcs: Arc<RwLock<HashSet<(String, String)>>>,
     listen_addr: SocketAddr,
     /// The domain suffix
     domain_suffix: String,
@@ -28,6 +32,7 @@ impl DnsServer {
             records: Arc::new(RwLock::new(HashMap::new())),
             vpc_records: Arc::new(RwLock::new(HashMap::new())),
             vpc_members: Arc::new(RwLock::new(HashMap::new())),
+            peered_vpcs: Arc::new(RwLock::new(HashSet::new())),
             listen_addr,
             domain_suffix: "svc.cluster.local".to_string(),
         }
@@ -87,6 +92,32 @@ impl DnsServer {
         );
     }
 
+    /// Update the set of peered VPC pairs from the latest peerings list.
+    ///
+    /// Bidirectional peerings insert both `(a,b)` and `(b,a)`.
+    /// InitiatorOnly inserts only `(a,b)` — vpc_a can resolve vpc_b's services.
+    pub async fn update_peerings(&self, peerings: &[VpcPeering]) {
+        let mut pairs = HashSet::new();
+        for p in peerings {
+            if p.status != PeeringStatus::Active {
+                continue;
+            }
+            match p.direction {
+                PeeringDirection::Bidirectional => {
+                    pairs.insert((p.vpc_a.clone(), p.vpc_b.clone()));
+                    pairs.insert((p.vpc_b.clone(), p.vpc_a.clone()));
+                }
+                PeeringDirection::InitiatorOnly => {
+                    pairs.insert((p.vpc_a.clone(), p.vpc_b.clone()));
+                }
+            }
+        }
+        let count = pairs.len();
+        let mut pv = self.peered_vpcs.write().await;
+        *pv = pairs;
+        info!("DNS peered VPC pairs updated: {} directed pairs", count);
+    }
+
     /// Load DNS records from a JSON file (for cache-based startup).
     /// Returns the number of records loaded.
     pub async fn load_from_file(&self, path: &str) -> anyhow::Result<usize> {
@@ -106,6 +137,7 @@ impl DnsServer {
         let records = self.records.clone();
         let vpc_records = self.vpc_records.clone();
         let vpc_members = self.vpc_members.clone();
+        let peered_vpcs = self.peered_vpcs.clone();
 
         tokio::spawn(async move {
             let mut buf = [0u8; 512];
@@ -117,6 +149,7 @@ impl DnsServer {
                             &records,
                             &vpc_records,
                             &vpc_members,
+                            &peered_vpcs,
                             &src,
                         )
                         .await
@@ -147,6 +180,7 @@ impl DnsServer {
         records: &Arc<RwLock<HashMap<String, String>>>,
         vpc_records: &Arc<RwLock<HashMap<String, (String, String)>>>,
         vpc_members: &Arc<RwLock<HashMap<String, String>>>,
+        peered_vpcs: &Arc<RwLock<HashSet<(String, String)>>>,
         src: &SocketAddr,
     ) -> Option<Vec<u8>> {
         // Minimum DNS query is 12 bytes header + at least 1 byte question
@@ -171,10 +205,17 @@ impl DnsServer {
             let vr = vpc_records.read().await;
             if let Some((ip, svc_vpc)) = vr.get(&name) {
                 if svc_vpc == source_vpc {
+                    // Same VPC — allow
                     Some(ip.clone())
                 } else {
-                    // Source VPC doesn't match service VPC — deny
-                    return None;
+                    // Check if source VPC is peered with the service's VPC
+                    let pv = peered_vpcs.read().await;
+                    if pv.contains(&(source_vpc.clone(), svc_vpc.clone())) {
+                        Some(ip.clone())
+                    } else {
+                        // Not peered — deny
+                        return None;
+                    }
                 }
             } else {
                 // Not in VPC records, fall back to plain records
