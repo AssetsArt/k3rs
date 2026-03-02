@@ -19,3 +19,4 @@ pub mod secret;
 pub mod service;
 pub mod validate;
 pub mod volume;
+pub mod vpc;

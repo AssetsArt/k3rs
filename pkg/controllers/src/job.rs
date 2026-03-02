@@ -199,6 +199,8 @@ impl JobController {
             owner_ref: Some(job.id.clone()),
             restart_count: 0,
             runtime_info: None,
+            ghost_ipv6: None,
+            vpc_name: None,
             created_at: Utc::now(),
         };
 

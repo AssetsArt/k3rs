@@ -200,6 +200,8 @@ impl ReplicaSetController {
             owner_ref: Some(rs.id.clone()),
             restart_count: 0,
             runtime_info: None,
+            ghost_ipv6: None,
+            vpc_name: None,
             created_at: Utc::now(),
         };
 

@@ -73,6 +73,9 @@ pub struct PodSpec {
     pub tolerations: Vec<Toleration>,
     #[serde(default)]
     pub volumes: Vec<crate::volume::Volume>,
+    /// VPC name this pod belongs to (defaults to "default" if unset)
+    #[serde(default)]
+    pub vpc: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,5 +145,11 @@ pub struct Pod {
     /// Container runtime used for this pod
     #[serde(default)]
     pub runtime_info: Option<PodRuntimeInfo>,
+    /// Ghost IPv6 address assigned by the VPC controller
+    #[serde(default)]
+    pub ghost_ipv6: Option<String>,
+    /// Resolved VPC name for this pod
+    #[serde(default)]
+    pub vpc_name: Option<String>,
     pub created_at: DateTime<Utc>,
 }

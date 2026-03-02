@@ -9,4 +9,5 @@ pub mod processes;
 pub mod register;
 pub mod resources;
 pub mod runtime;
+pub mod vpc;
 pub mod watch;

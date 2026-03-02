@@ -12,7 +12,7 @@ use crate::AppState;
 use crate::auth::{auth_middleware, rbac_middleware};
 use crate::handlers::{
     backup, cluster, drain, endpoints, exec, heartbeat, images, processes, register, resources,
-    watch,
+    vpc, watch,
 };
 use crate::request_id::request_id_middleware;
 
@@ -25,6 +25,7 @@ use pkg_controllers::hpa::HPAController;
 use pkg_controllers::job::JobController;
 use pkg_controllers::node::NodeController;
 use pkg_controllers::replicaset::ReplicaSetController;
+use pkg_controllers::vpc::VpcController;
 use pkg_metrics::MetricsRegistry;
 use pkg_pki::ca::ClusterCA;
 use pkg_scheduler::Scheduler;
@@ -88,6 +89,9 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     // Seed master node
     seed_master_node(&store, &config.node_name).await?;
 
+    // Seed default VPC
+    seed_default_vpc(&store).await?;
+
     // Start leader election
     let election = LeaderElection::new(store.clone(), config.server_id.clone());
     let (_election_handle, leader_rx) = election.start();
@@ -123,6 +127,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
                 CronJobController::new(ctrl_store.clone()).start(),
                 HPAController::new(ctrl_store.clone()).start(),
                 EvictionController::new(ctrl_store.clone()).start(),
+                VpcController::new(ctrl_store.clone()).start(),
             ];
 
             // Start BackupController if a backup directory is configured
@@ -311,6 +316,23 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             "/api/v1/nodes/{name}/images",
             put(images::report_node_images),
         )
+        // Phase 10: VPCs (cluster-scoped)
+        .route(
+            "/api/v1/vpcs",
+            post(vpc::create_vpc).get(vpc::list_vpcs),
+        )
+        .route(
+            "/api/v1/vpcs/{name}",
+            get(vpc::get_vpc).delete(vpc::delete_vpc),
+        )
+        .route(
+            "/api/v1/vpc-peerings",
+            post(vpc::create_vpc_peering).get(vpc::list_vpc_peerings),
+        )
+        .route(
+            "/api/v1/vpc-peerings/{name}",
+            delete(vpc::delete_vpc_peering),
+        )
         // Phase 2: generic delete
         .route(
             "/api/v1/{resource_type}/{ns}/{name}",
@@ -405,6 +427,24 @@ async fn seed_master_node(store: &StateStore, name: &str) -> anyhow::Result<()> 
         let data = serde_json::to_vec(&node)?;
         store.put(&key, &data).await?;
         info!("Seeded master node");
+    }
+    Ok(())
+}
+
+/// Seed the default VPC on startup.
+async fn seed_default_vpc(store: &StateStore) -> anyhow::Result<()> {
+    let key = "/registry/vpcs/default";
+    if store.get(key).await?.is_none() {
+        let vpc = pkg_types::vpc::Vpc {
+            name: "default".to_string(),
+            vpc_id: 1,
+            ipv4_cidr: "10.42.0.0/16".to_string(),
+            status: pkg_types::vpc::VpcStatus::Active,
+            created_at: Utc::now(),
+        };
+        let data = serde_json::to_vec(&vpc)?;
+        store.put(key, &data).await?;
+        info!("Seeded default VPC");
     }
     Ok(())
 }

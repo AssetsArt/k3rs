@@ -7,3 +7,4 @@ pub mod hpa;
 pub mod job;
 pub mod node;
 pub mod replicaset;
+pub mod vpc;

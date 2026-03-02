@@ -201,6 +201,8 @@ impl DaemonSetController {
             owner_ref: Some(ds.id.clone()),
             restart_count: 0,
             runtime_info: None,
+            ghost_ipv6: None,
+            vpc_name: None,
             created_at: Utc::now(),
         };
         let key = format!("/registry/pods/{}/{}", ns, pod.name);
