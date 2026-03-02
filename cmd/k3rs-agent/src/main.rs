@@ -2,6 +2,7 @@ mod api;
 mod cache;
 mod connectivity;
 mod store;
+mod vpc_client;
 #[cfg(test)]
 mod tests;
 
@@ -59,6 +60,10 @@ struct Cli {
     /// Path to the local data directory (AgentStore / SlateDB location)
     #[arg(long, default_value_t = pkg_constants::paths::DATA_DIR.to_string())]
     data_dir: String,
+
+    /// Path to the VPC daemon Unix socket
+    #[arg(long, default_value_t = pkg_constants::paths::VPC_SOCKET.to_string())]
+    vpc_socket: String,
 }
 
 /// Attempt registration with the server. Returns (node_id, agent_api_port, response) on success.
@@ -207,6 +212,10 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting k3rs-agent for node: {}", node_name);
 
     // =========================================================================
+    // VPC client
+    let vpc_client = Arc::new(vpc_client::VpcClient::new(cli.vpc_socket.clone()));
+    info!("VPC client configured for socket: {}", cli.vpc_socket);
+
     // Phase A: Open AgentStore (SlateDB) and load cached state
     // =========================================================================
     let data_dir = cli.data_dir.clone();
@@ -708,6 +717,7 @@ async fn main() -> anyhow::Result<()> {
             let sync_cache = ctrl_cache.clone();
             let sync_conn = ctrl_conn.clone();
             let sync_store = ctrl_store.clone();
+            let sync_vpc = vpc_client.clone();
             let in_flight: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
                 std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
             tokio::spawn(async move {
@@ -774,6 +784,14 @@ async fn main() -> anyhow::Result<()> {
                                                 pod.name
                                             );
 
+                                            // Release VPC allocation (best-effort)
+                                            let vpc_name = pod.vpc_name.as_deref()
+                                                .or(pod.spec.vpc.as_deref())
+                                                .unwrap_or("default");
+                                            if let Err(e) = sync_vpc.release(&pod.id, vpc_name).await {
+                                                warn!("[pod:{}] VPC release failed: {}", pod.name, e);
+                                            }
+
                                             if let Ok(logs) =
                                                 runtime.container_logs(&pod.id, 20).await
                                             {
@@ -803,6 +821,15 @@ async fn main() -> anyhow::Result<()> {
                                                 "[pod:{}] Container not found in runtime",
                                                 pod.name
                                             );
+
+                                            // Release VPC allocation (best-effort)
+                                            let vpc_name = pod.vpc_name.as_deref()
+                                                .or(pod.spec.vpc.as_deref())
+                                                .unwrap_or("default");
+                                            if let Err(e) = sync_vpc.release(&pod.id, vpc_name).await {
+                                                warn!("[pod:{}] VPC release failed: {}", pod.name, e);
+                                            }
+
                                             let status_url = format!(
                                                 "{}/api/v1/namespaces/{}/pods/{}/status",
                                                 sync_server.trim_end_matches('/'),
@@ -867,6 +894,7 @@ async fn main() -> anyhow::Result<()> {
                                     let pod_server = sync_server.clone();
                                     let pod_token = sync_token.clone();
                                     let pod_in_flight = in_flight.clone();
+                                    let pod_vpc = sync_vpc.clone();
 
                                     {
                                         let mut set = pod_in_flight.lock().unwrap();
@@ -898,6 +926,32 @@ async fn main() -> anyhow::Result<()> {
                                         let env = container_spec
                                             .map(|c| c.env.clone())
                                             .unwrap_or_default();
+
+                                        // 0. Allocate VPC address
+                                        let vpc_name = pod.spec.vpc.as_deref().unwrap_or("default");
+                                        let vpc_alloc = match pod_vpc.allocate(&pod.id, vpc_name).await {
+                                            Ok(alloc) => {
+                                                info!(
+                                                    "[pod:{}] VPC allocated: ghost_ipv6={}, guest_ipv4={}, vpc_id={}",
+                                                    pod.name, alloc.1, alloc.0, alloc.2
+                                                );
+                                                Some(alloc)
+                                            }
+                                            Err(e) => {
+                                                error!("[pod:{}] VPC allocation failed: {}", pod.name, e);
+                                                let _ = pod_client
+                                                    .put(&status_url)
+                                                    .header(
+                                                        "Authorization",
+                                                        format!("Bearer {}", pod_token),
+                                                    )
+                                                    .json(&pkg_types::pod::PodStatus::Failed)
+                                                    .send()
+                                                    .await;
+                                                pod_in_flight.lock().unwrap().remove(&pod.id);
+                                                return;
+                                            }
+                                        };
 
                                         // 1. Pull Image
                                         info!("[pod:{}] Pulling image: {}", pod.name, image);
@@ -980,6 +1034,32 @@ async fn main() -> anyhow::Result<()> {
                                             .json(&pkg_types::pod::PodStatus::Running)
                                             .send()
                                             .await;
+
+                                        // 5. Report VPC info to server (best-effort)
+                                        if let Some((_, ref ghost_ipv6, _)) = vpc_alloc {
+                                            let vpc_url = format!(
+                                                "{}/api/v1/namespaces/{}/pods/{}/vpc",
+                                                pod_server.trim_end_matches('/'),
+                                                pod.namespace,
+                                                pod.name
+                                            );
+                                            let vpc_body = serde_json::json!({
+                                                "ghost_ipv6": ghost_ipv6,
+                                                "vpc_name": vpc_name,
+                                            });
+                                            if let Err(e) = pod_client
+                                                .put(&vpc_url)
+                                                .header(
+                                                    "Authorization",
+                                                    format!("Bearer {}", pod_token),
+                                                )
+                                                .json(&vpc_body)
+                                                .send()
+                                                .await
+                                            {
+                                                warn!("[pod:{}] Failed to report VPC info: {}", pod.name, e);
+                                            }
+                                        }
                                     });
                                 }
                             }

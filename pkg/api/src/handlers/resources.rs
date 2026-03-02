@@ -276,6 +276,46 @@ pub async fn update_pod_status(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PodVpcUpdate {
+    pub ghost_ipv6: String,
+    pub vpc_name: String,
+}
+
+pub async fn update_pod_vpc(
+    State(state): State<AppState>,
+    AxumPath((ns, pod_name)): AxumPath<(String, String)>,
+    Json(vpc_info): Json<PodVpcUpdate>,
+) -> impl IntoResponse {
+    let key = format!("/registry/pods/{}/{}", ns, pod_name);
+    match state.store.get(&key).await {
+        Ok(Some(data)) => match serde_json::from_slice::<pkg_types::pod::Pod>(&data) {
+            Ok(mut pod) => {
+                pod.ghost_ipv6 = Some(vpc_info.ghost_ipv6);
+                pod.vpc_name = Some(vpc_info.vpc_name);
+                if let Ok(new_data) = serde_json::to_vec(&pod) {
+                    if let Err(e) = state.store.put(&key, &new_data).await {
+                        warn!("Failed to update pod VPC info: {}", e);
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                    info!(
+                        "Updated pod VPC info {}/{}: ghost_ipv6={:?}",
+                        ns, pod_name, pod.ghost_ipv6
+                    );
+                    return (StatusCode::OK, Json(pod)).into_response();
+                }
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+            Err(e) => {
+                warn!("Failed to deserialize pod {}/{}: {}", ns, pod_name, e);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        },
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 // ============================================================
 // Services
 // ============================================================

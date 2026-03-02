@@ -199,6 +199,11 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             "/api/v1/namespaces/{ns}/pods/{pod_name}/status",
             put(resources::update_pod_status),
         )
+        // Phase 5: pod VPC info
+        .route(
+            "/api/v1/namespaces/{ns}/pods/{pod_name}/vpc",
+            put(resources::update_pod_vpc),
+        )
         // Phase 4: pod logs
         .route(
             "/api/v1/namespaces/{ns}/pods/{pod_name}/logs",
