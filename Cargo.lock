@@ -3787,14 +3787,17 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "dirs",
  "flate2",
  "futures-util",
+ "nix 0.29.0",
  "pkg-constants",
  "pkg-types",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sysinfo 0.38.0",
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tracing",
@@ -4440,6 +4443,18 @@ dependencies = [
  "cfg-if",
  "libc",
  "memoffset 0.6.5",
+]
+
+[[package]]
+name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags 2.11.0",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]

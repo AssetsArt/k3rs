@@ -20,3 +20,6 @@ pkg-constants = { workspace = true }
 crossterm = { workspace = true }
 flate2 = { workspace = true }
 chrono = { workspace = true }
+nix = { workspace = true }
+sysinfo = { workspace = true }
+dirs = "6"
