@@ -3,6 +3,7 @@ pub mod registry;
 pub mod install;
 pub mod lifecycle;
 pub mod list;
+pub mod logs;
 
 use std::path::PathBuf;
 
@@ -56,6 +57,20 @@ pub enum PmAction {
     },
     /// List all managed components with status
     List,
+    /// Tail or stream component logs
+    Logs {
+        /// Component to view logs for
+        component: ComponentName,
+        /// Stream logs continuously
+        #[arg(long, short)]
+        follow: bool,
+        /// Number of lines to show (default: 50)
+        #[arg(long, default_value_t = 50)]
+        lines: usize,
+        /// Show stderr log only
+        #[arg(long)]
+        error: bool,
+    },
 }
 
 /// Dispatch a PM subcommand.
@@ -81,5 +96,11 @@ pub async fn handle(action: &PmAction) -> Result<()> {
             timeout,
         } => lifecycle::restart(component, *force, *timeout),
         PmAction::List => list::list(),
+        PmAction::Logs {
+            component,
+            follow,
+            lines,
+            error,
+        } => logs::logs(component, *follow, *lines, *error),
     }
 }

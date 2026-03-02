@@ -2851,10 +2851,10 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [ ] Health checks: server → `GET /api/v1/cluster/info`, agent → server connectivity, vpc → socket Ping/Pong
 
 #### Phase 5: Logs
-- [ ] `pm/logs.rs` — `pm_logs(component, opts)`: tail `~/.k3rs/pm/logs/<component>.log`
-- [ ] `--follow` (`-f`): stream logs continuously (poll-based or inotify)
-- [ ] `--lines <N>`: show last N lines (default 50)
-- [ ] `--error`: show stderr log only (`<component>-error.log`)
+- [x] `pm/logs.rs` — `pm_logs(component, opts)`: tail `~/.k3rs/pm/logs/<component>.log`
+- [x] `--follow` (`-f`): stream logs continuously (poll-based)
+- [x] `--lines <N>`: show last N lines (default 50)
+- [x] `--error`: show stderr log only (`<component>-error.log`)
 
 #### Phase 6: Delete & Startup
 - [ ] `pm/lifecycle.rs` — `delete_component(name, opts)`: stop if running → remove from registry → cleanup files
