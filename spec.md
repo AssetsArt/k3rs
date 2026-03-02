@@ -1376,3 +1376,498 @@ k3rs/
 - **Async Runtime**: `tokio`
 - **CLI**: `clap` (CLI argument parsing)
 - **Crypto**: `rustls` (TLS), `rcgen` (Certificate generation)
+
+---
+
+## VPC Networking & Ghost IPv6
+
+> Adapted from Sync7 Ghost IPv6 Architecture (RFC-001, RFC-002).
+
+### Overview
+
+K3rs currently uses a **single flat overlay network** (`10.42.0.0/16`) where every Pod and VM gets a unique IPv4 address. This works for simple deployments but offers no network isolation between workloads.
+
+This specification introduces **VPC (Virtual Private Cloud)** as a first-class resource in K3rs, powered by a **Ghost IPv6** addressing scheme adapted from Sync7. The core idea:
+
+> **IPv4 inside the Pod/VM is a local illusion.**
+> All internal routing, isolation, and forwarding decisions operate on **Ghost IPv6**.
+
+A Ghost IPv6 address deterministically encodes `(ClusterID, VpcID, GuestIPv4)`, enabling:
+
+- **Overlapping IPv4 CIDRs** across different VPCs
+- **Hard VPC isolation** without Linux network namespaces per VPC
+- **Stateless routing** — route decisions derived from packet headers alone
+- Pods, Deployments, and VMs bound to a specific VPC
+
+### Design Goals
+
+1. **VPC as a first-class resource** — create, delete, list VPCs via API
+2. **Workload binding** — Pods, Deployments, and VMs declare their VPC in spec
+3. **Overlapping CIDRs** — different VPCs may use the same IPv4 range (e.g., both use `10.0.0.0/24`)
+4. **Hard isolation by default** — Pods in different VPCs cannot communicate unless explicitly peered
+5. **Ghost IPv6 as true identity** — the only routable address in the data plane
+6. **Fail-static** — existing VPC connectivity survives Agent/Server restarts
+7. **Backward compatible** — a `default` VPC preserves current flat-network behavior
+
+### Terminology
+
+| Term | Definition |
+|------|-----------|
+| **VPC** | A virtual network with its own IPv4 CIDR. Workloads inside a VPC can communicate freely. |
+| **Ghost IPv6** | A 128-bit address encoding `(ClusterID, VpcID, GuestIPv4)` — the true routable identity. |
+| **ClusterID** | A 32-bit identifier for this K3rs cluster. Fixed at cluster init (stored in SlateDB). |
+| **VpcID** | A 16-bit namespace identifier. Unique within a cluster. `0` is reserved. |
+| **GuestIPv4** | The IPv4 address visible inside the Pod/VM. Only meaningful within its VPC. |
+| **Platform Prefix** | Fixed 32-bit IPv6 prefix. Constant per cluster (ULA range `fc00::/7`). |
+
+### Ghost IPv6 Address Layout (128 bits)
+
+```text
+   0                   1                   2                   3
+   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                     Platform Prefix (32)                      |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |  Ver  |      Flags (12)       |      ClusterID (High 16)      |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |      ClusterID (Low 16)       |           VpcID (16)          |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                        GuestIPv4 (32)                         |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+| Field | Size | Description |
+|-------|------|-------------|
+| **Platform Prefix** | 32 bits | Fixed ULA prefix per cluster (e.g., `fd00:k3rs::/32`). Constant. |
+| **Ver** | 4 bits | Layout version. MUST be `1`. |
+| **Flags** | 12 bits | Reserved. MUST be `0` for v1. |
+| **ClusterID** | 32 bits | Unique cluster identifier. Fixed at `k3rs-server` init. Enables future multi-cluster peering. |
+| **VpcID** | 16 bits | VPC identifier. `0` is reserved. Up to 65,535 VPCs per cluster. |
+| **GuestIPv4** | 32 bits | Pod/VM IPv4 address (only meaningful inside its VPC). |
+
+**Construction** (Rust pseudocode):
+
+```rust
+fn construct_ghost_ipv6(
+    platform_prefix: u32,
+    cluster_id: u32,
+    vpc_id: u16,
+    guest_ipv4: Ipv4Addr,
+) -> Ipv6Addr {
+    let mut b = [0u8; 16];
+    b[0..4].copy_from_slice(&platform_prefix.to_be_bytes());
+    b[4] = 0x10; // ver=1, flags_high=0
+    b[5] = 0x00; // flags_low=0
+    b[6..8].copy_from_slice(&((cluster_id >> 16) as u16).to_be_bytes());
+    b[8..10].copy_from_slice(&((cluster_id & 0xFFFF) as u16).to_be_bytes());
+    b[10..12].copy_from_slice(&vpc_id.to_be_bytes());
+    b[12..16].copy_from_slice(&guest_ipv4.octets());
+    Ipv6Addr::from(b)
+}
+```
+
+**Example**:
+```
+Cluster Prefix: fd00:0001::/32
+ClusterID: 1
+VpcID: 5
+GuestIPv4: 10.0.1.10
+
+Ghost IPv6: fd00:0001:1000:0000:0001:0005:0a00:010a
+```
+
+**Why ClusterID instead of TenantID?**
+
+Sync7 is a multi-tenant cloud — TenantID isolates customers. K3rs is a single-cluster orchestrator — there are no "tenants" in the cloud sense. ClusterID serves two purposes:
+1. Identifies this cluster's traffic in the Ghost IPv6 address space
+2. Enables future multi-cluster federation/peering (two K3rs clusters with different ClusterIDs can have overlapping VpcIDs without collision)
+
+### VPC Resource Model
+
+#### VPC Definition
+
+```rust
+struct Vpc {
+    name: String,           // e.g., "production", "staging", "dev"
+    vpc_id: u16,            // Auto-allocated by control plane (1..65535)
+    ipv4_cidr: String,      // e.g., "10.0.0.0/16"
+    status: VpcStatus,      // Active, Terminating, Deleted
+    created_at: DateTime<Utc>,
+}
+
+enum VpcStatus {
+    Active,
+    Terminating,  // Draining: no new workloads, existing continue
+    Deleted,
+}
+```
+
+#### SlateDB Key Prefix
+
+```
+/registry/vpcs/<vpc-name>                → VPC definition & status
+```
+
+#### VPC API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/vpcs` | Create VPC |
+| `GET` | `/api/v1/vpcs` | List all VPCs |
+| `GET` | `/api/v1/vpcs/{name}` | Get VPC details |
+| `DELETE` | `/api/v1/vpcs/{name}` | Delete VPC (initiates drain) |
+| `GET` | `/api/v1/vpcs/{name}/pods` | List pods in VPC |
+
+#### Default VPC
+
+On cluster init, a `default` VPC is automatically created:
+
+```
+name: "default"
+vpc_id: 1
+ipv4_cidr: "10.42.0.0/16"   # Matches current K3rs default
+```
+
+Workloads that don't specify a VPC are placed in `default`. This preserves backward compatibility with existing manifests.
+
+### Workload Binding
+
+#### PodSpec Changes
+
+```rust
+struct PodSpec {
+    pub containers: Vec<ContainerSpec>,
+    pub runtime: Option<String>,
+    pub vpc: Option<String>,        // NEW: VPC name (default: "default")
+    pub node_affinity: HashMap<String, String>,
+    pub tolerations: Vec<Toleration>,
+    pub volumes: Vec<Volume>,
+}
+```
+
+#### DeploymentSpec Changes
+
+```rust
+struct DeploymentSpec {
+    pub replicas: u32,
+    pub template: PodSpec,          // PodSpec already has `vpc` field
+    pub strategy: DeploymentStrategy,
+    pub selector: HashMap<String, String>,
+}
+```
+
+The `vpc` field propagates from DeploymentSpec → ReplicaSet → Pod automatically via the template.
+
+#### Pod Network Info
+
+When a Pod is scheduled and its container created, the Agent records:
+
+```rust
+struct Pod {
+    // ... existing fields ...
+    pub ghost_ipv6: Option<String>,     // NEW: Ghost IPv6 address assigned
+    pub vpc_name: Option<String>,       // NEW: Resolved VPC name
+}
+```
+
+#### Manifest Examples
+
+**Pod in a specific VPC:**
+```json
+{
+  "name": "web-server",
+  "namespace": "production",
+  "spec": {
+    "vpc": "frontend-vpc",
+    "containers": [
+      { "name": "nginx", "image": "nginx:latest" }
+    ]
+  }
+}
+```
+
+**Deployment (VPC propagated via template):**
+```json
+{
+  "name": "api-service",
+  "namespace": "production",
+  "spec": {
+    "replicas": 3,
+    "template": {
+      "vpc": "backend-vpc",
+      "containers": [
+        { "name": "api", "image": "myapp:v2" }
+      ]
+    }
+  }
+}
+```
+
+**No VPC specified (uses default):**
+```json
+{
+  "name": "legacy-app",
+  "namespace": "default",
+  "spec": {
+    "containers": [
+      { "name": "app", "image": "legacy:v1" }
+    ]
+  }
+}
+```
+
+### Network Isolation Model
+
+#### Isolation Rules
+
+| Source → Destination | Behavior |
+|---------------------|----------|
+| Same VPC | **ALLOWED** — free communication |
+| Different VPCs (no peering) | **DENIED** — packets dropped |
+| Different VPCs (peered) | **ALLOWED** — explicit peering required |
+
+#### Default Behavior
+
+- **Intra-VPC**: All Pods within the same VPC can reach each other on their GuestIPv4 addresses. No policy needed.
+- **Cross-VPC**: Blocked by default. The Service Proxy and CNI enforce isolation by checking VpcID in Ghost IPv6 headers.
+- **External traffic**: Ingress and egress to/from the cluster are handled by Ingress Proxy and are VPC-aware (see below).
+
+#### VPC Peering (Optional)
+
+```rust
+struct VpcPeering {
+    name: String,
+    vpc_a: String,          // VPC name
+    vpc_b: String,          // VPC name
+    direction: PeeringDirection,
+    status: PeeringStatus,
+    created_at: DateTime<Utc>,
+}
+
+enum PeeringDirection {
+    Bidirectional,      // Both can initiate
+    InitiatorOnly,      // Only vpc_a can initiate to vpc_b
+}
+
+enum PeeringStatus {
+    Active,
+    Inactive,
+}
+```
+
+**SlateDB Key**: `/registry/vpc-peerings/<peering-name>`
+
+**API**:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/vpc-peerings` | Create peering |
+| `GET` | `/api/v1/vpc-peerings` | List peerings |
+| `DELETE` | `/api/v1/vpc-peerings/{name}` | Delete peering |
+
+### CNI Changes (PodNetwork)
+
+The current `PodNetwork` manages a single flat CIDR. With VPCs, each VPC gets its own IP allocator.
+
+#### VpcNetwork (replaces flat PodNetwork)
+
+```rust
+struct VpcNetwork {
+    /// vpc_name → per-VPC allocator
+    vpcs: Arc<RwLock<HashMap<String, VpcAllocator>>>,
+    /// Cluster identity for Ghost IPv6 construction
+    platform_prefix: u32,
+    cluster_id: u32,
+}
+
+struct VpcAllocator {
+    vpc_id: u16,
+    base_ip: u32,
+    prefix_len: u8,
+    max_hosts: u32,
+    next_offset: AtomicU32,
+    /// pod_id → (GuestIPv4, GhostIPv6)
+    allocations: HashMap<String, (String, Ipv6Addr)>,
+}
+```
+
+**Key operations**:
+
+```rust
+impl VpcNetwork {
+    /// Register a VPC for IP allocation
+    fn register_vpc(&self, name: &str, vpc_id: u16, cidr: &str);
+
+    /// Allocate IP for a pod in its VPC. Returns (GuestIPv4, GhostIPv6).
+    async fn allocate_ip(&self, vpc_name: &str, pod_id: &str)
+        -> Result<(String, Ipv6Addr)>;
+
+    /// Release a pod's allocation
+    async fn release_ip(&self, vpc_name: &str, pod_id: &str);
+
+    /// Resolve Ghost IPv6 from pod_id
+    async fn get_ghost_ipv6(&self, pod_id: &str) -> Option<Ipv6Addr>;
+}
+```
+
+### Service Proxy Changes
+
+The Pingora-based Service Proxy becomes VPC-aware:
+
+#### VPC-Scoped Routing Table
+
+```
+Before: "ClusterIP:port" → ["podIP:targetPort", ...]
+After:  "(VpcID, ClusterIP:port)" → ["podGhostIPv6:targetPort", ...]
+```
+
+Services are scoped to their VPC. A Service in `frontend-vpc` only routes to Pods in `frontend-vpc`.
+
+**Cross-VPC Services**: If a Service needs to be reachable from another VPC, the VPCs must be peered and the Service explicitly exposed cross-VPC (future enhancement).
+
+#### Service Type Changes
+
+```rust
+struct Service {
+    // ... existing fields ...
+    pub vpc: Option<String>,    // NEW: VPC this service belongs to (default: "default")
+}
+```
+
+### DNS Changes
+
+DNS resolution becomes VPC-scoped:
+
+```
+<service>.<namespace>.svc.cluster.local
+```
+
+resolves to the Service's ClusterIP **only if the querying Pod is in the same VPC** as the Service.
+
+**Implementation**: The embedded DNS server checks the source Pod's VPC membership before resolving. Pods can only discover Services within their own VPC (or peered VPCs).
+
+### Firecracker VM Integration
+
+VMs already get isolated TAP networks (`172.16.x.0/30`). With Ghost IPv6:
+
+1. **TAP setup unchanged** — the VM still sees its GuestIPv4 on the TAP interface
+2. **Ghost IPv6 assigned** — the Agent constructs the Ghost IPv6 from `(ClusterID, VpcID, GuestIPv4)`
+3. **eBPF/iptables enforcement** — outbound packets from the VM are tagged with Ghost IPv6; inbound packets are validated against the VM's expected Ghost IPv6
+4. **VPC in PodSpec** — VMs respect the same `spec.vpc` field as container Pods
+
+### Control Plane Responsibilities
+
+#### VPC Creation Flow
+
+1. User calls `POST /api/v1/vpcs` with name and CIDR
+2. Server validates:
+   - Name uniqueness
+   - CIDR format validity
+   - **No CIDR overlap** with existing VPCs (atomic check via SlateDB)
+3. Server allocates next available VpcID (1..65535)
+4. Server persists VPC to `/registry/vpcs/<name>`
+5. Server notifies Agents via watch stream
+
+#### Pod Scheduling with VPC
+
+1. Pod created with `spec.vpc: "my-vpc"`
+2. API Server validates VPC exists and is Active
+3. Scheduler places Pod on a node (VPC doesn't affect placement — all nodes participate in all VPCs)
+4. Agent receives Pod, resolves VPC → VpcID
+5. Agent allocates GuestIPv4 from VPC's CIDR
+6. Agent constructs Ghost IPv6
+7. Agent configures container networking with GuestIPv4 (pod sees IPv4) and registers Ghost IPv6 in routing tables
+
+#### VPC Deletion Flow
+
+1. User calls `DELETE /api/v1/vpcs/{name}`
+2. Server marks VPC as `Terminating`
+3. Server blocks new Pod creation in this VPC
+4. Existing Pods continue running (fail-static)
+5. When all Pods are terminated, VPC moves to `Deleted`
+6. **Cooldown period** (300 seconds) before VpcID can be reused (prevents stale packet delivery)
+
+### Data Plane Enforcement
+
+#### Routing Decision (per-packet)
+
+```rust
+fn route_packet(src_ghost: Ipv6Addr, dst_ipv4: Ipv4Addr) -> Result<Ipv6Addr> {
+    let src_vpc_id = extract_vpc_id(&src_ghost);
+    let src_cluster_id = extract_cluster_id(&src_ghost);
+
+    // Step 1: Intra-VPC — destination in same VPC CIDR?
+    let src_cidr = get_vpc_cidr(src_vpc_id);
+    if src_cidr.contains(dst_ipv4) {
+        return Ok(construct_ghost_ipv6(prefix, src_cluster_id, src_vpc_id, dst_ipv4));
+    }
+
+    // Step 2: Cross-VPC — is there a peering + matching VPC?
+    for peer_vpc_id in get_peered_vpcs(src_vpc_id) {
+        let peer_cidr = get_vpc_cidr(peer_vpc_id);
+        if peer_cidr.contains(dst_ipv4) {
+            return Ok(construct_ghost_ipv6(prefix, src_cluster_id, peer_vpc_id, dst_ipv4));
+        }
+    }
+
+    // Step 3: No route — drop
+    Err(Error::NoRoute)
+}
+```
+
+#### Spoofing Prevention
+
+- Source GuestIPv4 in outbound packets MUST match the Pod's assigned GuestIPv4
+- Ghost IPv6 structure (version, flags, cluster prefix) validated on every packet
+- Pods cannot forge traffic that appears to come from a different VPC
+
+### Fail-Static Guarantees
+
+VPC networking follows K3rs fail-static principles:
+
+| Failure | Impact |
+|---------|--------|
+| Server crash | Existing VPC connectivity continues. No new VPC creation. |
+| Agent crash | Pods keep running. Ghost IPv6 routing tables restored from Agent SlateDB cache. |
+| Server + Agent crash | Pods unaffected. Recovery reconciles VPC state from Server SlateDB. |
+
+**Agent Recovery**: On restart, the Agent loads VPC allocations from its local SlateDB cache (key: `/agent/vpc-allocations`). Ghost IPv6 → GuestIPv4 mappings are reconstructed, and the Service Proxy / DNS are rebuilt with VPC awareness.
+
+### Implementation Phases
+
+#### Phase 1: VPC Resource & Type System
+- [ ] Add `Vpc` type to `pkg/types/`
+- [ ] Add `vpc` field to `PodSpec` and `DeploymentSpec`
+- [ ] Add `ghost_ipv6`, `vpc_name` fields to `Pod`
+- [ ] Add VPC CRUD API endpoints to `k3rs-server`
+- [ ] Create `default` VPC on cluster init
+- [ ] SlateDB key prefix: `/registry/vpcs/<name>`
+
+#### Phase 2: Ghost IPv6 Addressing
+- [ ] Implement `ghost_ipv6` module in `pkg/network/` with construct/parse/validate functions
+- [ ] Add Ghost IPv6 constants to `pkg/constants/` (platform prefix, version)
+- [ ] Add ClusterID generation and persistence at server init
+- [ ] Unit tests with test vectors (match Sync7 RFC-001 format adapted for ClusterID)
+
+#### Phase 3: VPC-Aware CNI
+- [ ] Replace `PodNetwork` with `VpcNetwork` (per-VPC IP allocator)
+- [ ] Agent resolves VPC → VpcID on pod creation
+- [ ] Allocate `(GuestIPv4, GhostIPv6)` pairs per pod
+- [ ] Persist VPC allocations in Agent SlateDB cache
+
+#### Phase 4: VPC-Scoped Service Proxy & DNS
+- [ ] Service Proxy routing table keyed by `(VpcID, ClusterIP:port)`
+- [ ] DNS resolver checks source Pod's VPC before resolving
+- [ ] Services inherit VPC from their namespace or explicit `vpc` field
+
+#### Phase 5: Isolation Enforcement
+- [ ] Service Proxy drops cross-VPC traffic (no peering)
+- [ ] Firecracker VM: validate Ghost IPv6 on TAP packets
+- [ ] OCI containers: iptables/nftables rules per VPC
+- [ ] NetworkPolicy enforcement scoped within VPC
+
+#### Phase 6: VPC Peering
+- [ ] `VpcPeering` resource type and API
+- [ ] Bidirectional and InitiatorOnly peering modes
+- [ ] Cross-VPC route injection into Service Proxy
+- [ ] DNS cross-VPC resolution for peered VPCs
