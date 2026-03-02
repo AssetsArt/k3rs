@@ -2801,10 +2801,10 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Firecracker VM: TAP interface rules
 
 #### Phase 7: VPC-Scoped Service Proxy & DNS
-- [ ] Service Proxy queries `k3rs-vpc` for VPC-scoped routing
-- [ ] DNS resolver queries `k3rs-vpc` for source Pod VPC membership
-- [ ] Services inherit VPC from spec or default
-- [ ] `GetRoutes` command in k3rs-vpc
+- [x] Service Proxy queries `k3rs-vpc` for VPC-scoped routing
+- [x] DNS resolver queries `k3rs-vpc` for source Pod VPC membership
+- [x] Services inherit VPC from spec or default
+- [x] `GetRoutes` command in k3rs-vpc
 
 #### Phase 8: VPC Peering
 - [ ] Peering sync in `k3rs-vpc` VPC Sync Loop
