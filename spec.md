@@ -2813,3 +2813,63 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [ ] Bidirectional and InitiatorOnly enforcement
 - [ ] `CheckReachability` command in k3rs-vpc
 - [ ] Cross-VPC DNS resolution for peered VPCs
+
+### 16.7 Process Manager Checklists
+
+#### Phase 1: Core Infrastructure
+- [ ] Create `cmd/k3rsctl/src/pm/` module directory with `mod.rs` dispatcher
+- [ ] Add `Pm` variant to k3rsctl `Commands` enum (Clap derive) with `PmAction` subcommand
+- [ ] Define `ComponentName` enum (`Server`, `Agent`, `Vpc`, `Ui`, `All`) with `ValueEnum`
+- [ ] Define `PmRegistry` + `ProcessEntry` + `ProcessStatus` structs in `registry.rs` — serde Serialize/Deserialize
+- [ ] `PmRegistry::load(path)` / `save(path)` — atomic JSON file read/write at `~/.k3rs/pm/registry.json`
+- [ ] Ensure PM state directory structure on first use: `~/.k3rs/pm/{bins,pids,logs,configs}/`
+
+#### Phase 2: Install
+- [ ] `pm/install.rs` — `install_component(name, opts)` dispatcher
+- [ ] `--from-source` path: run `cargo build --release --bin k3rs-<component>`, copy to `~/.k3rs/pm/bins/`
+- [ ] `--bin-path` path: copy existing binary to `~/.k3rs/pm/bins/`
+- [ ] Default path: download pre-built binary from GitHub Releases (stub/future)
+- [ ] Verify binary after install (`--version` flag check)
+- [ ] Generate default config YAML → `~/.k3rs/pm/configs/<component>.yaml`
+- [ ] Register component in `registry.json` with status `Stopped`
+
+#### Phase 3: Lifecycle (Start / Stop / Restart)
+- [ ] `pm/lifecycle.rs` — `start_component(name, opts)`: spawn detached process via `setsid()`
+- [ ] Redirect stdout → `~/.k3rs/pm/logs/<component>.log`, stderr → `<component>-error.log`
+- [ ] Write PID to `~/.k3rs/pm/pids/<component>.pid`
+- [ ] Build CLI args from config + overrides (port, server, token, node-name, data-dir)
+- [ ] Post-start: wait 2s, verify process alive via `kill(pid, 0)`, update registry
+- [ ] `--foreground` mode: run process in foreground (don't daemonize)
+- [ ] `stop_component(name, opts)`: read PID → `SIGTERM` → wait `--timeout` → `SIGKILL` if still alive
+- [ ] Remove PID file, update `registry.json` status to `Stopped`
+- [ ] `--force` flag: send `SIGKILL` immediately
+- [ ] `restart_component(name)`: `stop` + `start` preserving config and auto-restart settings
+
+#### Phase 4: List & Status
+- [ ] `pm/list.rs` — `pm_list()`: read `registry.json`, format pm2-style table (name, status, pid, port, uptime, restarts, cpu/mem)
+- [ ] Status indicators: `● run` (green), `○ stop` (gray), `✕ crash` (red), `⟳ install` (yellow)
+- [ ] CPU/memory stats via `/proc/<pid>/stat` (Linux) or `sysinfo` crate
+- [ ] `pm/status.rs` — `pm_status()`: detailed per-component output (binary, config, port, uptime, data dir)
+- [ ] Health checks: server → `GET /api/v1/cluster/info`, agent → server connectivity, vpc → socket Ping/Pong
+
+#### Phase 5: Logs
+- [ ] `pm/logs.rs` — `pm_logs(component, opts)`: tail `~/.k3rs/pm/logs/<component>.log`
+- [ ] `--follow` (`-f`): stream logs continuously (poll-based or inotify)
+- [ ] `--lines <N>`: show last N lines (default 50)
+- [ ] `--error`: show stderr log only (`<component>-error.log`)
+
+#### Phase 6: Delete & Startup
+- [ ] `pm/lifecycle.rs` — `delete_component(name, opts)`: stop if running → remove from registry → cleanup files
+- [ ] Respect `--keep-data`, `--keep-binary`, `--keep-logs` flags
+- [ ] `pm/startup.rs` — `pm_startup(opts)`: generate systemd unit files for all registered components
+- [ ] Template: `[Unit]` + `[Service]` (Type=simple, ExecStart, Restart=on-failure) + `[Install]`
+- [ ] `--user` flag: generate user-level units (`~/.config/systemd/user/`)
+- [ ] `--enable` flag: run `systemctl enable` after generation
+
+#### Phase 7: Watchdog
+- [ ] `pm/watchdog.rs` — supervisor sidecar process (`k3rs-pm-watch`) that monitors child PID
+- [ ] Poll every 2s via `kill(pid, 0)` liveness check
+- [ ] On crash: exponential backoff restart (1s → 2s → 4s → ... → 30s cap)
+- [ ] Respect `max_restarts` (default 10, 0 = unlimited); status → `Crashed` when exceeded
+- [ ] Update `registry.json` on each restart (increment `restart_count`)
+- [ ] Watchdog PID file: `~/.k3rs/pm/pids/<component>-watch.pid`
