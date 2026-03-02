@@ -1377,17 +1377,18 @@ k3rs/
 - **CLI**: `clap` (CLI argument parsing)
 - **Crypto**: `rustls` (TLS), `rcgen` (Certificate generation)
 
+
 ---
 
 ## VPC Networking & Ghost IPv6
 
-> Adapted from Sync7 Ghost IPv6 Architecture (RFC-001, RFC-002).
+> Adapted from [Sync7 Ghost IPv6 Architecture](../sync7/architecture/) (RFC-001, RFC-002).
 
 ### Overview
 
 K3rs currently uses a **single flat overlay network** (`10.42.0.0/16`) where every Pod and VM gets a unique IPv4 address. This works for simple deployments but offers no network isolation between workloads.
 
-This specification introduces **VPC (Virtual Private Cloud)** as a first-class resource in K3rs, powered by a **Ghost IPv6** addressing scheme adapted from Sync7. The core idea:
+This specification introduces **VPC (Virtual Private Cloud)** as a first-class resource in K3rs, powered by a **Ghost IPv6** addressing scheme adapted from Sync7 and a **standalone `k3rs-vpc` daemon** that manages all VPC networking independently from the Agent. The core idea:
 
 > **IPv4 inside the Pod/VM is a local illusion.**
 > All internal routing, isolation, and forwarding decisions operate on **Ghost IPv6**.
@@ -1402,12 +1403,76 @@ A Ghost IPv6 address deterministically encodes `(ClusterID, VpcID, GuestIPv4)`, 
 ### Design Goals
 
 1. **VPC as a first-class resource** — create, delete, list VPCs via API
-2. **Workload binding** — Pods, Deployments, and VMs declare their VPC in spec
-3. **Overlapping CIDRs** — different VPCs may use the same IPv4 range (e.g., both use `10.0.0.0/24`)
-4. **Hard isolation by default** — Pods in different VPCs cannot communicate unless explicitly peered
-5. **Ghost IPv6 as true identity** — the only routable address in the data plane
-6. **Fail-static** — existing VPC connectivity survives Agent/Server restarts
-7. **Backward compatible** — a `default` VPC preserves current flat-network behavior
+2. **Standalone VPC daemon** — `k3rs-vpc` runs as an independent process per node with its own state
+3. **Workload binding** — Pods, Deployments, and VMs declare their VPC in spec
+4. **Overlapping CIDRs** — different VPCs may use the same IPv4 range (e.g., both use `10.0.0.0/24`)
+5. **Hard isolation by default** — Pods in different VPCs cannot communicate unless explicitly peered
+6. **Ghost IPv6 as true identity** — the only routable address in the data plane
+7. **Fail-static** — existing VPC connectivity survives Agent/Server/VPC daemon restarts independently
+8. **Backward compatible** — a `default` VPC preserves current flat-network behavior
+9. **Agent decoupling** — Agent knows nothing about networking internals; it delegates to `k3rs-vpc`
+
+### Architecture
+
+```mermaid
+graph TB
+    subgraph server["k3rs-server (Control Plane)"]
+        API["API Server"]
+        VPC_CTRL["VPC Controller"]
+        DB["StateStore (SlateDB)"]
+        API <--> DB
+        VPC_CTRL <--> DB
+    end
+
+    subgraph node["Node"]
+        subgraph vpc_daemon["k3rs-vpc (VPC Daemon)"]
+            direction TB
+            VPC_SYNC["VPC Sync Loop"]
+            GHOST["Ghost IPv6 Allocator"]
+            ROUTE["Routing Engine"]
+            NFT["nftables / eBPF Enforcer"]
+            VPC_STORE["VpcStore (Own SlateDB)"]
+            VPC_SOCK["Unix Socket API"]
+
+            VPC_SYNC --> VPC_STORE
+            GHOST --> VPC_STORE
+            ROUTE --> NFT
+            VPC_SOCK --> GHOST
+            VPC_SOCK --> ROUTE
+        end
+
+        subgraph agent["k3rs-agent"]
+            POD_SYNC["Pod Sync Loop"]
+            RUNTIME["Container Runtime"]
+            SPROXY["Service Proxy (Pingora)"]
+            DNS_SRV["DNS Server"]
+        end
+
+        PODS["Pods / VMs"]
+
+        POD_SYNC -- "allocate/release\n(Unix socket)" --> VPC_SOCK
+        SPROXY -- "query routes\n(Unix socket)" --> VPC_SOCK
+        DNS_SRV -- "query VPC scope\n(Unix socket)" --> VPC_SOCK
+        RUNTIME --> PODS
+        NFT --> PODS
+    end
+
+    VPC_SYNC -- "pull VPCs + peerings\n(HTTP)" --> API
+    POD_SYNC -- "pull pods\n(HTTP)" --> API
+
+    style vpc_daemon fill:#2d1b4e,stroke:#8b5cf6,stroke-width:2px,color:#fff
+    style agent fill:#16213e,stroke:#0f3460,stroke-width:2px,color:#fff
+    style server fill:#1a1a2e,stroke:#e94560,stroke-width:2px,color:#fff
+    style PODS fill:#533483,stroke:#e94560,color:#fff
+```
+
+**Three independent processes per node:**
+
+| Process | Responsibility | State | Crash Impact |
+|---------|---------------|-------|-------------|
+| `k3rs-server` | VPC CRUD, VpcID allocation, cluster state | Server SlateDB | No new VPCs; existing traffic unaffected |
+| `k3rs-vpc` | Ghost IPv6 allocation, routing, isolation enforcement | Own SlateDB (`vpc-state.db`) | nftables rules persist; allocations recover from own DB |
+| `k3rs-agent` | Pod lifecycle, Service Proxy, DNS | Agent SlateDB (`agent-state.db`) | Pods keep running; VPC enforcement unaffected |
 
 ### Terminology
 
@@ -1419,6 +1484,8 @@ A Ghost IPv6 address deterministically encodes `(ClusterID, VpcID, GuestIPv4)`, 
 | **VpcID** | A 16-bit namespace identifier. Unique within a cluster. `0` is reserved. |
 | **GuestIPv4** | The IPv4 address visible inside the Pod/VM. Only meaningful within its VPC. |
 | **Platform Prefix** | Fixed 32-bit IPv6 prefix. Constant per cluster (ULA range `fc00::/7`). |
+| **k3rs-vpc** | Standalone per-node daemon managing Ghost IPv6 allocation, routing, and isolation. |
+| **VpcStore** | `k3rs-vpc`'s own SlateDB instance, independent from Server and Agent state. |
 
 ### Ghost IPv6 Address Layout (128 bits)
 
@@ -1482,6 +1549,253 @@ Sync7 is a multi-tenant cloud — TenantID isolates customers. K3rs is a single-
 1. Identifies this cluster's traffic in the Ghost IPv6 address space
 2. Enables future multi-cluster federation/peering (two K3rs clusters with different ClusterIDs can have overlapping VpcIDs without collision)
 
+### `k3rs-vpc` Daemon
+
+The VPC daemon is the **sole authority** for networking on each node. It owns Ghost IPv6 allocation, routing decisions, and packet-level isolation enforcement. Neither the Agent nor the Server touch networking internals.
+
+#### Binary & Lifecycle
+
+```
+k3rs-vpc \
+  --server-url https://k3rs-server:6443 \
+  --token <join-token> \
+  --data-dir /var/lib/k3rs-vpc \
+  --socket /run/k3rs-vpc.sock
+```
+
+- Runs as a systemd service alongside `k3rs-agent`
+- Starts independently — does NOT depend on Agent being up
+- Registers with server on first start (receives ClusterID, Platform Prefix)
+- Survives Agent restarts (own process, own state)
+- Started with `setsid()` — not a child of Agent
+
+**Startup Sequence**:
+
+1. Open VpcStore (SlateDB at `<data-dir>/vpc-state.db`)
+2. Load cached VPCs, allocations, peerings from VpcStore
+3. Apply cached nftables rules (fail-static: networking works immediately)
+4. Start Unix socket listener at `/run/k3rs-vpc.sock`
+5. Begin VPC Sync Loop (pull VPCs from server)
+6. Ready to serve Agent requests
+
+#### VpcStore (Own SlateDB)
+
+`k3rs-vpc` has its own SlateDB instance, completely independent from Server and Agent state.
+
+**Key Prefix Design:**
+
+```
+/vpc/meta                                    → VpcDaemonMeta (cluster_id, platform_prefix, node_name)
+/vpc/definitions/<vpc-name>                  → Vpc (vpc_id, cidr, status)
+/vpc/allocations/<vpc-name>/<pod-id>         → Allocation (guest_ipv4, ghost_ipv6)
+/vpc/peerings/<peering-name>                 → VpcPeering (vpc_a, vpc_b, direction)
+/vpc/nftables-snapshot                       → Serialized nftables ruleset (for crash recovery)
+```
+
+**Why own SlateDB?**
+
+| Concern | Server SlateDB | Agent SlateDB | VpcStore |
+|---------|---------------|---------------|----------|
+| **Owner** | Control plane | Agent | VPC daemon |
+| **Contents** | Cluster-wide resources | Cached pods, routes, DNS | VPC allocations, routing, enforcement |
+| **Consistency** | Strong (authoritative) | Eventual (cache) | Strong (authoritative for this node) |
+| **Crash recovery** | Server restart | Agent restart | VPC daemon restart |
+| **Backup cadence** | Cluster-wide | Per-node | Per-node, independent |
+
+VPC allocations need strong consistency — if two pods request the same IP, one must fail. This is a local-node concern and belongs in a local authoritative store, not a cache.
+
+#### Unix Socket API
+
+`k3rs-vpc` exposes a JSON-over-Unix-socket API at `/run/k3rs-vpc.sock`. The Agent (and optionally CLI tools) communicate with it.
+
+**Protocol**: Newline-delimited JSON (NDJSON) over Unix domain socket. Request-response pattern.
+
+```rust
+/// Request from Agent → k3rs-vpc
+enum VpcRequest {
+    /// Allocate a GuestIPv4 + GhostIPv6 for a pod in a VPC
+    Allocate {
+        pod_id: String,
+        vpc_name: String,
+    },
+    /// Release a pod's network allocation
+    Release {
+        pod_id: String,
+        vpc_name: String,
+    },
+    /// Query a pod's allocation
+    Query {
+        pod_id: String,
+    },
+    /// Get VPC-scoped routes for Service Proxy
+    GetRoutes {
+        vpc_id: u16,
+    },
+    /// Check if source VPC can reach destination VPC
+    CheckReachability {
+        src_vpc: String,
+        dst_vpc: String,
+    },
+    /// List all VPCs on this node
+    ListVpcs,
+    /// Health check
+    Ping,
+}
+
+/// Response from k3rs-vpc → Agent
+enum VpcResponse {
+    Allocated {
+        guest_ipv4: String,
+        ghost_ipv6: String,
+        vpc_id: u16,
+    },
+    Released,
+    QueryResult {
+        guest_ipv4: String,
+        ghost_ipv6: String,
+        vpc_id: u16,
+        vpc_name: String,
+    },
+    Routes {
+        /// VPC-scoped routing entries
+        entries: Vec<RouteEntry>,
+    },
+    Reachable(bool),
+    VpcList(Vec<VpcInfo>),
+    Pong,
+    Error {
+        code: String,
+        message: String,
+    },
+}
+```
+
+**Example interaction** (Agent creating a pod):
+
+```
+Agent → k3rs-vpc:  {"Allocate":{"pod_id":"pod-abc","vpc_name":"production"}}
+k3rs-vpc → Agent:  {"Allocated":{"guest_ipv4":"10.0.0.5","ghost_ipv6":"fd00:0001:1000:0000:0001:0003:0a00:0005","vpc_id":3}}
+```
+
+#### VPC Sync Loop
+
+`k3rs-vpc` independently pulls VPC definitions and peerings from the server (same pattern as Agent pulls pods).
+
+```
+Every 10s:
+  1. GET /api/v1/vpcs         → update local VPC definitions
+  2. GET /api/v1/vpc-peerings → update local peering rules
+  3. Diff against VpcStore    → add new VPCs, remove deleted ones
+  4. Update nftables rules    → apply isolation changes
+  5. Persist to VpcStore      → crash-safe state
+```
+
+**Offline operation**: If the server is unreachable, `k3rs-vpc` serves from cached VpcStore state. Existing VPCs continue to function. New VPC creation is blocked (server-side).
+
+#### Ghost IPv6 Allocator
+
+The allocator is the core of `k3rs-vpc`. It manages per-VPC IP pools and Ghost IPv6 construction.
+
+```rust
+struct GhostAllocator {
+    platform_prefix: u32,
+    cluster_id: u32,
+    /// vpc_name → per-VPC pool
+    pools: HashMap<String, VpcPool>,
+}
+
+struct VpcPool {
+    vpc_id: u16,
+    base_ip: u32,
+    prefix_len: u8,
+    max_hosts: u32,
+    next_offset: AtomicU32,
+    /// pod_id → Allocation
+    allocations: HashMap<String, Allocation>,
+}
+
+struct Allocation {
+    pod_id: String,
+    guest_ipv4: Ipv4Addr,
+    ghost_ipv6: Ipv6Addr,
+    allocated_at: DateTime<Utc>,
+}
+```
+
+**Allocation flow**:
+
+1. Agent sends `Allocate { pod_id, vpc_name }` via Unix socket
+2. `k3rs-vpc` looks up VPC pool for `vpc_name`
+3. Allocates next available GuestIPv4 from pool (idempotent — same pod_id returns same IP)
+4. Constructs Ghost IPv6 from `(platform_prefix, cluster_id, vpc_id, guest_ipv4)`
+5. Persists allocation to VpcStore (crash-safe)
+6. Installs nftables rule allowing this Ghost IPv6
+7. Returns `Allocated { guest_ipv4, ghost_ipv6, vpc_id }` to Agent
+
+#### Data Plane Enforcement (nftables)
+
+`k3rs-vpc` manages all nftables rules for VPC isolation. The Agent never touches nftables.
+
+**Rule Structure**:
+
+```
+table inet k3rs_vpc {
+    # Per-VPC chains
+    chain vpc_<vpc_id>_ingress {
+        # Allow intra-VPC traffic
+        ip saddr <vpc_cidr> ip daddr <vpc_cidr> accept
+
+        # Allow from peered VPCs
+        ip saddr <peer_cidr> accept   # (only if peering exists)
+
+        # Default deny
+        drop
+    }
+
+    chain vpc_<vpc_id>_egress {
+        # Allow intra-VPC traffic
+        ip saddr <vpc_cidr> ip daddr <vpc_cidr> accept
+
+        # Allow to peered VPCs
+        ip daddr <peer_cidr> accept   # (only if peering exists)
+
+        # Default deny cross-VPC
+        drop
+    }
+
+    # Main forwarding chain
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+
+        # Per-pod rules (installed on allocation)
+        ip saddr <pod_ipv4> jump vpc_<vpc_id>_egress
+        ip daddr <pod_ipv4> jump vpc_<vpc_id>_ingress
+    }
+
+    # Anti-spoofing
+    chain input_validation {
+        # Pod can only send from its assigned IP
+        # Installed per-pod on allocation
+    }
+}
+```
+
+**Crash recovery**: On `k3rs-vpc` restart, rules are rebuilt from VpcStore allocations. The serialized nftables snapshot at `/vpc/nftables-snapshot` provides instant recovery before the full rebuild completes.
+
+**Future: eBPF**. nftables is the initial enforcement mechanism. A future phase can replace it with eBPF programs (pinned to bpffs, surviving daemon restarts) for higher performance and richer Ghost IPv6 packet inspection.
+
+#### Recovery & Reconciliation
+
+On `k3rs-vpc` restart:
+
+1. **Load VpcStore** — all VPCs, allocations, peerings restored instantly
+2. **Rebuild nftables** — regenerate all rules from allocations
+3. **Reconcile with server** — pull latest VPCs/peerings, diff and apply changes
+4. **Adopt existing allocations** — pods are still running, their IPs haven't changed
+5. **Resume Unix socket listener** — Agent reconnects automatically
+
+**Key invariant**: `k3rs-vpc` crash does NOT affect running pods. nftables rules persist in kernel. Only new allocations are blocked until the daemon restarts.
+
 ### VPC Resource Model
 
 #### VPC Definition
@@ -1502,13 +1816,14 @@ enum VpcStatus {
 }
 ```
 
-#### SlateDB Key Prefix
+#### SlateDB Key Prefix (Server)
 
 ```
 /registry/vpcs/<vpc-name>                → VPC definition & status
+/registry/vpc-peerings/<peering-name>    → VPC peering definition
 ```
 
-#### VPC API
+#### VPC API (Server)
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -1517,6 +1832,9 @@ enum VpcStatus {
 | `GET` | `/api/v1/vpcs/{name}` | Get VPC details |
 | `DELETE` | `/api/v1/vpcs/{name}` | Delete VPC (initiates drain) |
 | `GET` | `/api/v1/vpcs/{name}/pods` | List pods in VPC |
+| `POST` | `/api/v1/vpc-peerings` | Create peering |
+| `GET` | `/api/v1/vpc-peerings` | List peerings |
+| `DELETE` | `/api/v1/vpc-peerings/{name}` | Delete peering |
 
 #### Default VPC
 
@@ -1565,7 +1883,7 @@ When a Pod is scheduled and its container created, the Agent records:
 ```rust
 struct Pod {
     // ... existing fields ...
-    pub ghost_ipv6: Option<String>,     // NEW: Ghost IPv6 address assigned
+    pub ghost_ipv6: Option<String>,     // NEW: Ghost IPv6 address assigned by k3rs-vpc
     pub vpc_name: Option<String>,       // NEW: Resolved VPC name
 }
 ```
@@ -1616,21 +1934,93 @@ struct Pod {
 }
 ```
 
+### Agent ↔ k3rs-vpc Integration
+
+The Agent treats `k3rs-vpc` as a black-box networking service. The Agent's only job is container lifecycle; all network decisions are delegated.
+
+#### Pod Creation Flow
+
+```
+Agent (Pod Sync Loop)                          k3rs-vpc
+       │                                          │
+       │  1. Receives scheduled pod               │
+       │     spec.vpc = "production"               │
+       │                                          │
+       ├──────── Allocate(pod-xyz, production) ───►│
+       │                                          │  2. Look up VPC pool
+       │                                          │  3. Allocate GuestIPv4
+       │                                          │  4. Construct Ghost IPv6
+       │                                          │  5. Persist to VpcStore
+       │                                          │  6. Install nftables rules
+       │◄──── Allocated(10.0.0.5, fd00:..., 3) ──│
+       │                                          │
+       │  7. Configure container with             │
+       │     GuestIPv4 = 10.0.0.5                 │
+       │  8. Update pod.ghost_ipv6                │
+       │  9. Report status to server              │
+       │                                          │
+```
+
+#### Pod Deletion Flow
+
+```
+Agent                                          k3rs-vpc
+       │                                          │
+       │  1. Pod terminated                        │
+       │                                          │
+       ├──────── Release(pod-xyz, production) ────►│
+       │                                          │  2. Remove nftables rules
+       │                                          │  3. Release GuestIPv4 to pool
+       │                                          │  4. Mark allocation as released
+       │                                          │     in VpcStore
+       │◄──────────── Released ───────────────────│
+       │                                          │
+```
+
+#### Agent Startup
+
+On Agent start, it connects to `/run/k3rs-vpc.sock`. If `k3rs-vpc` is not yet running, Agent retries with exponential backoff (same pattern as server connectivity).
+
+```rust
+// Agent pod creation (simplified)
+async fn create_pod(&self, pod: &Pod) -> Result<()> {
+    let vpc_name = pod.spec.vpc.as_deref().unwrap_or("default");
+
+    // Delegate to k3rs-vpc
+    let alloc = self.vpc_client.allocate(&pod.id, vpc_name).await?;
+
+    // Configure container with GuestIPv4 only — pod never sees Ghost IPv6
+    self.runtime.create_container(
+        &pod.id,
+        &pod.spec.containers[0].image,
+        &pod.spec.containers[0].command,
+        &[("K3RS_POD_IP", &alloc.guest_ipv4)],
+    ).await?;
+
+    // Update pod record with Ghost IPv6
+    pod.ghost_ipv6 = Some(alloc.ghost_ipv6);
+    pod.vpc_name = Some(vpc_name.to_string());
+    self.report_pod_status(pod).await?;
+
+    Ok(())
+}
+```
+
 ### Network Isolation Model
 
 #### Isolation Rules
 
-| Source → Destination | Behavior |
-|---------------------|----------|
-| Same VPC | **ALLOWED** — free communication |
-| Different VPCs (no peering) | **DENIED** — packets dropped |
-| Different VPCs (peered) | **ALLOWED** — explicit peering required |
+| Source → Destination | Behavior | Enforced By |
+|---------------------|----------|-------------|
+| Same VPC | **ALLOWED** — free communication | nftables (k3rs-vpc) |
+| Different VPCs (no peering) | **DENIED** — packets dropped | nftables (k3rs-vpc) |
+| Different VPCs (peered) | **ALLOWED** — explicit peering required | nftables (k3rs-vpc) |
 
 #### Default Behavior
 
 - **Intra-VPC**: All Pods within the same VPC can reach each other on their GuestIPv4 addresses. No policy needed.
-- **Cross-VPC**: Blocked by default. The Service Proxy and CNI enforce isolation by checking VpcID in Ghost IPv6 headers.
-- **External traffic**: Ingress and egress to/from the cluster are handled by Ingress Proxy and are VPC-aware (see below).
+- **Cross-VPC**: Blocked by default. `k3rs-vpc` enforces isolation via nftables rules.
+- **External traffic**: Ingress and egress to/from the cluster are handled by Ingress Proxy. `k3rs-vpc` allows external-bound traffic via configurable egress rules.
 
 #### VPC Peering (Optional)
 
@@ -1655,75 +2045,20 @@ enum PeeringStatus {
 }
 ```
 
-**SlateDB Key**: `/registry/vpc-peerings/<peering-name>`
+When peering is created on the server, `k3rs-vpc` picks it up via VPC Sync Loop and installs cross-VPC nftables accept rules.
 
-**API**:
+### Service Proxy & DNS Changes
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/v1/vpc-peerings` | Create peering |
-| `GET` | `/api/v1/vpc-peerings` | List peerings |
-| `DELETE` | `/api/v1/vpc-peerings/{name}` | Delete peering |
-
-### CNI Changes (PodNetwork)
-
-The current `PodNetwork` manages a single flat CIDR. With VPCs, each VPC gets its own IP allocator.
-
-#### VpcNetwork (replaces flat PodNetwork)
-
-```rust
-struct VpcNetwork {
-    /// vpc_name → per-VPC allocator
-    vpcs: Arc<RwLock<HashMap<String, VpcAllocator>>>,
-    /// Cluster identity for Ghost IPv6 construction
-    platform_prefix: u32,
-    cluster_id: u32,
-}
-
-struct VpcAllocator {
-    vpc_id: u16,
-    base_ip: u32,
-    prefix_len: u8,
-    max_hosts: u32,
-    next_offset: AtomicU32,
-    /// pod_id → (GuestIPv4, GhostIPv6)
-    allocations: HashMap<String, (String, Ipv6Addr)>,
-}
-```
-
-**Key operations**:
-
-```rust
-impl VpcNetwork {
-    /// Register a VPC for IP allocation
-    fn register_vpc(&self, name: &str, vpc_id: u16, cidr: &str);
-
-    /// Allocate IP for a pod in its VPC. Returns (GuestIPv4, GhostIPv6).
-    async fn allocate_ip(&self, vpc_name: &str, pod_id: &str)
-        -> Result<(String, Ipv6Addr)>;
-
-    /// Release a pod's allocation
-    async fn release_ip(&self, vpc_name: &str, pod_id: &str);
-
-    /// Resolve Ghost IPv6 from pod_id
-    async fn get_ghost_ipv6(&self, pod_id: &str) -> Option<Ipv6Addr>;
-}
-```
-
-### Service Proxy Changes
-
-The Pingora-based Service Proxy becomes VPC-aware:
+The Agent's Service Proxy and DNS remain in the Agent process but query `k3rs-vpc` for VPC-scoped routing.
 
 #### VPC-Scoped Routing Table
 
 ```
 Before: "ClusterIP:port" → ["podIP:targetPort", ...]
-After:  "(VpcID, ClusterIP:port)" → ["podGhostIPv6:targetPort", ...]
+After:  Agent queries k3rs-vpc: GetRoutes(vpc_id) → VPC-scoped backends
 ```
 
-Services are scoped to their VPC. A Service in `frontend-vpc` only routes to Pods in `frontend-vpc`.
-
-**Cross-VPC Services**: If a Service needs to be reachable from another VPC, the VPCs must be peered and the Service explicitly exposed cross-VPC (future enhancement).
+The Service Proxy calls `k3rs-vpc` via Unix socket to get the correct backend list for a given VPC. Services are scoped to their VPC — a Service in `frontend-vpc` only routes to Pods in `frontend-vpc`.
 
 #### Service Type Changes
 
@@ -1734,7 +2069,7 @@ struct Service {
 }
 ```
 
-### DNS Changes
+#### DNS Changes
 
 DNS resolution becomes VPC-scoped:
 
@@ -1744,16 +2079,17 @@ DNS resolution becomes VPC-scoped:
 
 resolves to the Service's ClusterIP **only if the querying Pod is in the same VPC** as the Service.
 
-**Implementation**: The embedded DNS server checks the source Pod's VPC membership before resolving. Pods can only discover Services within their own VPC (or peered VPCs).
+**Implementation**: The DNS server queries `k3rs-vpc` via Unix socket to determine the source Pod's VPC, then filters resolution accordingly.
 
 ### Firecracker VM Integration
 
 VMs already get isolated TAP networks (`172.16.x.0/30`). With Ghost IPv6:
 
 1. **TAP setup unchanged** — the VM still sees its GuestIPv4 on the TAP interface
-2. **Ghost IPv6 assigned** — the Agent constructs the Ghost IPv6 from `(ClusterID, VpcID, GuestIPv4)`
-3. **eBPF/iptables enforcement** — outbound packets from the VM are tagged with Ghost IPv6; inbound packets are validated against the VM's expected Ghost IPv6
+2. **Ghost IPv6 assigned by k3rs-vpc** — Agent calls `Allocate` before VM boot; `k3rs-vpc` returns the GuestIPv4 to configure on the TAP
+3. **nftables enforcement by k3rs-vpc** — VPC rules applied to TAP interface traffic
 4. **VPC in PodSpec** — VMs respect the same `spec.vpc` field as container Pods
+5. **TAP ↔ VPC binding** — `k3rs-vpc` tracks which TAP device belongs to which VPC for per-interface enforcement
 
 ### Control Plane Responsibilities
 
@@ -1766,17 +2102,18 @@ VMs already get isolated TAP networks (`172.16.x.0/30`). With Ghost IPv6:
    - **No CIDR overlap** with existing VPCs (atomic check via SlateDB)
 3. Server allocates next available VpcID (1..65535)
 4. Server persists VPC to `/registry/vpcs/<name>`
-5. Server notifies Agents via watch stream
+5. `k3rs-vpc` daemons pick up new VPC on next sync (within 10s)
 
 #### Pod Scheduling with VPC
 
 1. Pod created with `spec.vpc: "my-vpc"`
 2. API Server validates VPC exists and is Active
 3. Scheduler places Pod on a node (VPC doesn't affect placement — all nodes participate in all VPCs)
-4. Agent receives Pod, resolves VPC → VpcID
-5. Agent allocates GuestIPv4 from VPC's CIDR
-6. Agent constructs Ghost IPv6
-7. Agent configures container networking with GuestIPv4 (pod sees IPv4) and registers Ghost IPv6 in routing tables
+4. Agent receives scheduled Pod
+5. Agent calls `k3rs-vpc` → `Allocate(pod_id, "my-vpc")`
+6. `k3rs-vpc` allocates GuestIPv4, constructs Ghost IPv6, installs nftables rules
+7. Agent configures container with GuestIPv4 (pod sees IPv4 only)
+8. Agent reports `ghost_ipv6` and `vpc_name` to server
 
 #### VPC Deletion Flow
 
@@ -1784,12 +2121,14 @@ VMs already get isolated TAP networks (`172.16.x.0/30`). With Ghost IPv6:
 2. Server marks VPC as `Terminating`
 3. Server blocks new Pod creation in this VPC
 4. Existing Pods continue running (fail-static)
-5. When all Pods are terminated, VPC moves to `Deleted`
-6. **Cooldown period** (300 seconds) before VpcID can be reused (prevents stale packet delivery)
+5. As pods terminate, Agents call `Release` on `k3rs-vpc`
+6. When all allocations are released, `k3rs-vpc` removes VPC nftables chains
+7. Server marks VPC as `Deleted`
+8. **Cooldown period** (300 seconds) before VpcID can be reused
 
 ### Data Plane Enforcement
 
-#### Routing Decision (per-packet)
+#### Routing Decision (per-packet, in nftables/eBPF)
 
 ```rust
 fn route_packet(src_ghost: Ipv6Addr, dst_ipv4: Ipv4Addr) -> Result<Ipv6Addr> {
@@ -1817,57 +2156,112 @@ fn route_packet(src_ghost: Ipv6Addr, dst_ipv4: Ipv4Addr) -> Result<Ipv6Addr> {
 
 #### Spoofing Prevention
 
-- Source GuestIPv4 in outbound packets MUST match the Pod's assigned GuestIPv4
+- `k3rs-vpc` installs per-pod anti-spoofing rules: source IP must match allocated GuestIPv4
 - Ghost IPv6 structure (version, flags, cluster prefix) validated on every packet
 - Pods cannot forge traffic that appears to come from a different VPC
+- TAP interfaces for VMs have MAC + IP pinning
 
 ### Fail-Static Guarantees
 
-VPC networking follows K3rs fail-static principles:
+Three independent failure domains:
 
-| Failure | Impact |
-|---------|--------|
-| Server crash | Existing VPC connectivity continues. No new VPC creation. |
-| Agent crash | Pods keep running. Ghost IPv6 routing tables restored from Agent SlateDB cache. |
-| Server + Agent crash | Pods unaffected. Recovery reconciles VPC state from Server SlateDB. |
+| Failure | Networking Impact | Pod Impact |
+|---------|------------------|------------|
+| **Server crash** | Existing VPCs continue. No new VPC creation. `k3rs-vpc` serves from VpcStore. | Agent serves pods from cache. |
+| **k3rs-vpc crash** | nftables rules persist in kernel. Existing isolation intact. No new allocations until restart. | Pods keep running. Agent retries `k3rs-vpc` connection. |
+| **Agent crash** | `k3rs-vpc` unaffected. VPC enforcement continues. | Pods keep running (not children of Agent). |
+| **k3rs-vpc + Agent crash** | nftables persist. Both recover from own SlateDB. | Pods unaffected. |
+| **All three crash** | nftables persist. Server recovers cluster state. `k3rs-vpc` rebuilds from VpcStore. Agent rebuilds from AgentStore. | Pods unaffected. Full recovery via reconciliation. |
 
-**Agent Recovery**: On restart, the Agent loads VPC allocations from its local SlateDB cache (key: `/agent/vpc-allocations`). Ghost IPv6 → GuestIPv4 mappings are reconstructed, and the Service Proxy / DNS are rebuilt with VPC awareness.
+**k3rs-vpc Recovery**:
+
+1. Open VpcStore → all allocations, VPCs, peerings loaded
+2. Rebuild nftables from allocations (instant, <100ms)
+3. Resume Unix socket listener → Agent reconnects
+4. Sync with server → apply any changes that happened during downtime
+
+### Project Structure (VPC additions)
+
+```
+cmd/
+├── k3rs-vpc/               # NEW: Standalone VPC daemon binary
+│   └── src/
+│       ├── main.rs          # Startup, signal handling, systemd notify
+│       ├── store.rs         # VpcStore (own SlateDB)
+│       ├── sync.rs          # VPC Sync Loop (pull from server)
+│       ├── allocator.rs     # Ghost IPv6 allocator + per-VPC pools
+│       ├── socket.rs        # Unix socket API (NDJSON listener)
+│       ├── nftables.rs      # nftables rule management
+│       └── recovery.rs      # Crash recovery + reconciliation
+pkg/
+├── vpc/                     # NEW: Shared VPC library crate
+│   └── src/
+│       ├── ghost_ipv6.rs    # Construct / parse / validate Ghost IPv6
+│       ├── types.rs         # VpcRequest, VpcResponse, Allocation
+│       ├── client.rs        # Unix socket client (used by Agent)
+│       └── constants.rs     # Platform prefix, version, reserved VpcIDs
+├── types/src/
+│   ├── vpc.rs               # NEW: Vpc, VpcPeering, VpcStatus types
+│   └── pod.rs               # MODIFIED: add vpc, ghost_ipv6, vpc_name fields
+```
 
 ### Implementation Phases
 
 #### Phase 1: VPC Resource & Type System
-- [ ] Add `Vpc` type to `pkg/types/`
-- [ ] Add `vpc` field to `PodSpec` and `DeploymentSpec`
+- [ ] Add `Vpc`, `VpcPeering` types to `pkg/types/`
+- [ ] Add `vpc` field to `PodSpec`
 - [ ] Add `ghost_ipv6`, `vpc_name` fields to `Pod`
-- [ ] Add VPC CRUD API endpoints to `k3rs-server`
+- [ ] Add VPC + Peering CRUD API endpoints to `k3rs-server`
+- [ ] Add VpcController to server (VpcID allocation, CIDR validation)
 - [ ] Create `default` VPC on cluster init
-- [ ] SlateDB key prefix: `/registry/vpcs/<name>`
+- [ ] SlateDB keys: `/registry/vpcs/<name>`, `/registry/vpc-peerings/<name>`
 
-#### Phase 2: Ghost IPv6 Addressing
-- [ ] Implement `ghost_ipv6` module in `pkg/network/` with construct/parse/validate functions
-- [ ] Add Ghost IPv6 constants to `pkg/constants/` (platform prefix, version)
-- [ ] Add ClusterID generation and persistence at server init
-- [ ] Unit tests with test vectors (match Sync7 RFC-001 format adapted for ClusterID)
+#### Phase 2: Ghost IPv6 Core Library (`pkg/vpc/`)
+- [ ] New crate: `pkg/vpc/` — shared between `k3rs-vpc` and types
+- [ ] Ghost IPv6 construct / parse / validate functions
+- [ ] Ghost IPv6 constants (platform prefix, version)
+- [ ] ClusterID generation and persistence at server init
+- [ ] Unit tests with test vectors (Sync7 RFC-001 compatible)
 
-#### Phase 3: VPC-Aware CNI
-- [ ] Replace `PodNetwork` with `VpcNetwork` (per-VPC IP allocator)
-- [ ] Agent resolves VPC → VpcID on pod creation
-- [ ] Allocate `(GuestIPv4, GhostIPv6)` pairs per pod
-- [ ] Persist VPC allocations in Agent SlateDB cache
+#### Phase 3: k3rs-vpc Daemon Skeleton (`cmd/k3rs-vpc/`)
+- [ ] New binary: `cmd/k3rs-vpc/`
+- [ ] VpcStore (own SlateDB instance)
+- [ ] Unix socket listener with NDJSON protocol
+- [ ] VPC Sync Loop (pull VPCs from server via HTTP)
+- [ ] `Ping` / `ListVpcs` commands working
+- [ ] Systemd unit file
 
-#### Phase 4: VPC-Scoped Service Proxy & DNS
-- [ ] Service Proxy routing table keyed by `(VpcID, ClusterIP:port)`
-- [ ] DNS resolver checks source Pod's VPC before resolving
-- [ ] Services inherit VPC from their namespace or explicit `vpc` field
+#### Phase 4: Ghost IPv6 Allocator
+- [ ] Per-VPC IP pool management in `k3rs-vpc`
+- [ ] `Allocate` / `Release` / `Query` commands
+- [ ] Idempotent allocation (same pod_id → same IP)
+- [ ] Persistence to VpcStore
+- [ ] Recovery: rebuild pools from VpcStore on restart
 
-#### Phase 5: Isolation Enforcement
-- [ ] Service Proxy drops cross-VPC traffic (no peering)
-- [ ] Firecracker VM: validate Ghost IPv6 on TAP packets
-- [ ] OCI containers: iptables/nftables rules per VPC
-- [ ] NetworkPolicy enforcement scoped within VPC
+#### Phase 5: Agent Integration
+- [ ] VPC client in Agent (Unix socket connection to `k3rs-vpc`)
+- [ ] Retry with backoff if `k3rs-vpc` not ready
+- [ ] Pod Sync Loop: call `Allocate` before container creation
+- [ ] Pod Sync Loop: call `Release` on pod termination
+- [ ] Report `ghost_ipv6`, `vpc_name` to server
 
-#### Phase 6: VPC Peering
-- [ ] `VpcPeering` resource type and API
-- [ ] Bidirectional and InitiatorOnly peering modes
-- [ ] Cross-VPC route injection into Service Proxy
-- [ ] DNS cross-VPC resolution for peered VPCs
+#### Phase 6: nftables Isolation Enforcement
+- [ ] `k3rs-vpc` manages `table inet k3rs_vpc`
+- [ ] Per-VPC ingress/egress chains
+- [ ] Per-pod rules installed on `Allocate`, removed on `Release`
+- [ ] Anti-spoofing rules per pod
+- [ ] nftables snapshot for crash recovery
+- [ ] Firecracker VM: TAP interface rules
+
+#### Phase 7: VPC-Scoped Service Proxy & DNS
+- [ ] Service Proxy queries `k3rs-vpc` for VPC-scoped routing
+- [ ] DNS resolver queries `k3rs-vpc` for source Pod VPC membership
+- [ ] Services inherit VPC from spec or default
+- [ ] `GetRoutes` command in k3rs-vpc
+
+#### Phase 8: VPC Peering
+- [ ] Peering sync in `k3rs-vpc` VPC Sync Loop
+- [ ] Cross-VPC nftables accept rules on peering creation
+- [ ] Bidirectional and InitiatorOnly enforcement
+- [ ] `CheckReachability` command in k3rs-vpc
+- [ ] Cross-VPC DNS resolution for peered VPCs
