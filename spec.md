@@ -1809,29 +1809,27 @@ Equivalent to `stop` + `start`. Preserves config and auto-restart settings.
 
 ##### `k3rsctl pm list`
 
-Shows a pm2-style table of all managed processes.
+Shows a pm2-style table of **all known components** (server, agent, vpc, ui). Components that have not been installed yet are shown with a dimmed `not installed` badge so the user always sees the full picture.
 
 ```
 $ k3rsctl pm list
 
-┌──────────┬────────┬────────┬───────┬─────────┬───────────┬──────────┐
-│ name     │ status │ pid    │ port  │ uptime  │ restarts  │ cpu/mem  │
-├──────────┼────────┼────────┼───────┼─────────┼───────────┼──────────┤
-│ server   │ ● run  │ 12345  │ 6443  │ 2h 15m  │ 0         │ 1% 45MB │
-│ agent    │ ● run  │ 12350  │ 10250 │ 2h 14m  │ 1         │ 3% 62MB │
-│ vpc      │ ● run  │ 12355  │ sock  │ 2h 14m  │ 0         │ 0% 28MB │
-│ ui       │ ○ stop │ —      │ 8080  │ —       │ 0         │ —       │
-└──────────┴────────┴────────┴───────┴─────────┴───────────┴──────────┘
+Name         Status           PID      CPU%     Mem        Uptime     Restarts
+--------------------------------------------------------------------------
+● server     running          12345    1.2      45.0M      2h         0
+● agent      running          12350    3.0      62.4M      2h         1
+○ vpc        stopped          -        -        -          -          0
+○ ui         not installed    -        -        -          -          -
 ```
 
 **Columns:**
-- **name** — component name
-- **status** — `● run` (green), `○ stop` (gray), `✕ crash` (red), `⟳ install` (yellow)
-- **pid** — OS process ID
-- **port** — primary listen port (or `sock` for Unix socket)
-- **uptime** — time since last start
-- **restarts** — restart count since registration
-- **cpu/mem** — current CPU% and RSS memory (via `/proc/<pid>/stat`)
+- **Name** — component name
+- **Status** — `● running` (green), `○ stopped` (gray), `✕ crashed` (red), `⟳ installing` (yellow), `○ not installed` (gray, dimmed)
+- **PID** — OS process ID (`-` if not running)
+- **CPU%** — current CPU usage via `sysinfo` crate
+- **Mem** — RSS memory (K/M/G) via `sysinfo` crate
+- **Uptime** — time since last start (s/m/h/d)
+- **Restarts** — restart count since registration
 
 ##### `k3rsctl pm logs <component>`
 
@@ -2846,8 +2844,8 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] `restart_component(name)`: `stop` + `start` preserving config and auto-restart settings
 
 #### Phase 4: List & Status
-- [x] `pm/list.rs` — `pm_list()`: read `registry.json`, format pm2-style table (name, status, pid, port, uptime, restarts, cpu/mem)
-- [x] Status indicators: `● run` (green), `○ stop` (gray), `✕ crash` (red), `⟳ install` (yellow)
+- [x] `pm/list.rs` — `pm_list()`: always show all known components in pm2-style table; uninstalled ones display dimmed `not installed` badge
+- [x] Status indicators: `● running` (green), `○ stopped` (gray), `✕ crashed` (red), `⟳ installing` (yellow), `○ not installed` (gray dimmed)
 - [x] CPU/memory stats via `/proc/<pid>/stat` (Linux) or `sysinfo` crate
 - [ ] `pm/status.rs` — `pm_status()`: detailed per-component output (binary, config, port, uptime, data dir)
 - [ ] Health checks: server → `GET /api/v1/cluster/info`, agent → server connectivity, vpc → socket Ping/Pong

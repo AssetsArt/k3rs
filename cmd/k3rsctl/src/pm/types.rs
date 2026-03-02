@@ -48,10 +48,18 @@ impl ComponentName {
         }
     }
 
+    /// All concrete components (excluding `All`).
+    pub const ALL_COMPONENTS: &[ComponentName] = &[
+        ComponentName::Server,
+        ComponentName::Agent,
+        ComponentName::Vpc,
+        ComponentName::Ui,
+    ];
+
     /// Expand `All` into the individual components.
     pub fn resolve(&self) -> Vec<ComponentName> {
         match self {
-            Self::All => vec![Self::Server, Self::Agent, Self::Vpc, Self::Ui],
+            Self::All => Self::ALL_COMPONENTS.to_vec(),
             other => vec![other.clone()],
         }
     }
