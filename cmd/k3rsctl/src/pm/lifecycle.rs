@@ -1,0 +1,213 @@
+use std::fs;
+use std::os::unix::process::CommandExt;
+use std::process::Command;
+use std::thread;
+use std::time::Duration;
+
+use anyhow::{bail, Context, Result};
+use chrono::Utc;
+use nix::sys::signal::{self, Signal};
+use nix::unistd::Pid;
+
+use super::registry;
+use super::types::{ComponentName, ProcessStatus};
+
+/// Start one or more components as background daemons.
+pub fn start(component: &ComponentName, foreground: bool) -> Result<()> {
+    registry::ensure_dirs()?;
+
+    for comp in component.resolve() {
+        start_one(&comp, foreground)?;
+    }
+    Ok(())
+}
+
+fn start_one(component: &ComponentName, foreground: bool) -> Result<()> {
+    let key = component.key().to_string();
+    let reg = registry::load()?;
+
+    let entry = reg
+        .processes
+        .get(&key)
+        .with_context(|| format!("{} is not installed. Run `k3rsctl pm install {}` first.", key, key))?;
+
+    // Check if already running
+    if let Some(pid) = entry.pid {
+        if is_alive(pid) {
+            println!("{} is already running (pid {})", key, pid);
+            return Ok(());
+        }
+    }
+
+    let bin_path = &entry.bin_path;
+    if !bin_path.exists() {
+        bail!(
+            "binary not found at {}. Re-install with `k3rsctl pm install {}`.",
+            bin_path.display(),
+            key
+        );
+    }
+
+    let stdout_log = &entry.stdout_log;
+    let stderr_log = &entry.stderr_log;
+
+    println!("Starting {}...", key);
+
+    if foreground {
+        // Run in foreground — blocks until the process exits
+        let status = Command::new(bin_path)
+            .args(&entry.args)
+            .envs(&entry.env)
+            .status()
+            .with_context(|| format!("failed to start {}", key))?;
+
+        println!("{} exited with status {:?}", key, status.code());
+        return Ok(());
+    }
+
+    // Daemonized spawn: redirect stdout/stderr to log files, setsid for detach
+    let stdout_file = fs::File::create(stdout_log)
+        .with_context(|| format!("failed to create {}", stdout_log.display()))?;
+    let stderr_file = fs::File::create(stderr_log)
+        .with_context(|| format!("failed to create {}", stderr_log.display()))?;
+
+    let child = unsafe {
+        Command::new(bin_path)
+            .args(&entry.args)
+            .envs(&entry.env)
+            .stdout(stdout_file)
+            .stderr(stderr_file)
+            .pre_exec(|| {
+                // Create a new session so the child is not killed when the terminal closes
+                nix::unistd::setsid().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                Ok(())
+            })
+            .spawn()
+            .with_context(|| format!("failed to spawn {}", key))?
+    };
+
+    let pid = child.id();
+
+    // Write PID file
+    let pid_path = registry::pids_dir().join(format!("{}.pid", key));
+    fs::write(&pid_path, pid.to_string())
+        .with_context(|| format!("failed to write PID file {}", pid_path.display()))?;
+
+    // Update registry
+    registry::update(|reg| {
+        if let Some(entry) = reg.processes.get_mut(&key) {
+            entry.pid = Some(pid);
+            entry.status = ProcessStatus::Running;
+            entry.started_at = Some(Utc::now());
+        }
+    })?;
+
+    // Wait briefly and verify the process is still alive
+    thread::sleep(Duration::from_secs(2));
+    if is_alive(pid) {
+        println!("  {} started (pid {})", key, pid);
+    } else {
+        eprintln!(
+            "  Warning: {} (pid {}) exited within 2s — check logs at {}",
+            key,
+            pid,
+            stderr_log.display()
+        );
+        registry::update(|reg| {
+            if let Some(entry) = reg.processes.get_mut(&key) {
+                entry.status = ProcessStatus::Crashed;
+                entry.pid = None;
+            }
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Stop one or more components.
+pub fn stop(component: &ComponentName, force: bool, timeout_secs: u64) -> Result<()> {
+    for comp in component.resolve() {
+        stop_one(&comp, force, timeout_secs)?;
+    }
+    Ok(())
+}
+
+fn stop_one(component: &ComponentName, force: bool, timeout_secs: u64) -> Result<()> {
+    let key = component.key().to_string();
+    let reg = registry::load()?;
+
+    let entry = reg
+        .processes
+        .get(&key)
+        .with_context(|| format!("{} is not registered", key))?;
+
+    let pid = match entry.pid {
+        Some(p) if is_alive(p) => p,
+        _ => {
+            println!("{} is not running", key);
+            // Still clean up state if needed
+            registry::update(|reg| {
+                if let Some(e) = reg.processes.get_mut(&key) {
+                    e.status = ProcessStatus::Stopped;
+                    e.pid = None;
+                }
+            })?;
+            return Ok(());
+        }
+    };
+
+    println!("Stopping {} (pid {})...", key, pid);
+    let nix_pid = Pid::from_raw(pid as i32);
+
+    if force {
+        signal::kill(nix_pid, Signal::SIGKILL).ok();
+    } else {
+        // Graceful: SIGTERM first
+        signal::kill(nix_pid, Signal::SIGTERM).ok();
+
+        let deadline = Duration::from_secs(timeout_secs);
+        let poll_interval = Duration::from_millis(200);
+        let start = std::time::Instant::now();
+
+        while start.elapsed() < deadline {
+            if !is_alive(pid) {
+                break;
+            }
+            thread::sleep(poll_interval);
+        }
+
+        // Escalate to SIGKILL if still alive
+        if is_alive(pid) {
+            eprintln!("  {} did not stop within {}s, sending SIGKILL", key, timeout_secs);
+            signal::kill(nix_pid, Signal::SIGKILL).ok();
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    // Remove PID file
+    let pid_path = registry::pids_dir().join(format!("{}.pid", key));
+    let _ = fs::remove_file(&pid_path);
+
+    // Update registry
+    registry::update(|reg| {
+        if let Some(e) = reg.processes.get_mut(&key) {
+            e.status = ProcessStatus::Stopped;
+            e.pid = None;
+            e.started_at = None;
+        }
+    })?;
+
+    println!("  {} stopped", key);
+    Ok(())
+}
+
+/// Restart: stop then start.
+pub fn restart(component: &ComponentName, force: bool, timeout_secs: u64) -> Result<()> {
+    stop(component, force, timeout_secs)?;
+    start(component, false)
+}
+
+/// Check if a process with the given PID is alive using signal 0.
+pub fn is_alive(pid: u32) -> bool {
+    signal::kill(Pid::from_raw(pid as i32), None).is_ok()
+}

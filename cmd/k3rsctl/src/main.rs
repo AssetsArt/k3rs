@@ -1,3 +1,5 @@
+mod pm;
+
 use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use pkg_types::configmap::ConfigMap;
@@ -105,6 +107,11 @@ enum Commands {
         #[command(subcommand)]
         action: BackupAction,
     },
+    /// Local process manager (pm2-style)
+    Pm {
+        #[command(subcommand)]
+        action: pm::PmAction,
+    },
     /// Restore cluster from a backup file
     Restore {
         /// Path to the `.k3rs-backup.json.gz` backup file
@@ -181,6 +188,11 @@ enum BackupAction {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+
+    // Handle PM commands before building HTTP client (PM is local-only)
+    if let Commands::Pm { action } = &cli.command {
+        return pm::handle(action).await;
+    }
 
     let mut headers = reqwest::header::HeaderMap::new();
     let auth_value = format!("Bearer {}", cli.token);
@@ -1177,6 +1189,7 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
+        Commands::Pm { .. } => unreachable!("handled above"),
     }
 
     Ok(())
