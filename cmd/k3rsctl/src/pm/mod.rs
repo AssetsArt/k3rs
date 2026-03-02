@@ -4,6 +4,7 @@ pub mod install;
 pub mod lifecycle;
 pub mod list;
 pub mod logs;
+pub mod startup;
 
 use std::path::PathBuf;
 
@@ -57,6 +58,29 @@ pub enum PmAction {
     },
     /// List all managed components with status
     List,
+    /// Remove a component from PM management
+    Delete {
+        /// Component to delete
+        component: ComponentName,
+        /// Don't delete data directory
+        #[arg(long)]
+        keep_data: bool,
+        /// Don't delete binary
+        #[arg(long)]
+        keep_binary: bool,
+        /// Don't delete logs
+        #[arg(long)]
+        keep_logs: bool,
+    },
+    /// Generate systemd unit files for all registered components
+    Startup {
+        /// Generate user-level units (~/.config/systemd/user/)
+        #[arg(long)]
+        user: bool,
+        /// Run systemctl enable after generation
+        #[arg(long)]
+        enable: bool,
+    },
     /// Tail or stream component logs
     Logs {
         /// Component to view logs for
@@ -96,6 +120,13 @@ pub async fn handle(action: &PmAction) -> Result<()> {
             timeout,
         } => lifecycle::restart(component, *force, *timeout),
         PmAction::List => list::list(),
+        PmAction::Delete {
+            component,
+            keep_data,
+            keep_binary,
+            keep_logs,
+        } => lifecycle::delete(component, *keep_data, *keep_binary, *keep_logs),
+        PmAction::Startup { user, enable } => startup::startup(*user, *enable),
         PmAction::Logs {
             component,
             follow,

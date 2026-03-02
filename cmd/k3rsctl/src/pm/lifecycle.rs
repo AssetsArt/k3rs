@@ -207,6 +207,80 @@ pub fn restart(component: &ComponentName, force: bool, timeout_secs: u64) -> Res
     start(component, false)
 }
 
+/// Delete one or more components: stop if running, remove from registry, cleanup files.
+pub fn delete(
+    component: &ComponentName,
+    keep_data: bool,
+    keep_binary: bool,
+    keep_logs: bool,
+) -> Result<()> {
+    for comp in component.resolve() {
+        delete_one(&comp, keep_data, keep_binary, keep_logs)?;
+    }
+    Ok(())
+}
+
+fn delete_one(
+    component: &ComponentName,
+    keep_data: bool,
+    keep_binary: bool,
+    keep_logs: bool,
+) -> Result<()> {
+    let key = component.key().to_string();
+    let reg = registry::load()?;
+
+    let entry = match reg.processes.get(&key) {
+        Some(e) => e.clone(),
+        None => {
+            println!("{} is not registered, nothing to delete", key);
+            return Ok(());
+        }
+    };
+
+    // Stop if running
+    if entry.pid.is_some_and(|p| is_alive(p)) {
+        stop_one(component, false, 10)?;
+    }
+
+    // Remove PID file
+    let pid_path = registry::pids_dir().join(format!("{}.pid", key));
+    let _ = fs::remove_file(&pid_path);
+
+    // Remove config
+    if let Some(config_path) = &entry.config_path {
+        let _ = fs::remove_file(config_path);
+    }
+
+    // Conditional cleanup
+    if !keep_binary {
+        let _ = fs::remove_file(&entry.bin_path);
+    }
+
+    if !keep_logs {
+        let _ = fs::remove_file(&entry.stdout_log);
+        let _ = fs::remove_file(&entry.stderr_log);
+    }
+
+    if !keep_data {
+        let data_dir = dirs::home_dir()
+            .expect("could not determine home directory")
+            .join(".k3rs")
+            .join("data")
+            .join(&key);
+        if data_dir.exists() {
+            let _ = fs::remove_dir_all(&data_dir);
+        }
+    }
+
+    // Remove from registry
+    registry::update(|reg| {
+        reg.processes.remove(&key);
+    })?;
+
+    println!("Deleted {}", key);
+    Ok(())
+}
+
 /// Check if a process with the given PID is alive using signal 0.
 pub fn is_alive(pid: u32) -> bool {
     signal::kill(Pid::from_raw(pid as i32), None).is_ok()

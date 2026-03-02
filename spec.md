@@ -2857,12 +2857,12 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] `--error`: show stderr log only (`<component>-error.log`)
 
 #### Phase 6: Delete & Startup
-- [ ] `pm/lifecycle.rs` — `delete_component(name, opts)`: stop if running → remove from registry → cleanup files
-- [ ] Respect `--keep-data`, `--keep-binary`, `--keep-logs` flags
-- [ ] `pm/startup.rs` — `pm_startup(opts)`: generate systemd unit files for all registered components
-- [ ] Template: `[Unit]` + `[Service]` (Type=simple, ExecStart, Restart=on-failure) + `[Install]`
-- [ ] `--user` flag: generate user-level units (`~/.config/systemd/user/`)
-- [ ] `--enable` flag: run `systemctl enable` after generation
+- [x] `pm/lifecycle.rs` — `delete_component(name, opts)`: stop if running → remove from registry → cleanup files
+- [x] Respect `--keep-data`, `--keep-binary`, `--keep-logs` flags
+- [x] `pm/startup.rs` — `pm_startup(opts)`: generate systemd unit files for all registered components
+- [x] Template: `[Unit]` + `[Service]` (Type=simple, ExecStart, Restart=on-failure) + `[Install]`
+- [x] `--user` flag: generate user-level units (`~/.config/systemd/user/`)
+- [x] `--enable` flag: run `systemctl enable` after generation
 
 #### Phase 7: Watchdog
 - [ ] `pm/watchdog.rs` — supervisor sidecar process (`k3rs-pm-watch`) that monitors child PID
