@@ -2152,6 +2152,7 @@ cmd/k3rsctl/src/
 | `GET` | `/api/v1/namespaces/{ns}/pods/{pod_name}` | `resources::get_pod` |
 | `DELETE` | `/api/v1/namespaces/{ns}/pods/{pod_name}` | `resources::delete_pod` |
 | `PUT` | `/api/v1/namespaces/{ns}/pods/{pod_name}/status` | `resources::update_pod_status` |
+| `PUT` | `/api/v1/namespaces/{ns}/pods/{pod_name}/vpc` | `resources::update_pod_vpc` |
 | `GET` | `/api/v1/namespaces/{ns}/pods/{pod_name}/logs` | `resources::pod_logs` |
 | `GET` | `/api/v1/namespaces/{ns}/pods/{pod_name}/exec` | `exec::exec_into_pod` (WebSocket) |
 
@@ -2778,18 +2779,18 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [ ] Systemd unit file
 
 #### Phase 4: Ghost IPv6 Allocator
-- [ ] Per-VPC IP pool management in `k3rs-vpc`
-- [ ] `Allocate` / `Release` / `Query` commands
-- [ ] Idempotent allocation (same pod_id → same IP)
-- [ ] Persistence to VpcStore
-- [ ] Recovery: rebuild pools from VpcStore on restart
+- [x] Per-VPC IP pool management in `k3rs-vpc`
+- [x] `Allocate` / `Release` / `Query` commands
+- [x] Idempotent allocation (same pod_id → same IP)
+- [x] Persistence to VpcStore
+- [x] Recovery: rebuild pools from VpcStore on restart
 
 #### Phase 5: Agent Integration
-- [ ] VPC client in Agent (Unix socket connection to `k3rs-vpc`)
-- [ ] Retry with backoff if `k3rs-vpc` not ready
-- [ ] Pod Sync Loop: call `Allocate` before container creation
-- [ ] Pod Sync Loop: call `Release` on pod termination
-- [ ] Report `ghost_ipv6`, `vpc_name` to server
+- [x] VPC client in Agent (Unix socket connection to `k3rs-vpc`)
+- [x] Retry with backoff if `k3rs-vpc` not ready
+- [x] Pod Sync Loop: call `Allocate` before container creation
+- [x] Pod Sync Loop: call `Release` on pod termination
+- [x] Report `ghost_ipv6`, `vpc_name` to server
 
 #### Phase 6: nftables Isolation Enforcement
 - [ ] `k3rs-vpc` manages `table inet k3rs_vpc`
