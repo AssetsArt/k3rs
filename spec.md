@@ -88,6 +88,7 @@ A command-line interface for cluster management:
 - **Cluster Operations**: `k3rsctl cluster info`, `k3rsctl node list`, `k3rsctl node drain <node>`
 - **Workload Management**: `k3rsctl apply -f <manifest>`, `k3rsctl get pods`, `k3rsctl logs <pod>`
 - **Debugging**: `k3rsctl exec <pod> -- <command>`, `k3rsctl describe <resource>`
+- **Process Manager**: `k3rsctl pm start server`, `k3rsctl pm list`, `k3rsctl pm install agent` — pm2-style local process management for K3rs components (see [Process Manager](#k3rsctl-process-manager-k3rsctl-pm))
 - **Configuration**: `k3rsctl config set-context`, kubeconfig-compatible credential management
 - Communicates with the API Server via gRPC/REST with token-based authentication.
 
@@ -1377,6 +1378,547 @@ k3rs/
 - **CLI**: `clap` (CLI argument parsing)
 - **Crypto**: `rustls` (TLS), `rcgen` (Certificate generation)
 
+---
+
+## k3rsctl Process Manager (`k3rsctl pm`)
+
+A **pm2-style** process manager built into k3rsctl for managing K3rs components on the local machine. Instead of manually running binaries and managing PID files, `k3rsctl pm` handles the full lifecycle: install, start, stop, restart, logs, and monitoring.
+
+### Overview
+
+```
+k3rsctl pm install server          # Download/build k3rs-server binary
+k3rsctl pm install agent           # Download/build k3rs-agent binary
+k3rsctl pm install vpc             # Download/build k3rs-vpc binary
+k3rsctl pm install all             # Install all components
+
+k3rsctl pm start server            # Start k3rs-server as daemon
+k3rsctl pm start agent             # Start k3rs-agent as daemon
+k3rsctl pm start vpc               # Start k3rs-vpc as daemon
+
+k3rsctl pm stop server             # Graceful stop (SIGTERM → SIGKILL after timeout)
+k3rsctl pm restart agent           # Stop + Start
+k3rsctl pm list                    # Show all managed processes
+k3rsctl pm logs server             # Tail logs
+k3rsctl pm logs agent --follow     # Stream logs
+
+k3rsctl pm status                  # Detailed status of all components
+k3rsctl pm delete agent            # Stop and remove from PM registry
+k3rsctl pm startup                 # Generate systemd unit files
+```
+
+### Managed Components
+
+| Component | Binary | Default Config | Description |
+|-----------|--------|---------------|-------------|
+| `server` | `k3rs-server` | `~/.k3rs/pm/configs/server.yaml` | Control plane |
+| `agent` | `k3rs-agent` | `~/.k3rs/pm/configs/agent.yaml` | Data plane (pod lifecycle) |
+| `vpc` | `k3rs-vpc` | `~/.k3rs/pm/configs/vpc.yaml` | VPC daemon (Ghost IPv6 networking) |
+| `ui` | `k3rs-ui` | — | Management dashboard (optional) |
+
+### State Directory
+
+```
+~/.k3rs/pm/
+├── registry.json                # Process registry (all managed components)
+├── bins/                        # Installed binaries
+│   ├── k3rs-server
+│   ├── k3rs-agent
+│   ├── k3rs-vpc
+│   └── k3rs-ui
+├── pids/                        # PID files (one per running process)
+│   ├── server.pid
+│   ├── agent.pid
+│   └── vpc.pid
+├── logs/                        # Stdout/stderr logs per component
+│   ├── server.log
+│   ├── server-error.log
+│   ├── agent.log
+│   ├── agent-error.log
+│   ├── vpc.log
+│   └── vpc-error.log
+└── configs/                     # Auto-generated configs
+    ├── server.yaml
+    ├── agent.yaml
+    └── vpc.yaml
+```
+
+### Process Registry (`registry.json`)
+
+```rust
+struct PmRegistry {
+    version: u32,
+    processes: HashMap<String, ProcessEntry>,
+}
+
+struct ProcessEntry {
+    /// Component name: "server", "agent", "vpc", "ui"
+    name: String,
+    /// Path to the binary
+    bin_path: PathBuf,
+    /// CLI arguments passed to the binary
+    args: Vec<String>,
+    /// Environment variables
+    env: HashMap<String, String>,
+    /// Current status
+    status: ProcessStatus,
+    /// PID of the running process (None if stopped)
+    pid: Option<u32>,
+    /// Number of times this process has been restarted
+    restart_count: u32,
+    /// Uptime since last start
+    started_at: Option<DateTime<Utc>>,
+    /// Auto-restart on crash
+    auto_restart: bool,
+    /// Max restart attempts before giving up (0 = unlimited)
+    max_restarts: u32,
+    /// Config file path
+    config_path: Option<PathBuf>,
+    /// Log file paths
+    stdout_log: PathBuf,
+    stderr_log: PathBuf,
+}
+
+enum ProcessStatus {
+    Running,
+    Stopped,
+    Crashed,      // Exited unexpectedly
+    Installing,   // Binary being downloaded/built
+    Errored,      // Failed to start
+}
+```
+
+### Command Reference
+
+#### `k3rsctl pm install <component>`
+
+Downloads or builds the component binary and places it in `~/.k3rs/pm/bins/`.
+
+```
+k3rsctl pm install server
+k3rsctl pm install agent
+k3rsctl pm install vpc
+k3rsctl pm install all
+
+Options:
+  --version <VER>     Specific version (default: latest)
+  --from-source       Build from local workspace instead of downloading
+  --bin-path <PATH>   Use an existing binary instead of downloading
+```
+
+**Install sources (priority order):**
+1. `--bin-path` — use existing binary directly
+2. `--from-source` — `cargo build --release --bin k3rs-<component>`
+3. Default — download pre-built binary from GitHub Releases
+
+**Install flow:**
+1. Determine binary source
+2. Download/build binary → `~/.k3rs/pm/bins/k3rs-<component>`
+3. Verify binary (`--version` flag check)
+4. Generate default config → `~/.k3rs/pm/configs/<component>.yaml`
+5. Register in `registry.json` with status `Stopped`
+
+#### `k3rsctl pm start <component>`
+
+Starts a component as a background daemon process.
+
+```
+k3rsctl pm start server
+k3rsctl pm start agent
+k3rsctl pm start vpc
+k3rsctl pm start all
+
+Options:
+  --config <PATH>     Override config file
+  --port <PORT>       Override default port (server only)
+  --server <URL>      Server URL (agent/vpc only)
+  --token <TOKEN>     Join token (agent/vpc only)
+  --node-name <NAME>  Node name (agent only)
+  --data-dir <PATH>   Data directory override
+  --foreground        Run in foreground (don't daemonize)
+  --auto-restart      Auto-restart on crash (default: true)
+```
+
+**Start flow:**
+1. Check binary exists in `~/.k3rs/pm/bins/`
+2. Check not already running (PID file + process alive check)
+3. Build command line from config + overrides
+4. Spawn process with `setsid()` (detached from k3rsctl)
+5. Redirect stdout → `~/.k3rs/pm/logs/<component>.log`
+6. Redirect stderr → `~/.k3rs/pm/logs/<component>-error.log`
+7. Write PID to `~/.k3rs/pm/pids/<component>.pid`
+8. Update `registry.json` with status `Running`
+9. Wait 2s, verify process is still alive
+10. Print status table
+
+**Default arguments per component:**
+
+```yaml
+# server defaults
+server:
+  port: 6443
+  data-dir: ~/.k3rs/data/server
+  token: <auto-generated on first start>
+  node-name: <hostname>
+
+# agent defaults
+agent:
+  server: http://127.0.0.1:6443
+  token: <from server config>
+  node-name: node-1
+  data-dir: ~/.k3rs/data/agent
+  service-proxy-port: 10256
+  dns-port: 5353
+
+# vpc defaults
+vpc:
+  server-url: http://127.0.0.1:6443
+  token: <from server config>
+  data-dir: ~/.k3rs/data/vpc
+  socket: /run/k3rs-vpc.sock
+```
+
+#### `k3rsctl pm stop <component>`
+
+Gracefully stops a running component.
+
+```
+k3rsctl pm stop server
+k3rsctl pm stop agent
+k3rsctl pm stop vpc
+k3rsctl pm stop all
+
+Options:
+  --force           Send SIGKILL immediately (skip graceful shutdown)
+  --timeout <SECS>  Graceful shutdown timeout (default: 10s)
+```
+
+**Stop flow:**
+1. Read PID from `~/.k3rs/pm/pids/<component>.pid`
+2. Verify process is alive
+3. Send `SIGTERM`
+4. Wait up to `--timeout` seconds for process to exit
+5. If still alive after timeout → send `SIGKILL`
+6. Remove PID file
+7. Update `registry.json` with status `Stopped`
+
+#### `k3rsctl pm restart <component>`
+
+```
+k3rsctl pm restart server
+k3rsctl pm restart agent
+k3rsctl pm restart vpc
+k3rsctl pm restart all
+```
+
+Equivalent to `stop` + `start`. Preserves config and auto-restart settings.
+
+#### `k3rsctl pm list`
+
+Shows a pm2-style table of all managed processes.
+
+```
+$ k3rsctl pm list
+
+┌──────────┬────────┬────────┬───────┬─────────┬───────────┬──────────┐
+│ name     │ status │ pid    │ port  │ uptime  │ restarts  │ cpu/mem  │
+├──────────┼────────┼────────┼───────┼─────────┼───────────┼──────────┤
+│ server   │ ● run  │ 12345  │ 6443  │ 2h 15m  │ 0         │ 1% 45MB │
+│ agent    │ ● run  │ 12350  │ 10250 │ 2h 14m  │ 1         │ 3% 62MB │
+│ vpc      │ ● run  │ 12355  │ sock  │ 2h 14m  │ 0         │ 0% 28MB │
+│ ui       │ ○ stop │ —      │ 8080  │ —       │ 0         │ —       │
+└──────────┴────────┴────────┴───────┴─────────┴───────────┴──────────┘
+```
+
+**Columns:**
+- **name** — component name
+- **status** — `● run` (green), `○ stop` (gray), `✕ crash` (red), `⟳ install` (yellow)
+- **pid** — OS process ID
+- **port** — primary listen port (or `sock` for Unix socket)
+- **uptime** — time since last start
+- **restarts** — restart count since registration
+- **cpu/mem** — current CPU% and RSS memory (via `/proc/<pid>/stat`)
+
+#### `k3rsctl pm logs <component>`
+
+Tail or stream component logs.
+
+```
+k3rsctl pm logs server
+k3rsctl pm logs agent --follow
+k3rsctl pm logs vpc --lines 100
+k3rsctl pm logs agent --error        # stderr only
+
+Options:
+  --follow (-f)      Stream logs continuously
+  --lines <N>        Number of lines to show (default: 50)
+  --error            Show stderr log only
+```
+
+#### `k3rsctl pm status`
+
+Detailed status of all components (health checks, connectivity).
+
+```
+$ k3rsctl pm status
+
+server (PID 12345) — Running
+  Binary:    ~/.k3rs/pm/bins/k3rs-server
+  Config:    ~/.k3rs/pm/configs/server.yaml
+  Port:      6443
+  Uptime:    2h 15m 30s
+  Restarts:  0
+  Data Dir:  ~/.k3rs/data/server
+  Health:    ✓ API responding (GET /api/v1/cluster/info → 200)
+
+agent (PID 12350) — Running
+  Binary:    ~/.k3rs/pm/bins/k3rs-agent
+  Config:    ~/.k3rs/pm/configs/agent.yaml
+  Port:      10250
+  Uptime:    2h 14m 28s
+  Restarts:  1 (last crash: OOM at 14:32)
+  Data Dir:  ~/.k3rs/data/agent
+  Health:    ✓ Connected to server
+  Server:    http://127.0.0.1:6443
+
+vpc (PID 12355) — Running
+  Binary:    ~/.k3rs/pm/bins/k3rs-vpc
+  Socket:    /run/k3rs-vpc.sock
+  Uptime:    2h 14m 28s
+  Restarts:  0
+  Data Dir:  ~/.k3rs/data/vpc
+  Health:    ✓ Socket responding (Ping → Pong)
+  VPCs:      3 active (default, production, staging)
+```
+
+#### `k3rsctl pm delete <component>`
+
+Remove a component from PM management.
+
+```
+k3rsctl pm delete agent
+k3rsctl pm delete all
+
+Options:
+  --keep-data       Don't delete data directory
+  --keep-binary     Don't delete binary
+  --keep-logs       Don't delete logs
+```
+
+**Delete flow:**
+1. Stop process if running
+2. Remove from `registry.json`
+3. Remove PID file, log files, config (unless `--keep-*`)
+4. Optionally remove binary and data directory
+
+#### `k3rsctl pm startup`
+
+Generate systemd unit files for all registered components.
+
+```
+k3rsctl pm startup
+k3rsctl pm startup --enable     # Also run systemctl enable
+
+Options:
+  --output <DIR>    Output directory (default: /etc/systemd/system/)
+  --enable          Enable services to start on boot
+  --user            Generate user-level units (~/.config/systemd/user/)
+```
+
+**Generated unit file example:**
+
+```ini
+# /etc/systemd/system/k3rs-server.service
+[Unit]
+Description=K3rs Control Plane Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/user/.k3rs/pm/bins/k3rs-server \
+  --config /home/user/.k3rs/pm/configs/server.yaml \
+  --port 6443 \
+  --data-dir /home/user/.k3rs/data/server
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/user/.k3rs/pm/logs/server.log
+StandardError=append:/home/user/.k3rs/pm/logs/server-error.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Auto-Restart (Watchdog)
+
+When `auto_restart: true` (default), `k3rsctl pm start` spawns a lightweight watchdog thread that monitors the child process.
+
+```rust
+// Watchdog logic (simplified)
+fn watchdog(entry: &ProcessEntry) {
+    loop {
+        // Check if process is alive via kill(pid, 0)
+        if !is_alive(entry.pid) {
+            if entry.restart_count >= entry.max_restarts && entry.max_restarts > 0 {
+                update_status(entry.name, ProcessStatus::Crashed);
+                break;
+            }
+            // Restart with backoff: 1s, 2s, 4s, 8s, max 30s
+            let delay = min(30, 2u64.pow(entry.restart_count));
+            sleep(Duration::from_secs(delay));
+            respawn(entry);
+            entry.restart_count += 1;
+        }
+        sleep(Duration::from_secs(2)); // Poll interval
+    }
+}
+```
+
+**Watchdog behavior:**
+- Polls every 2 seconds
+- On crash: exponential backoff restart (1s → 2s → 4s → ... → 30s cap)
+- Respects `max_restarts` (default: 10, 0 = unlimited)
+- Updates `registry.json` on each restart
+- Status becomes `Crashed` when max restarts exceeded
+
+**Watchdog process**: The watchdog itself is a background thread in the `k3rsctl pm start` process. But since `k3rsctl` exits after start, the watchdog is implemented as a **small supervisor sidecar** that stays running:
+
+```
+k3rsctl pm start server
+  └─ spawns: k3rs-pm-watch (supervisor, stays resident)
+       └─ spawns: k3rs-server (actual process)
+       └─ monitors PID, restarts on crash
+       └─ PID file: ~/.k3rs/pm/pids/server-watch.pid
+```
+
+Alternatively, on systems with systemd, `k3rsctl pm startup` delegates auto-restart to systemd's `Restart=on-failure` — no watchdog needed.
+
+### Quick Start Flow
+
+```bash
+# 1. Install all components (from local build)
+k3rsctl pm install all --from-source
+
+# 2. Start the cluster
+k3rsctl pm start server
+k3rsctl pm start agent
+k3rsctl pm start vpc
+
+# 3. Verify
+k3rsctl pm list
+
+# 4. Use the cluster normally
+k3rsctl get pods
+k3rsctl apply -f my-deployment.yaml
+
+# 5. Stop everything
+k3rsctl pm stop all
+```
+
+### Implementation
+
+#### CLI Structure (Clap Derive)
+
+```rust
+#[derive(Subcommand)]
+enum Commands {
+    // ... existing commands ...
+    /// Process manager for K3rs components
+    Pm {
+        #[command(subcommand)]
+        action: PmAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum PmAction {
+    /// Install a component binary
+    Install {
+        component: ComponentName,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long)]
+        from_source: bool,
+        #[arg(long)]
+        bin_path: Option<PathBuf>,
+    },
+    /// Start a component as daemon
+    Start {
+        component: ComponentName,
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        foreground: bool,
+        #[arg(long, default_value_t = true)]
+        auto_restart: bool,
+    },
+    /// Stop a running component
+    Stop {
+        component: ComponentName,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, default_value_t = 10)]
+        timeout: u64,
+    },
+    /// Restart a component
+    Restart {
+        component: ComponentName,
+    },
+    /// List all managed processes
+    List,
+    /// View component logs
+    Logs {
+        component: ComponentName,
+        #[arg(long, short)]
+        follow: bool,
+        #[arg(long, default_value_t = 50)]
+        lines: usize,
+        #[arg(long)]
+        error: bool,
+    },
+    /// Detailed status of all components
+    Status,
+    /// Remove a component from PM
+    Delete {
+        component: ComponentName,
+        #[arg(long)]
+        keep_data: bool,
+    },
+    /// Generate systemd unit files
+    Startup {
+        #[arg(long)]
+        enable: bool,
+        #[arg(long)]
+        user: bool,
+    },
+}
+
+#[derive(Clone, ValueEnum)]
+enum ComponentName {
+    Server,
+    Agent,
+    Vpc,
+    Ui,
+    All,
+}
+```
+
+#### Module Structure
+
+```
+cmd/k3rsctl/src/
+├── main.rs              # CLI entry point + command routing
+└── pm/                  # NEW: Process manager module
+    ├── mod.rs           # PM command dispatcher
+    ├── registry.rs      # Process registry (registry.json CRUD)
+    ├── install.rs       # Binary download/build
+    ├── lifecycle.rs     # Start/stop/restart (spawn, signal, PID files)
+    ├── watchdog.rs      # Auto-restart supervisor
+    ├── list.rs          # Table formatting (pm list)
+    ├── status.rs        # Health checks (pm status)
+    ├── logs.rs          # Log tailing (pm logs)
+    └── startup.rs       # Systemd unit file generation
+```
 
 ---
 
