@@ -16,6 +16,7 @@ members = [
     "pkg/scheduler",
     "pkg/state",
     "pkg/types",
+    "pkg/vpc",
     "cmd/k3rs-ui",
     "cmd/k3rs-init",
 ]
@@ -37,6 +38,7 @@ default-members = [
     "pkg/scheduler",
     "pkg/state",
     "pkg/types",
+    "pkg/vpc",
     "cmd/k3rs-ui",
 ]
 

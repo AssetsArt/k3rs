@@ -89,6 +89,9 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     // Seed master node
     seed_master_node(&store, &config.node_name).await?;
 
+    // Seed cluster ID (must run before VPC seeding)
+    seed_cluster_id(&store).await?;
+
     // Seed default VPC
     seed_default_vpc(&store).await?;
 
@@ -427,6 +430,18 @@ async fn seed_master_node(store: &StateStore, name: &str) -> anyhow::Result<()> 
         let data = serde_json::to_vec(&node)?;
         store.put(&key, &data).await?;
         info!("Seeded master node");
+    }
+    Ok(())
+}
+
+/// Seed the cluster ID on first startup; no-op if already persisted.
+async fn seed_cluster_id(store: &StateStore) -> anyhow::Result<()> {
+    let key = pkg_vpc::constants::CLUSTER_ID_KEY;
+    if store.get(key).await?.is_none() {
+        let id = pkg_vpc::cluster_id::generate_cluster_id();
+        let data = serde_json::to_vec(&id)?;
+        store.put(key, &data).await?;
+        info!("Seeded cluster ID: {}", id);
     }
     Ok(())
 }

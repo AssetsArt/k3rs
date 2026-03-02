@@ -90,4 +90,6 @@ pub struct ClusterInfo {
     pub version: String,
     pub state_store: String,
     pub node_count: usize,
+    #[serde(default)]
+    pub cluster_id: Option<u32>,
 }

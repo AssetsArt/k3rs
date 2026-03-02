@@ -14,11 +14,20 @@ pub async fn cluster_info(State(state): State<AppState>) -> impl IntoResponse {
         .await
         .unwrap_or_default();
 
+    let cluster_id: Option<u32> = state
+        .store
+        .get(pkg_vpc::constants::CLUSTER_ID_KEY)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+
     let info = ClusterInfo {
         endpoint: format!("http://{}", state.listen_addr),
         version: "v0.1.0+k3rs".to_string(),
         state_store: "SlateDB (local)".to_string(),
         node_count: nodes.len(),
+        cluster_id,
     };
 
     (StatusCode::OK, Json(info)).into_response()
