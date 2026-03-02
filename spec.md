@@ -2807,11 +2807,11 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] `GetRoutes` command in k3rs-vpc
 
 #### Phase 8: VPC Peering
-- [ ] Peering sync in `k3rs-vpc` VPC Sync Loop
-- [ ] Cross-VPC nftables accept rules on peering creation
-- [ ] Bidirectional and InitiatorOnly enforcement
-- [ ] `CheckReachability` command in k3rs-vpc
-- [ ] Cross-VPC DNS resolution for peered VPCs
+- [x] Peering sync in `k3rs-vpc` VPC Sync Loop
+- [x] Cross-VPC nftables accept rules on peering creation
+- [x] Bidirectional and InitiatorOnly enforcement
+- [x] `CheckReachability` command in k3rs-vpc
+- [x] Cross-VPC DNS resolution for peered VPCs
 
 ### 16.7 Process Manager Checklists
 
