@@ -3,17 +3,21 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use crate::allocator::GhostAllocator;
 use crate::store::{VpcDaemonMeta, VpcStore};
 use pkg_types::vpc::{Vpc, VpcPeering};
+use pkg_vpc::constants::PLATFORM_PREFIX;
 
 /// Start the VPC sync loop. Pulls from the server every `interval_secs` seconds.
 pub fn start_sync_loop(
     server_url: String,
     token: String,
     store: Arc<VpcStore>,
+    allocator: Arc<Mutex<GhostAllocator>>,
     interval_secs: u64,
 ) -> JoinHandle<()> {
     let client = reqwest::Client::new();
@@ -84,10 +88,18 @@ pub fn start_sync_loop(
                 warn!("VPC sync: failed to save peerings: {}", e);
             }
 
+            // Sync allocator pools with latest VPC definitions
+            {
+                let mut alloc = allocator.lock().await;
+                alloc.sync_vpcs(&vpcs);
+            }
+
             // Update meta
+            let existing_meta = store.load_meta().await.ok().flatten();
+            let cluster_id = existing_meta.as_ref().and_then(|m| m.cluster_id);
             let meta = VpcDaemonMeta {
-                cluster_id: None,
-                platform_prefix: 0,
+                cluster_id,
+                platform_prefix: PLATFORM_PREFIX,
                 last_synced_at: Utc::now(),
             };
             if let Err(e) = store.save_meta(&meta).await {

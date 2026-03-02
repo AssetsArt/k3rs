@@ -1,3 +1,4 @@
+mod allocator;
 mod protocol;
 mod socket;
 mod store;
@@ -8,7 +9,10 @@ use std::sync::Arc;
 use clap::Parser;
 use pkg_types::config::{VpcConfigFile, load_config_file};
 use store::VpcStore;
+use tokio::sync::Mutex;
 use tracing::info;
+
+use crate::allocator::GhostAllocator;
 
 #[derive(Parser, Debug)]
 #[command(name = "k3rs-vpc", about = "k3rs VPC daemon — manages VPC state per node")]
@@ -85,22 +89,43 @@ async fn main() -> anyhow::Result<()> {
     let store = VpcStore::open(&data_dir).await?;
     let store = Arc::new(store);
 
-    // 4. Load cached VPCs from store
+    // 4. Load cached VPCs and allocations from store
     let cached_vpcs = store.load_vpcs().await?;
     let cached_peerings = store.load_peerings().await?;
+    let stored_allocations = store.load_all_allocations().await?;
     info!(
-        "Loaded {} cached VPCs, {} cached peerings from store",
+        "Loaded {} cached VPCs, {} cached peerings, {} stored allocations from store",
         cached_vpcs.len(),
-        cached_peerings.len()
+        cached_peerings.len(),
+        stored_allocations.len()
     );
 
-    // 5. Start Unix socket listener
-    let socket_handle = socket::start_listener(&socket_path, Arc::clone(&store));
+    // 5. Load meta for cluster_id and platform_prefix
+    let meta = store.load_meta().await?;
+    let platform_prefix = meta
+        .as_ref()
+        .map(|m| m.platform_prefix)
+        .unwrap_or(pkg_vpc::constants::PLATFORM_PREFIX);
+    let cluster_id = meta.as_ref().and_then(|m| m.cluster_id).unwrap_or(0);
 
-    // 6. Start VPC sync loop (every 10s)
-    let sync_handle = sync::start_sync_loop(server_url, token, Arc::clone(&store), 10);
+    // 6. Create GhostAllocator and rebuild pools
+    let mut allocator = GhostAllocator::new(platform_prefix, cluster_id, Arc::clone(&store));
+    allocator.rebuild_pools(&cached_vpcs, &stored_allocations);
+    let allocator = Arc::new(Mutex::new(allocator));
 
-    // 7. Graceful shutdown on Ctrl+C
+    // 7. Start Unix socket listener
+    let socket_handle = socket::start_listener(&socket_path, Arc::clone(&allocator));
+
+    // 8. Start VPC sync loop (every 10s)
+    let sync_handle = sync::start_sync_loop(
+        server_url,
+        token,
+        Arc::clone(&store),
+        Arc::clone(&allocator),
+        10,
+    );
+
+    // 9. Graceful shutdown on Ctrl+C
     info!("k3rs-vpc daemon running. Press Ctrl+C to stop.");
     tokio::signal::ctrl_c().await?;
     info!("Shutting down k3rs-vpc daemon...");
@@ -113,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&socket_path);
 
     // Close the store (flush WAL)
+    drop(allocator);
     Arc::try_unwrap(store)
         .map_err(|_| anyhow::anyhow!("VpcStore still has outstanding references"))?
         .close()

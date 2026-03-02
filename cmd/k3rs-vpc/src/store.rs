@@ -21,6 +21,17 @@ use tracing::info;
 const KEY_META: &[u8] = b"/vpc/meta";
 const PREFIX_DEFINITIONS: &str = "/vpc/definitions/";
 const PREFIX_PEERINGS: &str = "/vpc/peerings/";
+const PREFIX_ALLOCATIONS: &str = "/vpc/allocations/";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredAllocation {
+    pub pod_id: String,
+    pub vpc_name: String,
+    pub guest_ipv4: String,
+    pub ghost_ipv6: String,
+    pub vpc_id: u16,
+    pub allocated_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpcDaemonMeta {
@@ -146,6 +157,44 @@ impl VpcStore {
             peerings.push(peering);
         }
         Ok(peerings)
+    }
+
+    pub async fn save_allocation(&self, alloc: &StoredAllocation) -> anyhow::Result<()> {
+        let key = format!("{}{}/{}", PREFIX_ALLOCATIONS, alloc.vpc_name, alloc.pod_id);
+        self.db
+            .put(key.as_bytes(), serde_json::to_vec(alloc)?)
+            .await
+            .map_err(|e| anyhow::anyhow!("VpcStore save_allocation: {}", e))
+    }
+
+    pub async fn delete_allocation(&self, vpc_name: &str, pod_id: &str) -> anyhow::Result<()> {
+        let key = format!("{}{}/{}", PREFIX_ALLOCATIONS, vpc_name, pod_id);
+        self.db
+            .delete(key.as_bytes())
+            .await
+            .map_err(|e| anyhow::anyhow!("VpcStore delete_allocation: {}", e))
+    }
+
+    pub async fn load_all_allocations(&self) -> anyhow::Result<Vec<StoredAllocation>> {
+        let prefix = PREFIX_ALLOCATIONS.as_bytes();
+        let mut allocs = Vec::new();
+        let mut iter = self
+            .db
+            .scan(prefix..)
+            .await
+            .map_err(|e| anyhow::anyhow!("VpcStore scan allocations: {}", e))?;
+        while let Some(kv) = iter
+            .next()
+            .await
+            .map_err(|e| anyhow::anyhow!("VpcStore scan allocations next: {}", e))?
+        {
+            if !kv.key.starts_with(prefix) {
+                break;
+            }
+            let alloc: StoredAllocation = serde_json::from_slice(&kv.value)?;
+            allocs.push(alloc);
+        }
+        Ok(allocs)
     }
 
     pub async fn close(self) -> anyhow::Result<()> {
