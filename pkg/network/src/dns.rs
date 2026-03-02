@@ -10,8 +10,12 @@ use tracing::{info, warn};
 /// Resolves `<service>.<namespace>.svc.cluster.local` → ClusterIP.
 /// Uses a simple UDP-based DNS responder (no external dependencies).
 pub struct DnsServer {
-    /// FQDN → IP address mapping
+    /// FQDN → IP address mapping (non-VPC fallback)
     records: Arc<RwLock<HashMap<String, String>>>,
+    /// FQDN → (IP, vpc_name) for VPC-scoped records
+    vpc_records: Arc<RwLock<HashMap<String, (String, String)>>>,
+    /// pod_ip → vpc_name (for resolving source IP to VPC membership)
+    vpc_members: Arc<RwLock<HashMap<String, String>>>,
     listen_addr: SocketAddr,
     /// The domain suffix
     domain_suffix: String,
@@ -22,6 +26,8 @@ impl DnsServer {
     pub fn new(listen_addr: SocketAddr) -> Self {
         Self {
             records: Arc::new(RwLock::new(HashMap::new())),
+            vpc_records: Arc::new(RwLock::new(HashMap::new())),
+            vpc_members: Arc::new(RwLock::new(HashMap::new())),
             listen_addr,
             domain_suffix: "svc.cluster.local".to_string(),
         }
@@ -45,6 +51,42 @@ impl DnsServer {
         info!("DNS records updated: {} entries", count);
     }
 
+    /// Update VPC-scoped DNS records from services and a pod IP → VPC mapping.
+    ///
+    /// Builds VPC-tagged records so that DNS queries can be filtered by
+    /// the source pod's VPC membership. Also updates the vpc_members map.
+    pub async fn update_records_vpc(
+        &self,
+        services: &[pkg_types::service::Service],
+        ip_to_vpc: &HashMap<String, String>,
+    ) {
+        let mut new_vpc_records = HashMap::new();
+
+        for svc in services {
+            if let Some(ref cluster_ip) = svc.cluster_ip {
+                let fqdn = format!("{}.{}.{}", svc.name, svc.namespace, self.domain_suffix);
+                let svc_vpc = svc.vpc.as_deref().unwrap_or("default").to_string();
+                new_vpc_records.insert(fqdn, (cluster_ip.clone(), svc_vpc));
+            }
+        }
+
+        let vpc_record_count = new_vpc_records.len();
+        {
+            let mut vr = self.vpc_records.write().await;
+            *vr = new_vpc_records;
+        }
+        {
+            let mut vm = self.vpc_members.write().await;
+            *vm = ip_to_vpc.clone();
+        }
+
+        info!(
+            "DNS VPC records updated: {} entries, {} pod-to-VPC mappings",
+            vpc_record_count,
+            ip_to_vpc.len()
+        );
+    }
+
     /// Load DNS records from a JSON file (for cache-based startup).
     /// Returns the number of records loaded.
     pub async fn load_from_file(&self, path: &str) -> anyhow::Result<usize> {
@@ -62,13 +104,22 @@ impl DnsServer {
 
         let socket = UdpSocket::bind(self.listen_addr).await?;
         let records = self.records.clone();
+        let vpc_records = self.vpc_records.clone();
+        let vpc_members = self.vpc_members.clone();
 
         tokio::spawn(async move {
             let mut buf = [0u8; 512];
             loop {
                 match socket.recv_from(&mut buf).await {
                     Ok((len, src)) => {
-                        if let Some(response) = Self::handle_dns_query(&buf[..len], &records).await
+                        if let Some(response) = Self::handle_dns_query(
+                            &buf[..len],
+                            &records,
+                            &vpc_records,
+                            &vpc_members,
+                            &src,
+                        )
+                        .await
                             && let Err(e) = socket.send_to(&response, src).await
                         {
                             warn!("DNS send error: {}", e);
@@ -87,9 +138,16 @@ impl DnsServer {
 
     /// Parse a minimal DNS query and generate a response.
     /// Supports A-record queries only (enough for service discovery).
+    ///
+    /// VPC-scoped resolution: if the source IP belongs to a VPC, only return
+    /// records for services in the same VPC. Non-VPC sources (host traffic)
+    /// fall back to returning all records (backward compat).
     async fn handle_dns_query(
         query: &[u8],
         records: &Arc<RwLock<HashMap<String, String>>>,
+        vpc_records: &Arc<RwLock<HashMap<String, (String, String)>>>,
+        vpc_members: &Arc<RwLock<HashMap<String, String>>>,
+        src: &SocketAddr,
     ) -> Option<Vec<u8>> {
         // Minimum DNS query is 12 bytes header + at least 1 byte question
         if query.len() < 13 {
@@ -102,9 +160,34 @@ impl DnsServer {
         // Parse the question name from the query
         let name = Self::parse_dns_name(query, 12)?;
 
-        // Look up the name in our records
-        let records_map = records.read().await;
-        let ip = records_map.get(&name)?;
+        // Determine the source pod's VPC (if any)
+        let src_ip = src.ip().to_string();
+        let members = vpc_members.read().await;
+        let src_vpc = members.get(&src_ip).cloned();
+        drop(members);
+
+        // Try VPC-scoped resolution first
+        let ip = if let Some(ref source_vpc) = src_vpc {
+            let vr = vpc_records.read().await;
+            if let Some((ip, svc_vpc)) = vr.get(&name) {
+                if svc_vpc == source_vpc {
+                    Some(ip.clone())
+                } else {
+                    // Source VPC doesn't match service VPC — deny
+                    return None;
+                }
+            } else {
+                // Not in VPC records, fall back to plain records
+                let records_map = records.read().await;
+                records_map.get(&name).cloned()
+            }
+        } else {
+            // Non-VPC source — use plain records (backward compat)
+            let records_map = records.read().await;
+            records_map.get(&name).cloned()
+        };
+
+        let ip = ip?;
 
         // Parse IP into 4 octets
         let octets: Vec<u8> = ip.split('.').filter_map(|o| o.parse().ok()).collect();

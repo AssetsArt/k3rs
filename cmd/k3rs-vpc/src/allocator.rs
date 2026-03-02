@@ -260,6 +260,27 @@ impl GhostAllocator {
         Ok(())
     }
 
+    /// Return all allocations for a given VPC by vpc_id.
+    /// Returns Vec<(pod_id, guest_ipv4, ghost_ipv6)>.
+    pub fn get_routes(&self, vpc_id: u16) -> Vec<(String, String, String)> {
+        for (_vpc_name, pool) in &self.pools {
+            if pool.vpc_id == vpc_id {
+                return pool
+                    .allocations
+                    .iter()
+                    .map(|(pod_id, alloc)| {
+                        (
+                            pod_id.clone(),
+                            alloc.guest_ipv4.to_string(),
+                            alloc.ghost_ipv6.to_string(),
+                        )
+                    })
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
+
     /// Query a pod's allocation across all VPC pools.
     pub fn query(&self, pod_id: &str) -> Option<QueryResult> {
         for (vpc_name, pool) in &self.pools {

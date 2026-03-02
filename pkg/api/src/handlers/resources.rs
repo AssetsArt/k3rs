@@ -328,6 +328,10 @@ pub async fn create_service(
     svc.id = Uuid::new_v4().to_string();
     svc.namespace = ns.clone();
     svc.created_at = Utc::now();
+    // Default VPC to "default" if not specified
+    if svc.vpc.is_none() {
+        svc.vpc = Some("default".to_string());
+    }
     // Assign a cluster IP (simple increment for now)
     if svc.cluster_ip.is_none() {
         svc.cluster_ip = Some(format!(

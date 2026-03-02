@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use pingora::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::RwLock;
@@ -88,12 +88,19 @@ impl ServiceProxy {
     }
 
     /// Update the routing table from Service + Endpoint data.
+    ///
+    /// `vpc_pod_ips` maps VPC name → set of pod IPs belonging to that VPC.
+    /// When non-empty, only endpoint backends whose IP is in the same VPC as
+    /// the service are included. When empty (backward compat), all backends
+    /// are included.
     pub async fn update_routes(
         &self,
         services: &[pkg_types::service::Service],
         endpoints: &[pkg_types::endpoint::Endpoint],
+        vpc_pod_ips: &HashMap<String, HashSet<String>>,
     ) {
         let mut new_routes: HashMap<String, Vec<String>> = HashMap::new();
+        let has_vpc_info = !vpc_pod_ips.is_empty();
 
         for svc in services {
             let cluster_ip = match &svc.cluster_ip {
@@ -101,11 +108,20 @@ impl ServiceProxy {
                 None => continue,
             };
 
+            let svc_vpc = svc.vpc.as_deref().unwrap_or("default");
+
             // Find matching endpoints for this service
             let matching_eps: Vec<&pkg_types::endpoint::Endpoint> = endpoints
                 .iter()
                 .filter(|ep| ep.service_id == svc.id && ep.namespace == svc.namespace)
                 .collect();
+
+            // Get the set of pod IPs in this service's VPC (if VPC info available)
+            let vpc_ips = if has_vpc_info {
+                vpc_pod_ips.get(svc_vpc)
+            } else {
+                None
+            };
 
             for svc_port in &svc.spec.ports {
                 let route_key = format!("{}:{}", cluster_ip, svc_port.port);
@@ -113,7 +129,17 @@ impl ServiceProxy {
 
                 for ep in &matching_eps {
                     for addr in &ep.addresses {
-                        // Use the target_port from the service port spec
+                        // VPC filtering: only include backends in the same VPC
+                        if has_vpc_info {
+                            if let Some(ips) = vpc_ips {
+                                if !ips.contains(&addr.ip) {
+                                    continue;
+                                }
+                            } else {
+                                // Service's VPC has no pods — skip all backends
+                                continue;
+                            }
+                        }
                         backends.push(format!("{}:{}", addr.ip, svc_port.target_port));
                     }
                 }

@@ -34,6 +34,7 @@ mod helpers {
             name: name.to_string(),
             namespace: ns.to_string(),
             cluster_ip: Some(cluster_ip.to_string()),
+            vpc: Some("default".to_string()),
             spec: ServiceSpec {
                 selector: HashMap::new(),
                 ports: vec![ServicePort {

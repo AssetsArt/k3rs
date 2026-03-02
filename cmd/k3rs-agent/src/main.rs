@@ -16,7 +16,7 @@ use pkg_proxy::service_proxy::ServiceProxy;
 use pkg_proxy::tunnel::TunnelProxy;
 use pkg_types::config::{AgentConfigFile, load_config_file};
 use pkg_types::node::{NodeRegistrationRequest, NodeRegistrationResponse};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use store::AgentStore;
@@ -258,8 +258,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Pre-populate routes from cached services/endpoints if available.
     // Uses the same update_routes() path as the live sync loop — no file I/O.
+    // No VPC data at cache startup — pass empty map (backward compat: all backends included).
     if let Some(ref c) = cached {
-        service_proxy.update_routes(&c.services, &c.endpoints).await;
+        service_proxy
+            .update_routes(&c.services, &c.endpoints, &HashMap::new())
+            .await;
         info!(
             "ServiceProxy pre-loaded {} cached services as routes",
             c.services.len()
@@ -1078,6 +1081,7 @@ async fn main() -> anyhow::Result<()> {
             let route_cache = ctrl_cache.clone();
             let route_conn = ctrl_conn.clone();
             let route_store = ctrl_store.clone();
+            let route_vpc = vpc_client.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
                 loop {
@@ -1144,11 +1148,33 @@ async fn main() -> anyhow::Result<()> {
                         all_endpoints.extend(endpoints);
                     }
 
+                    // Build VPC pod-IP maps from k3rs-vpc daemon
+                    let mut vpc_pod_ips: HashMap<String, HashSet<String>> = HashMap::new();
+                    let mut ip_to_vpc: HashMap<String, String> = HashMap::new();
+
+                    if let Ok(vpcs) = route_vpc.list_vpcs().await {
+                        for vpc_info in &vpcs {
+                            if let Ok(routes) = route_vpc.get_routes(vpc_info.vpc_id).await {
+                                let mut ips = HashSet::new();
+                                for entry in routes {
+                                    ip_to_vpc.insert(entry.destination.clone(), vpc_info.name.clone());
+                                    ips.insert(entry.destination);
+                                }
+                                vpc_pod_ips.insert(vpc_info.name.clone(), ips);
+                            }
+                        }
+                    } else {
+                        warn!("Route sync: failed to list VPCs from k3rs-vpc, using unscoped fallback");
+                    }
+
                     // Update in-memory routing + DNS (live, in-memory)
                     ctrl_service_proxy
-                        .update_routes(&all_services, &all_endpoints)
+                        .update_routes(&all_services, &all_endpoints, &vpc_pod_ips)
                         .await;
                     ctrl_dns_server.update_records(&all_services).await;
+                    ctrl_dns_server
+                        .update_records_vpc(&all_services, &ip_to_vpc)
+                        .await;
 
                     // Persist to AgentStore (single WriteBatch: meta + services +
                     // endpoints + derived /agent/routes + /agent/dns-records)

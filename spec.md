@@ -2755,27 +2755,27 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 ### 16.6 VPC Implementation Phases
 
 #### Phase 1: VPC Resource & Type System
-- [ ] Add `Vpc`, `VpcPeering` types to `pkg/types/`
-- [ ] Add `vpc` field to `PodSpec`
-- [ ] Add `ghost_ipv6`, `vpc_name` fields to `Pod`
-- [ ] Add VPC + Peering CRUD API endpoints to `k3rs-server`
-- [ ] Add VpcController to server (VpcID allocation, CIDR validation)
-- [ ] Create `default` VPC on cluster init
-- [ ] SlateDB keys: `/registry/vpcs/<name>`, `/registry/vpc-peerings/<name>`
+- [x] Add `Vpc`, `VpcPeering` types to `pkg/types/`
+- [x] Add `vpc` field to `PodSpec`
+- [x] Add `ghost_ipv6`, `vpc_name` fields to `Pod`
+- [x] Add VPC + Peering CRUD API endpoints to `k3rs-server`
+- [x] Add VpcController to server (VpcID allocation, CIDR validation)
+- [x] Create `default` VPC on cluster init
+- [x] SlateDB keys: `/registry/vpcs/<name>`, `/registry/vpc-peerings/<name>`
 
 #### Phase 2: Ghost IPv6 Core Library (`pkg/vpc/`)
-- [ ] New crate: `pkg/vpc/` — shared between `k3rs-vpc` and types
-- [ ] Ghost IPv6 construct / parse / validate functions
-- [ ] Ghost IPv6 constants (platform prefix, version)
-- [ ] ClusterID generation and persistence at server init
-- [ ] Unit tests with test vectors (Sync7 RFC-001 compatible)
+- [x] New crate: `pkg/vpc/` — shared between `k3rs-vpc` and types
+- [x] Ghost IPv6 construct / parse / validate functions
+- [x] Ghost IPv6 constants (platform prefix, version)
+- [x] ClusterID generation and persistence at server init
+- [x] Unit tests with test vectors (Sync7 RFC-001 compatible)
 
 #### Phase 3: k3rs-vpc Daemon Skeleton (`cmd/k3rs-vpc/`)
-- [ ] New binary: `cmd/k3rs-vpc/`
-- [ ] VpcStore (own SlateDB instance)
-- [ ] Unix socket listener with NDJSON protocol
-- [ ] VPC Sync Loop (pull VPCs from server via HTTP)
-- [ ] `Ping` / `ListVpcs` commands working
+- [x] New binary: `cmd/k3rs-vpc/`
+- [x] VpcStore (own SlateDB instance)
+- [x] Unix socket listener with NDJSON protocol
+- [x] VPC Sync Loop (pull VPCs from server via HTTP)
+- [x] `Ping` / `ListVpcs` commands working
 - [ ] Systemd unit file
 
 #### Phase 4: Ghost IPv6 Allocator

@@ -155,6 +155,18 @@ async fn dispatch(
                 },
             }
         }
+        VpcRequest::GetRoutes { vpc_id } => {
+            let alloc = allocator.lock().await;
+            let entries = alloc
+                .get_routes(vpc_id)
+                .into_iter()
+                .map(|(_pod_id, guest_ipv4, ghost_ipv6)| crate::protocol::RouteEntry {
+                    destination: guest_ipv4,
+                    next_hop: ghost_ipv6,
+                })
+                .collect();
+            VpcResponse::Routes { entries }
+        }
         VpcRequest::Query { pod_id } => {
             let alloc = allocator.lock().await;
             match alloc.query(&pod_id) {

@@ -12,7 +12,24 @@ use tracing::warn;
 enum VpcRequest {
     Allocate { pod_id: String, vpc_name: String },
     Release { pod_id: String, vpc_name: String },
+    GetRoutes { vpc_id: u16 },
+    ListVpcs,
     Ping,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct RouteEntry {
+    pub destination: String,
+    pub next_hop: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct VpcInfo {
+    pub name: String,
+    pub vpc_id: u16,
+    pub ipv4_cidr: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -24,6 +41,12 @@ pub enum VpcResponse {
         vpc_id: u16,
     },
     Released,
+    Routes {
+        entries: Vec<RouteEntry>,
+    },
+    VpcList {
+        vpcs: Vec<VpcInfo>,
+    },
     Pong,
     Error {
         code: String,
@@ -118,6 +141,36 @@ impl VpcClient {
             }
             Ok(other) => Err(anyhow::anyhow!(
                 "Unexpected VPC response to Release: {:?}",
+                other
+            )),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// List all VPCs known to the VPC daemon.
+    pub async fn list_vpcs(&self) -> anyhow::Result<Vec<VpcInfo>> {
+        match self.request(&VpcRequest::ListVpcs).await {
+            Ok(VpcResponse::VpcList { vpcs }) => Ok(vpcs),
+            Ok(VpcResponse::Error { code, message }) => {
+                Err(anyhow::anyhow!("VPC list_vpcs error [{}]: {}", code, message))
+            }
+            Ok(other) => Err(anyhow::anyhow!(
+                "Unexpected VPC response to ListVpcs: {:?}",
+                other
+            )),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get route entries (pod IPs) for a specific VPC by vpc_id.
+    pub async fn get_routes(&self, vpc_id: u16) -> anyhow::Result<Vec<RouteEntry>> {
+        match self.request(&VpcRequest::GetRoutes { vpc_id }).await {
+            Ok(VpcResponse::Routes { entries }) => Ok(entries),
+            Ok(VpcResponse::Error { code, message }) => {
+                Err(anyhow::anyhow!("VPC get_routes error [{}]: {}", code, message))
+            }
+            Ok(other) => Err(anyhow::anyhow!(
+                "Unexpected VPC response to GetRoutes: {:?}",
                 other
             )),
             Err(e) => Err(e),

@@ -44,5 +44,7 @@ pub struct Service {
     pub spec: ServiceSpec,
     #[serde(default)]
     pub cluster_ip: Option<String>,
+    #[serde(default)]
+    pub vpc: Option<String>,
     pub created_at: DateTime<Utc>,
 }
