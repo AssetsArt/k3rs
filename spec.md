@@ -2865,9 +2865,9 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] `--enable` flag: run `systemctl enable` after generation
 
 #### Phase 7: Watchdog
-- [ ] `pm/watchdog.rs` — supervisor sidecar process (`k3rs-pm-watch`) that monitors child PID
-- [ ] Poll every 2s via `kill(pid, 0)` liveness check
-- [ ] On crash: exponential backoff restart (1s → 2s → 4s → ... → 30s cap)
-- [ ] Respect `max_restarts` (default 10, 0 = unlimited); status → `Crashed` when exceeded
-- [ ] Update `registry.json` on each restart (increment `restart_count`)
-- [ ] Watchdog PID file: `~/.k3rs/pm/pids/<component>-watch.pid`
+- [x] `pm/watchdog.rs` — supervisor sidecar process (hidden `_watch` subcommand) that monitors child PID
+- [x] Poll every 2s via `kill(pid, 0)` liveness check
+- [x] On crash: exponential backoff restart (1s → 2s → 4s → ... → 30s cap)
+- [x] Respect `max_restarts` (default 10, 0 = unlimited); status → `Crashed` when exceeded
+- [x] Update `registry.json` on each restart (increment `restart_count`)
+- [x] Watchdog PID file: `~/.k3rs/pm/pids/<component>-watch.pid`

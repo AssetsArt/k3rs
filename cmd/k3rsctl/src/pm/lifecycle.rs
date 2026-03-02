@@ -9,7 +9,7 @@ use chrono::Utc;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 
-use super::registry;
+use super::{registry, watchdog};
 use super::types::{ComponentName, ProcessStatus};
 
 /// Start one or more components as background daemons.
@@ -65,60 +65,83 @@ fn start_one(component: &ComponentName, foreground: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Daemonized spawn: redirect stdout/stderr to log files, setsid for detach
-    let stdout_file = fs::File::create(stdout_log)
-        .with_context(|| format!("failed to create {}", stdout_log.display()))?;
-    let stderr_file = fs::File::create(stderr_log)
-        .with_context(|| format!("failed to create {}", stderr_log.display()))?;
+    if entry.auto_restart {
+        // Spawn watchdog sidecar — it handles spawning + monitoring the component
+        watchdog::spawn_watchdog(component)?;
 
-    let child = unsafe {
-        Command::new(bin_path)
-            .args(&entry.args)
-            .envs(&entry.env)
-            .stdout(stdout_file)
-            .stderr(stderr_file)
-            .pre_exec(|| {
-                // Create a new session so the child is not killed when the terminal closes
-                nix::unistd::setsid().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-                Ok(())
-            })
-            .spawn()
-            .with_context(|| format!("failed to spawn {}", key))?
-    };
+        // Wait for watchdog to spawn the component and write the PID
+        thread::sleep(Duration::from_secs(2));
 
-    let pid = child.id();
-
-    // Write PID file
-    let pid_path = registry::pids_dir().join(format!("{}.pid", key));
-    fs::write(&pid_path, pid.to_string())
-        .with_context(|| format!("failed to write PID file {}", pid_path.display()))?;
-
-    // Update registry
-    registry::update(|reg| {
-        if let Some(entry) = reg.processes.get_mut(&key) {
-            entry.pid = Some(pid);
-            entry.status = ProcessStatus::Running;
-            entry.started_at = Some(Utc::now());
+        let reg = registry::load()?;
+        if let Some(e) = reg.processes.get(&key) {
+            if let Some(pid) = e.pid {
+                if is_alive(pid) {
+                    println!("  {} started (pid {}, watchdog active)", key, pid);
+                } else {
+                    eprintln!(
+                        "  Warning: {} exited within 2s — check logs at {}",
+                        key,
+                        stderr_log.display()
+                    );
+                }
+            }
         }
-    })?;
-
-    // Wait briefly and verify the process is still alive
-    thread::sleep(Duration::from_secs(2));
-    if is_alive(pid) {
-        println!("  {} started (pid {})", key, pid);
     } else {
-        eprintln!(
-            "  Warning: {} (pid {}) exited within 2s — check logs at {}",
-            key,
-            pid,
-            stderr_log.display()
-        );
+        // Direct daemonized spawn without watchdog
+        let stdout_file = fs::File::create(stdout_log)
+            .with_context(|| format!("failed to create {}", stdout_log.display()))?;
+        let stderr_file = fs::File::create(stderr_log)
+            .with_context(|| format!("failed to create {}", stderr_log.display()))?;
+
+        let child = unsafe {
+            Command::new(bin_path)
+                .args(&entry.args)
+                .envs(&entry.env)
+                .stdout(stdout_file)
+                .stderr(stderr_file)
+                .pre_exec(|| {
+                    nix::unistd::setsid()
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                    Ok(())
+                })
+                .spawn()
+                .with_context(|| format!("failed to spawn {}", key))?
+        };
+
+        let pid = child.id();
+
+        // Write PID file
+        let pid_path = registry::pids_dir().join(format!("{}.pid", key));
+        fs::write(&pid_path, pid.to_string())
+            .with_context(|| format!("failed to write PID file {}", pid_path.display()))?;
+
+        // Update registry
         registry::update(|reg| {
             if let Some(entry) = reg.processes.get_mut(&key) {
-                entry.status = ProcessStatus::Crashed;
-                entry.pid = None;
+                entry.pid = Some(pid);
+                entry.status = ProcessStatus::Running;
+                entry.started_at = Some(Utc::now());
             }
         })?;
+
+        // Wait briefly and verify the process is still alive
+        thread::sleep(Duration::from_secs(2));
+        if is_alive(pid) {
+            println!("  {} started (pid {})", key, pid);
+        } else {
+            eprintln!(
+                "  Warning: {} (pid {}) exited within 2s — check logs at {}",
+                key,
+                pid,
+                stderr_log.display()
+            );
+            registry::update(|reg| {
+                if let Some(entry) = reg.processes.get_mut(&key) {
+                    entry.status = ProcessStatus::Crashed;
+                    entry.pid = None;
+                }
+            })?;
+        }
     }
 
     Ok(())
@@ -155,6 +178,9 @@ fn stop_one(component: &ComponentName, force: bool, timeout_secs: u64) -> Result
             return Ok(());
         }
     };
+
+    // Kill watchdog first so it doesn't restart the component
+    watchdog::stop_watchdog(&key);
 
     println!("Stopping {} (pid {})...", key, pid);
     let nix_pid = Pid::from_raw(pid as i32);
