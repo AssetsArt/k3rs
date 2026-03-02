@@ -154,7 +154,10 @@ mod tests {
             id: format!("{}-id", name),
             name: name.to_string(),
             namespace: "default".to_string(),
+            vpc_name: None,
+            ghost_ipv6: None,
             spec: PodSpec {
+                vpc: None,
                 runtime: None,
                 containers: vec![ContainerSpec {
                     name: "app".to_string(),
