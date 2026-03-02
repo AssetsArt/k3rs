@@ -9,12 +9,14 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::allocator::GhostAllocator;
+use crate::nftables::NftManager;
 use crate::protocol::{VpcInfo, VpcRequest, VpcResponse};
 
 /// Start the Unix socket listener. Returns a `JoinHandle` for the accept loop.
 pub fn start_listener(
     socket_path: &str,
     allocator: Arc<Mutex<GhostAllocator>>,
+    nft: Arc<Mutex<NftManager>>,
 ) -> JoinHandle<()> {
     // Remove stale socket file if it exists
     let _ = std::fs::remove_file(socket_path);
@@ -32,8 +34,9 @@ pub fn start_listener(
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let allocator = Arc::clone(&allocator);
+                    let nft = Arc::clone(&nft);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, allocator).await {
+                        if let Err(e) = handle_connection(stream, allocator, nft).await {
                             warn!("VPC socket connection error: {}", e);
                         }
                     });
@@ -49,6 +52,7 @@ pub fn start_listener(
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     allocator: Arc<Mutex<GhostAllocator>>,
+    nft: Arc<Mutex<NftManager>>,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -60,7 +64,7 @@ async fn handle_connection(
         }
 
         let response = match serde_json::from_str::<VpcRequest>(&line) {
-            Ok(req) => dispatch(req, &allocator).await,
+            Ok(req) => dispatch(req, &allocator, &nft).await,
             Err(e) => VpcResponse::Error {
                 code: "parse_error".to_string(),
                 message: format!("Invalid request: {}", e),
@@ -75,7 +79,11 @@ async fn handle_connection(
     Ok(())
 }
 
-async fn dispatch(req: VpcRequest, allocator: &Arc<Mutex<GhostAllocator>>) -> VpcResponse {
+async fn dispatch(
+    req: VpcRequest,
+    allocator: &Arc<Mutex<GhostAllocator>>,
+    nft: &Arc<Mutex<NftManager>>,
+) -> VpcResponse {
     match req {
         VpcRequest::Ping => VpcResponse::Pong,
         VpcRequest::ListVpcs => {
@@ -100,12 +108,30 @@ async fn dispatch(req: VpcRequest, allocator: &Arc<Mutex<GhostAllocator>>) -> Vp
         }
         VpcRequest::Allocate { pod_id, vpc_name } => {
             let mut alloc = allocator.lock().await;
+            // Check if this is an idempotent re-allocation (pod already has rules)
+            let is_existing = alloc.query(&pod_id).is_some();
             match alloc.allocate(&pod_id, &vpc_name).await {
-                Ok(result) => VpcResponse::Allocated {
-                    guest_ipv4: result.guest_ipv4.to_string(),
-                    ghost_ipv6: result.ghost_ipv6.to_string(),
-                    vpc_id: result.vpc_id,
-                },
+                Ok(result) => {
+                    // Only install nftables rules for new allocations
+                    if !is_existing {
+                        let nft_mgr = nft.lock().await;
+                        if let Err(e) = nft_mgr
+                            .install_pod_rules(
+                                &pod_id,
+                                &result.guest_ipv4.to_string(),
+                                result.vpc_id,
+                            )
+                            .await
+                        {
+                            warn!("nftables: failed to install pod rules for {}: {}", pod_id, e);
+                        }
+                    }
+                    VpcResponse::Allocated {
+                        guest_ipv4: result.guest_ipv4.to_string(),
+                        ghost_ipv6: result.ghost_ipv6.to_string(),
+                        vpc_id: result.vpc_id,
+                    }
+                }
                 Err(e) => VpcResponse::Error {
                     code: "allocate_error".to_string(),
                     message: e.to_string(),
@@ -115,7 +141,14 @@ async fn dispatch(req: VpcRequest, allocator: &Arc<Mutex<GhostAllocator>>) -> Vp
         VpcRequest::Release { pod_id, vpc_name } => {
             let mut alloc = allocator.lock().await;
             match alloc.release(&pod_id, &vpc_name).await {
-                Ok(()) => VpcResponse::Released,
+                Ok(()) => {
+                    // Remove nftables rules for this pod
+                    let nft_mgr = nft.lock().await;
+                    if let Err(e) = nft_mgr.remove_pod_rules(&pod_id).await {
+                        warn!("nftables: failed to remove pod rules for {}: {}", pod_id, e);
+                    }
+                    VpcResponse::Released
+                }
                 Err(e) => VpcResponse::Error {
                     code: "release_error".to_string(),
                     message: e.to_string(),

@@ -1,4 +1,5 @@
 mod allocator;
+mod nftables;
 mod protocol;
 mod socket;
 mod store;
@@ -13,9 +14,13 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::allocator::GhostAllocator;
+use crate::nftables::NftManager;
 
 #[derive(Parser, Debug)]
-#[command(name = "k3rs-vpc", about = "k3rs VPC daemon — manages VPC state per node")]
+#[command(
+    name = "k3rs-vpc",
+    about = "k3rs VPC daemon — manages VPC state per node"
+)]
 struct Cli {
     /// Path to YAML config file
     #[arg(long, short, default_value_t = format!("{}/vpc-config.yaml", pkg_constants::paths::CONFIG_DIR))]
@@ -83,7 +88,10 @@ async fn main() -> anyhow::Result<()> {
         .or(file_cfg.socket)
         .unwrap_or_else(|| "/run/k3rs-vpc.sock".to_string());
 
-    info!("server_url={}, data_dir={}, socket={}", server_url, data_dir, socket_path);
+    info!(
+        "server_url={}, data_dir={}, socket={}",
+        server_url, data_dir, socket_path
+    );
 
     // 3. Open VpcStore
     let store = VpcStore::open(&data_dir).await?;
@@ -113,19 +121,33 @@ async fn main() -> anyhow::Result<()> {
     allocator.rebuild_pools(&cached_vpcs, &stored_allocations);
     let allocator = Arc::new(Mutex::new(allocator));
 
-    // 7. Start Unix socket listener
-    let socket_handle = socket::start_listener(&socket_path, Arc::clone(&allocator));
+    // 7. Initialize nftables: create table, rebuild rules from stored allocations
+    let mut nft = NftManager::new();
+    nft.init_table().await?;
+    nft.rebuild_from_allocations(&cached_vpcs, &stored_allocations)
+        .await?;
+    if let Ok(snapshot) = nft.snapshot().await {
+        if let Err(e) = store.save_nft_snapshot(&snapshot).await {
+            tracing::warn!("Failed to save nftables snapshot: {}", e);
+        }
+    }
+    let nft = Arc::new(Mutex::new(nft));
 
-    // 8. Start VPC sync loop (every 10s)
+    // 8. Start Unix socket listener
+    let socket_handle =
+        socket::start_listener(&socket_path, Arc::clone(&allocator), Arc::clone(&nft));
+
+    // 9. Start VPC sync loop (every 10s)
     let sync_handle = sync::start_sync_loop(
         server_url,
         token,
         Arc::clone(&store),
         Arc::clone(&allocator),
+        Arc::clone(&nft),
         10,
     );
 
-    // 9. Graceful shutdown on Ctrl+C
+    // 10. Graceful shutdown on Ctrl+C
     info!("k3rs-vpc daemon running. Press Ctrl+C to stop.");
     tokio::signal::ctrl_c().await?;
     info!("Shutting down k3rs-vpc daemon...");
@@ -137,8 +159,12 @@ async fn main() -> anyhow::Result<()> {
     // Clean up socket file
     let _ = std::fs::remove_file(&socket_path);
 
+    // Note: nftables rules are NOT cleaned up on graceful shutdown.
+    // Rules persist in kernel for zero-downtime restarts. Use --cleanup flag for uninstall.
+
     // Close the store (flush WAL)
     drop(allocator);
+    drop(nft);
     Arc::try_unwrap(store)
         .map_err(|_| anyhow::anyhow!("VpcStore still has outstanding references"))?
         .close()

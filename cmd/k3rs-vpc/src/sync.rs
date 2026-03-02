@@ -1,5 +1,6 @@
 //! VPC sync loop — periodically pulls VPC definitions and peerings from the server.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -8,6 +9,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::allocator::GhostAllocator;
+use crate::nftables::NftManager;
 use crate::store::{VpcDaemonMeta, VpcStore};
 use pkg_types::vpc::{Vpc, VpcPeering};
 use pkg_vpc::constants::PLATFORM_PREFIX;
@@ -18,6 +20,7 @@ pub fn start_sync_loop(
     token: String,
     store: Arc<VpcStore>,
     allocator: Arc<Mutex<GhostAllocator>>,
+    nft: Arc<Mutex<NftManager>>,
     interval_secs: u64,
 ) -> JoinHandle<()> {
     let client = reqwest::Client::new();
@@ -25,6 +28,10 @@ pub fn start_sync_loop(
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+
+        // Track previous VPC IDs to detect removals
+        let mut prev_vpc_ids: HashMap<u16, String> = HashMap::new();
+
         loop {
             interval.tick().await;
 
@@ -92,6 +99,34 @@ pub fn start_sync_loop(
             {
                 let mut alloc = allocator.lock().await;
                 alloc.sync_vpcs(&vpcs);
+            }
+
+            // Sync nftables VPC chains
+            {
+                let current_vpc_ids: HashMap<u16, String> = vpcs
+                    .iter()
+                    .map(|v| (v.vpc_id, v.ipv4_cidr.clone()))
+                    .collect();
+
+                let mut nft_mgr = nft.lock().await;
+
+                // Ensure chains for new/existing VPCs
+                for vpc in &vpcs {
+                    if let Err(e) = nft_mgr.ensure_vpc_chains(vpc.vpc_id, &vpc.ipv4_cidr).await {
+                        warn!("VPC sync: failed to ensure nft chains for vpc_id={}: {}", vpc.vpc_id, e);
+                    }
+                }
+
+                // Remove chains for VPCs that no longer exist
+                for vpc_id in prev_vpc_ids.keys() {
+                    if !current_vpc_ids.contains_key(vpc_id) {
+                        if let Err(e) = nft_mgr.remove_vpc_chains(*vpc_id).await {
+                            warn!("VPC sync: failed to remove nft chains for vpc_id={}: {}", vpc_id, e);
+                        }
+                    }
+                }
+
+                prev_vpc_ids = current_vpc_ids;
             }
 
             // Update meta
