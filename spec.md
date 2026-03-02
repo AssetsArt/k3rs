@@ -2793,12 +2793,12 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Report `ghost_ipv6`, `vpc_name` to server
 
 #### Phase 6: nftables Isolation Enforcement
-- [ ] `k3rs-vpc` manages `table inet k3rs_vpc`
-- [ ] Per-VPC ingress/egress chains
-- [ ] Per-pod rules installed on `Allocate`, removed on `Release`
-- [ ] Anti-spoofing rules per pod
-- [ ] nftables snapshot for crash recovery
-- [ ] Firecracker VM: TAP interface rules
+- [x] `k3rs-vpc` manages `table inet k3rs_vpc`
+- [x] Per-VPC ingress/egress chains
+- [x] Per-pod rules installed on `Allocate`, removed on `Release`
+- [x] Anti-spoofing rules per pod
+- [x] nftables snapshot for crash recovery
+- [x] Firecracker VM: TAP interface rules
 
 #### Phase 7: VPC-Scoped Service Proxy & DNS
 - [ ] Service Proxy queries `k3rs-vpc` for VPC-scoped routing
