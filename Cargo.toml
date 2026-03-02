@@ -19,6 +19,7 @@ members = [
     "pkg/vpc",
     "cmd/k3rs-ui",
     "cmd/k3rs-init",
+    "cmd/k3rs-vpc",
 ]
 # k3rs-init is Linux-only (guest PID 1) — excluded from default builds on macOS.
 # k3rs-vmm is macOS-only (Virtualization.framework) — excluded from default builds on Linux.

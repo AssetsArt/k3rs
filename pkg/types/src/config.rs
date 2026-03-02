@@ -47,6 +47,30 @@ pub struct AgentConfigFile {
     pub dns_port: Option<u16>,
 }
 
+/// VPC daemon configuration file (YAML).
+///
+/// Example `vpc-config.yaml`:
+/// ```yaml
+/// server-url: https://10.0.0.1:6443
+/// token: my-secret-token
+/// data-dir: /var/lib/k3rs/data
+/// socket: /run/k3rs-vpc.sock
+/// log-format: text
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VpcConfigFile {
+    #[serde(default, alias = "server-url")]
+    pub server_url: Option<String>,
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default, alias = "data-dir")]
+    pub data_dir: Option<String>,
+    #[serde(default)]
+    pub socket: Option<String>,
+    #[serde(default, alias = "log-format")]
+    pub log_format: Option<String>,
+}
+
 /// Load a YAML config file, returning the default if the file doesn't exist.
 pub fn load_config_file<T: serde::de::DeserializeOwned + Default>(path: &str) -> anyhow::Result<T> {
     let content = match std::fs::read_to_string(path) {

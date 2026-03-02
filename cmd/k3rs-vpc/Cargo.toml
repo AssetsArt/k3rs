@@ -1,0 +1,24 @@
+[package]
+name = "k3rs-vpc"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "k3rs-vpc"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+slatedb = { workspace = true }
+pkg-types = { path = "../../pkg/types" }
+pkg-constants = { path = "../../pkg/constants" }
+pkg-vpc = { path = "../../pkg/vpc" }

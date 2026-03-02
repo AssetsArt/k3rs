@@ -3780,6 +3780,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "k3rs-vpc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "pkg-constants",
+ "pkg-types",
+ "pkg-vpc",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "slatedb",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "k3rsctl"
 version = "0.1.0"
 dependencies = [
