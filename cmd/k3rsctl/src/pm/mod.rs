@@ -5,6 +5,7 @@ pub mod lifecycle;
 pub mod list;
 pub mod logs;
 pub mod startup;
+pub mod status;
 pub mod watchdog;
 
 use std::path::PathBuf;
@@ -82,6 +83,8 @@ pub enum PmAction {
         #[arg(long)]
         enable: bool,
     },
+    /// Detailed status of all components with health checks
+    Status,
     /// Internal: watchdog supervisor sidecar (not user-facing)
     #[command(hide = true)]
     #[allow(non_camel_case_types)]
@@ -134,6 +137,7 @@ pub async fn handle(action: &PmAction) -> Result<()> {
             keep_binary,
             keep_logs,
         } => lifecycle::delete(component, *keep_data, *keep_binary, *keep_logs),
+        PmAction::Status => status::status(),
         PmAction::Startup { user, enable } => startup::startup(*user, *enable),
         PmAction::_Watch { component } => watchdog::run(component),
         PmAction::Logs {

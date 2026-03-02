@@ -48,6 +48,26 @@ fn start_one(component: &ComponentName, foreground: bool) -> Result<()> {
         );
     }
 
+    // Build CLI args from config YAML and persist to registry
+    if let Some(config_path) = &entry.config_path {
+        if config_path.exists() && entry.args.is_empty() {
+            let args = build_args_from_config(config_path)?;
+            let config_p = config_path.clone();
+            let k = key.clone();
+            registry::update(|reg| {
+                if let Some(e) = reg.processes.get_mut(&k) {
+                    e.args = args;
+                    // Also pass --config to the binary
+                    e.args.insert(0, config_p.display().to_string());
+                    e.args.insert(0, "--config".to_string());
+                }
+            })?;
+        }
+    }
+    // Re-load after potential update
+    let reg = registry::load()?;
+    let entry = reg.processes.get(&key).unwrap();
+
     let stdout_log = &entry.stdout_log;
     let stderr_log = &entry.stderr_log;
 
@@ -305,6 +325,30 @@ fn delete_one(
 
     println!("Deleted {}", key);
     Ok(())
+}
+
+/// Read a YAML config file and convert key-value pairs to `--key value` CLI args.
+/// Skips comment-only lines. Only handles flat key: value (no nested maps).
+fn build_args_from_config(config_path: &std::path::Path) -> Result<Vec<String>> {
+    let content = fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read config {}", config_path.display()))?;
+
+    let mut args = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((key, val)) = trimmed.split_once(':') {
+            let key = key.trim();
+            let val = val.trim();
+            if !val.is_empty() {
+                args.push(format!("--{}", key));
+                args.push(val.to_string());
+            }
+        }
+    }
+    Ok(args)
 }
 
 /// Check if a process with the given PID is alive using signal 0.

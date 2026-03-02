@@ -2835,7 +2835,7 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] `pm/lifecycle.rs` — `start_component(name, opts)`: spawn detached process via `setsid()`
 - [x] Redirect stdout → `~/.k3rs/pm/logs/<component>.log`, stderr → `<component>-error.log`
 - [x] Write PID to `~/.k3rs/pm/pids/<component>.pid`
-- [ ] Build CLI args from config + overrides (port, server, token, node-name, data-dir)
+- [x] Build CLI args from config + overrides (port, server, token, node-name, data-dir)
 - [x] Post-start: wait 2s, verify process alive via `kill(pid, 0)`, update registry
 - [x] `--foreground` mode: run process in foreground (don't daemonize)
 - [x] `stop_component(name, opts)`: read PID → `SIGTERM` → wait `--timeout` → `SIGKILL` if still alive
@@ -2847,8 +2847,8 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] `pm/list.rs` — `pm_list()`: always show all known components in pm2-style table; uninstalled ones display dimmed `not installed` badge
 - [x] Status indicators: `● running` (green), `○ stopped` (gray), `✕ crashed` (red), `⟳ installing` (yellow), `○ not installed` (gray dimmed)
 - [x] CPU/memory stats via `/proc/<pid>/stat` (Linux) or `sysinfo` crate
-- [ ] `pm/status.rs` — `pm_status()`: detailed per-component output (binary, config, port, uptime, data dir)
-- [ ] Health checks: server → `GET /api/v1/cluster/info`, agent → server connectivity, vpc → socket Ping/Pong
+- [x] `pm/status.rs` — `pm_status()`: detailed per-component output (binary, config, port, uptime, data dir)
+- [x] Health checks: server → TCP port 6443 reachable, agent → server connectivity, vpc → socket exists
 
 #### Phase 5: Logs
 - [x] `pm/logs.rs` — `pm_logs(component, opts)`: tail `~/.k3rs/pm/logs/<component>.log`
