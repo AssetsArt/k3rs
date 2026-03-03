@@ -156,6 +156,34 @@ impl FcNetworkManager {
         format!("172.16.{}.1", vm_index)
     }
 
+    /// Add a Ghost IPv6 address to an existing TAP device (VM dual-stack).
+    ///
+    /// Called from the agent after TAP setup to enable IPv6 connectivity
+    /// for Firecracker VMs.
+    pub async fn add_ipv6_to_tap(tap_name: &str, ghost_ipv6: &str) -> Result<()> {
+        let addr_cidr = format!("{}/128", ghost_ipv6);
+        let output = tokio::process::Command::new("ip")
+            .args(["-6", "addr", "add", &addr_cidr, "dev", tap_name])
+            .output()
+            .await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("File exists") {
+                anyhow::bail!(
+                    "[fc-net] Failed to add IPv6 {} to {}: {}",
+                    ghost_ipv6,
+                    tap_name,
+                    stderr.trim()
+                );
+            }
+        }
+        info!(
+            "[fc-net] IPv6 {} added to TAP {}",
+            ghost_ipv6, tap_name
+        );
+        Ok(())
+    }
+
     /// Cleanup TAP device when a VM is deleted.
     pub async fn cleanup_tap(id: &str) {
         let short_id = &id[..8.min(id.len())];

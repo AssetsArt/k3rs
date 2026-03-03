@@ -61,7 +61,7 @@ graph TB
             DNS["DNS Server<br/>(DNS64 + svc.cluster.local)"]
         end
 
-        BRIDGE["k3rs-bridge<br/>(Ghost IPv6)"]
+        BRIDGE["k3rs0 bridge<br/>(Ghost IPv6)"]
         PODS["Pods<br/>(Ghost IPv6 + GuestIPv4)"]
 
         KUBELET --> RUNTIME
@@ -328,7 +328,7 @@ This enables:
 
 #### Architecture
 
-See the [main architecture diagram](#3-architecture-structure) for the full system view including `k3rs-vpc`, eBPF enforcer, NAT64, k3rs-bridge, and WireGuard mesh.
+See the [main architecture diagram](#3-architecture-structure) for the full system view including `k3rs-vpc`, eBPF enforcer, NAT64, k3rs0 bridge, and WireGuard mesh.
 
 **Three independent processes per node:**
 
@@ -834,11 +834,18 @@ Agent (Pod Sync Loop)                          k3rs-vpc
        │                                          │  6. Update eBPF maps if needed
        │◄──── Allocated(10.0.0.5, fd00:..., 3) ──│
        │                                          │
-       │  7. Setup dual-stack pod interface:      │
-       │     - Ghost IPv6 (primary, routable)     │
-       │     - GuestIPv4 (local compat)           │
-       │  8. Update pod.ghost_ipv6                │
-       │  9. Report status to server              │
+       │  7. Inject K3RS_POD_IP + K3RS_POD_IPV6   │
+       │     env vars into container spec         │
+       │  8. Pull image + OCI create (writes PID) │
+       │  9. Setup dual-stack pod interface:      │
+       │     - veth pair (host: veth-{id},        │
+       │       pod: eth0 via nsenter)             │
+       │     - Ghost IPv6/128 on eth0 (primary)   │
+       │     - GuestIPv4/32 on eth0 (compat)      │
+       │     - IPv6 default route via fe80::1     │
+       │     - host veth attached to k3rs0 bridge │
+       │ 10. OCI start                            │
+       │ 11. Report status + ghost_ipv6 to server │
        │                                          │
 ```
 
@@ -847,12 +854,15 @@ Agent (Pod Sync Loop)                          k3rs-vpc
 ```
 Agent                                          k3rs-vpc
        │                                          │
-       │  1. Pod terminated                        │
+       │  1. Pod terminated / stopped              │
+       │  2. Tear down pod network:               │
+       │     ip link delete veth-{id}             │
+       │     (peer in netns auto-removed)         │
        │                                          │
        ├──────── Release(pod-xyz, production) ────►│
-       │                                          │  2. Clean up eBPF state
-       │                                          │  3. Release GuestIPv4 to pool
-       │                                          │  4. Mark allocation as released
+       │                                          │  3. Clean up eBPF state
+       │                                          │  4. Release GuestIPv4 to pool
+       │                                          │  5. Mark allocation as released
        │                                          │     in VpcStore
        │◄──────────── Released ───────────────────│
        │                                          │
@@ -860,43 +870,48 @@ Agent                                          k3rs-vpc
 
 ##### Agent Startup
 
-On Agent start, it connects to `/run/k3rs-vpc.sock`. If `k3rs-vpc` is not yet running, Agent retries with exponential backoff (same pattern as server connectivity).
+On Agent start, after container runtime initialization, the Agent creates the `k3rs0` Linux bridge via `ensure_bridge()` (idempotent, non-fatal on failure). The bridge gets `fe80::1/64` as its link-local IPv6 gateway and IPv6 forwarding is enabled. The Agent then connects to `/run/k3rs-vpc.sock`. If `k3rs-vpc` is not yet running, Agent retries with exponential backoff (same pattern as server connectivity).
 
 ```rust
-// Agent pod creation (simplified)
-async fn create_pod(&self, pod: &Pod) -> Result<()> {
+// Agent pod lifecycle (actual implementation in pod_sync.rs)
+async fn run_pod_lifecycle(pod: Pod, runtime: Arc<ContainerRuntime>, vpc_client: Arc<VpcClient>) {
     let vpc_name = pod.spec.vpc.as_deref().unwrap_or("default");
 
-    // Delegate to k3rs-vpc
-    let alloc = self.vpc_client.allocate(&pod.id, vpc_name).await?;
+    // 0. Allocate VPC address → (guest_ipv4, ghost_ipv6, vpc_id)
+    let (guest_ipv4, ghost_ipv6, _vpc_id) = vpc_client.allocate(&pod.id, vpc_name).await?;
 
-    // Setup dual-stack pod interface
-    let (pod_veth, host_veth) = create_veth_pair(&pod.id)?;
+    // Inject VPC addresses as env vars
+    env.insert("K3RS_POD_IP", guest_ipv4.clone());
+    env.insert("K3RS_POD_IPV6", ghost_ipv6.clone());
 
-    // Ghost IPv6 as primary routable address
-    ip_addr_add(&pod_veth, &alloc.ghost_ipv6, "/128")?;
-    // GuestIPv4 for backward compat (apps binding 0.0.0.0)
-    ip_addr_add(&pod_veth, &alloc.guest_ipv4, "/32")?;
-    // IPv6 default route via bridge, IPv4 via NAT64
-    ip_route_add(&pod_veth, "::/0", &host_veth_ll)?;
-    ip_route_add(&pod_veth, "0.0.0.0/0", &nat64_gw)?;
-    // Attach to k3rs-bridge
-    bridge_add(&host_veth, "k3rs-bridge")?;
+    // 1. Pull image
+    runtime.pull_image(&image).await?;
 
-    self.runtime.create_container(
-        &pod.id,
-        &pod.spec.containers[0].image,
-        &pod.spec.containers[0].command,
-        &[("K3RS_POD_IP", &alloc.guest_ipv4),
-          ("K3RS_POD_IPV6", &alloc.ghost_ipv6)],
-    ).await?;
+    // 2. Create container (OCI create writes PID file)
+    runtime.create_container(&pod.id, &image, &command, &env, runtime_name).await?;
 
-    // Update pod record with Ghost IPv6
-    pod.ghost_ipv6 = Some(alloc.ghost_ipv6);
-    pod.vpc_name = Some(vpc_name.to_string());
-    self.report_pod_status(pod).await?;
+    // 2b. Pod network setup (between create and start, Linux only, skip for VMs)
+    if runtime.backend_name_for(&pod.id) != "vm" {
+        if let Some(pid) = runtime.container_pid(&pod.id) {
+            let config = PodNetworkConfig {
+                pod_id: pod.id.clone(),
+                ghost_ipv6: ghost_ipv6.clone(),   // /128 on eth0
+                guest_ipv4: guest_ipv4.clone(),   // /32 on eth0
+                container_pid: pid,
+                bridge_name: "k3rs0".to_string(),
+            };
+            // Creates veth pair, moves peer into netns, assigns IPs,
+            // sets default IPv6 route via fe80::1 (bridge gateway)
+            setup_pod_network(&config).await?;  // non-fatal warning on failure
+        }
+    }
 
-    Ok(())
+    // 3. Start container
+    runtime.start_container(&pod.id).await?;
+
+    // 4. Report status + VPC info to server
+    report_status(&pod, Running).await;
+    report_vpc_info(&pod, &ghost_ipv6, vpc_name).await;
 }
 ```
 
@@ -1024,11 +1039,11 @@ For cluster-internal services, DNS returns Ghost IPv6 of backend pods directly (
 
 ##### Node Mesh
 
-Each node has a bridge `k3rs-bridge` with a Ghost IPv6 subnet:
+Each node has a bridge `k3rs0` (created at agent startup via `ensure_bridge()`) with a link-local gateway `fe80::1/64` for same-node pod-to-pod connectivity. Full Ghost IPv6 subnets on the bridge are assigned in the cross-node phase:
 
 ```
-Node-1: k3rs-bridge fd6b:3372:1000:0000:0001::/80
-Node-2: k3rs-bridge fd6b:3372:1000:0000:0002::/80
+Node-1: k3rs0 fe80::1/64 (same-node)  →  fd6b:3372:1000:0000:0001::/80 (cross-node)
+Node-2: k3rs0 fe80::1/64 (same-node)  →  fd6b:3372:1000:0000:0002::/80 (cross-node)
 ```
 
 Cross-node options:
@@ -1060,11 +1075,12 @@ IPv4 overlay: **N routes** (N = number of nodes × VPCs).
 
 VMs already get isolated TAP networks (`172.16.x.0/30`). With IPv6-native Ghost:
 
-1. **TAP gets dual-stack** — VM sees GuestIPv4 on TAP + Ghost IPv6 as primary routable address
+1. **TAP gets dual-stack** — VM sees GuestIPv4 on TAP + Ghost IPv6 as primary routable address. `FcNetworkManager::add_ipv6_to_tap()` assigns Ghost IPv6/128 to the TAP device
 2. **Ghost IPv6 assigned by k3rs-vpc** — Agent calls `Allocate` before VM boot; `k3rs-vpc` returns GuestIPv4 and Ghost IPv6
 3. **eBPF enforcement by k3rs-vpc** — TC classifiers on TAP interface, same IPv6-native logic
 4. **VPC in PodSpec** — VMs respect the same `spec.vpc` field as container Pods
 5. **TAP ↔ VPC binding** — `k3rs-vpc` tracks which TAP device belongs to which VPC for per-interface enforcement
+6. **Network setup skipped for VMs** — `setup_pod_network()` (veth/netns) is skipped when `backend_name_for(pod_id) == "vm"`, since VMs use TAP devices directly
 
 #### Control Plane Responsibilities
 
@@ -1087,8 +1103,10 @@ VMs already get isolated TAP networks (`172.16.x.0/30`). With IPv6-native Ghost:
 4. Agent receives scheduled Pod
 5. Agent calls `k3rs-vpc` → `Allocate(pod_id, "my-vpc")`
 6. `k3rs-vpc` allocates GuestIPv4, constructs Ghost IPv6, updates eBPF maps
-7. Agent configures dual-stack pod interface (Ghost IPv6 primary + GuestIPv4 compat)
-8. Agent reports `ghost_ipv6` and `vpc_name` to server
+7. Agent injects `K3RS_POD_IP` + `K3RS_POD_IPV6` env vars, creates container (OCI create)
+8. Agent configures dual-stack pod interface via `setup_pod_network()`: veth pair, Ghost IPv6/128 + GuestIPv4/32 on eth0, IPv6 default route via `fe80::1` on `k3rs0` bridge
+9. Agent starts container (OCI start)
+10. Agent reports `ghost_ipv6` and `vpc_name` to server
 
 ##### VPC Deletion Flow
 
@@ -1175,6 +1193,11 @@ pkg/
 │       ├── types.rs         # VpcRequest, VpcResponse, Allocation
 │       ├── client.rs        # Unix socket client (used by Agent)
 │       └── constants.rs     # Platform prefix, version, reserved VpcIDs
+├── network/src/
+│   ├── bridge.rs            # k3rs0 bridge manager (ensure_bridge, bridge_exists)
+│   ├── netns.rs             # Per-pod veth setup (setup_pod_network, teardown_pod_network)
+│   ├── cni.rs               # CNI plugin interface
+│   └── dns.rs               # DNS server module
 ├── types/src/
 │   ├── vpc.rs               # NEW: Vpc, VpcPeering, VpcStatus types
 │   └── pod.rs               # MODIFIED: add vpc, ghost_ipv6, vpc_name fields
@@ -2338,7 +2361,7 @@ k3rs/
 │   ├── container/              # Container runtime (Virtualization.framework on macOS, Firecracker/youki/crun on Linux; firecracker/ submodule: mod.rs, api.rs, installer.rs, jailer.rs, network.rs, rootfs.rs)
 │   ├── controllers/            # Control loops (Deployment, ReplicaSet, DaemonSet, Job, CronJob, HPA)
 │   ├── metrics/                # Prometheus-format metrics registry
-│   ├── network/                # CNI (pod networking) & DNS (svc.cluster.local)
+│   ├── network/                # Pod networking: CNI, DNS, bridge manager (bridge.rs), per-pod veth/netns setup (netns.rs)
 │   ├── pki/                    # CA and mTLS certificate management
 │   ├── proxy/                  # Pingora-based Service, Ingress & Tunnel proxy
 │   ├── scheduler/              # Workload placement logic
@@ -2927,9 +2950,16 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Update `k3rs-vpc` sync loop + main.rs to use `NetworkEnforcer` trait
 
 #### Phase 9: IPv6-Native Pod Interface
-- [ ] Agent: assign Ghost IPv6 (primary) + GuestIPv4 (compat) on pod veth
-- [ ] Agent: configure IPv6 default route via k3rs-bridge
-- [ ] Agent: configure IPv4 default route via NAT64 prefix
+- [x] `pkg/network/bridge.rs` — `k3rs0` bridge manager (`BridgeConfig`, `ensure_bridge()`, `bridge_exists()`)
+- [x] `pkg/network/netns.rs` — per-pod veth setup (`PodNetworkConfig`, `setup_pod_network()`, `teardown_pod_network()`)
+- [x] Agent: create `k3rs0` bridge at startup with `fe80::1/64` link-local gateway + IPv6 forwarding
+- [x] Agent: assign Ghost IPv6/128 (primary) + GuestIPv4/32 (compat) on pod veth via nsenter
+- [x] Agent: configure IPv6 default route via `fe80::1` on `k3rs0` bridge
+- [x] Agent: inject `K3RS_POD_IP` and `K3RS_POD_IPV6` env vars into containers
+- [x] Agent: veth teardown on pod stop/exit (before VPC release)
+- [x] Agent: skip network setup for VM backends (Firecracker gets `add_ipv6_to_tap()` instead)
+- [x] Non-fatal network setup — agent stays functional if bridge/veth fails (dev mode, rootless, macOS)
+- [ ] Agent: configure IPv4 default route via NAT64 prefix (deferred to Phase 12)
 - [ ] Test: pod-to-pod same node via Ghost IPv6
 
 #### Phase 10: eBPF IPv6 Classifier

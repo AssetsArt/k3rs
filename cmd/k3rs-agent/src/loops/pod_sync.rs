@@ -112,6 +112,10 @@ async fn check_running_pods(
             Ok(state) if state.status == "stopped" || state.status == "exited" => {
                 warn!("[pod:{}] Container stopped unexpectedly", pod.name);
 
+                // Tear down pod network (best-effort)
+                #[cfg(target_os = "linux")]
+                pkg_network::netns::teardown_pod_network(&pod.id).await;
+
                 // Release VPC allocation (best-effort)
                 let vpc_name = pod
                     .vpc_name
@@ -143,6 +147,10 @@ async fn check_running_pods(
             }
             Err(_) => {
                 warn!("[pod:{}] Container not found in runtime", pod.name);
+
+                // Tear down pod network (best-effort)
+                #[cfg(target_os = "linux")]
+                pkg_network::netns::teardown_pod_network(&pod.id).await;
 
                 // Release VPC allocation (best-effort)
                 let vpc_name = pod
@@ -277,7 +285,7 @@ async fn run_pod_lifecycle(
             cmd
         })
         .unwrap_or_default();
-    let env = container_spec.map(|c| c.env.clone()).unwrap_or_default();
+    let mut env = container_spec.map(|c| c.env.clone()).unwrap_or_default();
 
     // 0. Allocate VPC address
     let vpc_name = pod.spec.vpc.as_deref().unwrap_or("default");
@@ -301,6 +309,12 @@ async fn run_pod_lifecycle(
             return;
         }
     };
+
+    // Inject VPC addresses as environment variables
+    if let Some((ref guest_ipv4, ref ghost_ipv6, _)) = vpc_alloc {
+        env.insert("K3RS_POD_IP".to_string(), guest_ipv4.clone());
+        env.insert("K3RS_POD_IPV6".to_string(), ghost_ipv6.clone());
+    }
 
     // 1. Pull Image
     info!("[pod:{}] Pulling image: {}", pod.name, image);
@@ -329,6 +343,33 @@ async fn run_pod_lifecycle(
             .send()
             .await;
         return;
+    }
+
+    // 2b. Pod network setup (veth pair + Ghost IPv6) — skip for VM backends
+    #[cfg(target_os = "linux")]
+    if runtime.backend_name_for(&pod.id) != "vm" {
+        if let Some((ref guest_ipv4, ref ghost_ipv6, _)) = vpc_alloc {
+            if let Some(pid) = runtime.container_pid(&pod.id) {
+                let net_config = pkg_network::netns::PodNetworkConfig {
+                    pod_id: pod.id.clone(),
+                    ghost_ipv6: ghost_ipv6.clone(),
+                    guest_ipv4: guest_ipv4.clone(),
+                    container_pid: pid,
+                    bridge_name: "k3rs0".to_string(),
+                };
+                if let Err(e) = pkg_network::netns::setup_pod_network(&net_config).await {
+                    warn!(
+                        "[pod:{}] Pod network setup failed: {} (continuing without network)",
+                        pod.name, e
+                    );
+                }
+            } else {
+                warn!(
+                    "[pod:{}] Container PID not available, skipping network setup",
+                    pod.name
+                );
+            }
+        }
     }
 
     // 3. Start Container

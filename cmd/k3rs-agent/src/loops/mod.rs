@@ -56,6 +56,19 @@ pub fn start_controller_loops(
                         let rt_arc = Arc::new(rt);
                         info!("Container runtime ready: {}", rt_arc.backend_name());
 
+                        // Initialize k3rs0 pod network bridge (Linux only, non-fatal)
+                        #[cfg(target_os = "linux")]
+                        {
+                            let bridge_config = pkg_network::bridge::BridgeConfig::default();
+                            if let Err(e) = pkg_network::bridge::ensure_bridge(&bridge_config).await
+                            {
+                                warn!(
+                                    "Failed to create k3rs0 bridge: {} (pod networking may be unavailable)",
+                                    e
+                                );
+                            }
+                        }
+
                         // Start Agent API server for exec/logs (if we know the port)
                         if let Some(api_port) = initial_api_port {
                             let agent_state = crate::api::AgentState {
