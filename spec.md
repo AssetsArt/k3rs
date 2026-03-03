@@ -2963,17 +2963,22 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [ ] Test: pod-to-pod same node via Ghost IPv6
 
 #### Phase 10: eBPF IPv6 Classifier
-- [ ] New TC classifier `tc_egress_v6` / `tc_ingress_v6`
-- [ ] Parse IPv6 header, extract VPC ID from bytes 10-11
-- [ ] Validate Ghost prefix (`fd6b:3372`)
-- [ ] Remove `VPC_MEMBERSHIP` and `VPC_CIDRS` maps
-- [ ] Keep `PEERINGS` map for cross-VPC only
-- [ ] Anti-spoofing: reject non-Ghost src with Ghost dst
+- [x] New TC classifier `tc_egress_v6` / `tc_ingress_v6` — shared `enforce_v6()` logic in `k3rs-vpc-ebpf/src/main.rs`
+- [x] Parse IPv6 header, extract VPC ID from bytes 10-11 — `extract_vpc_id()` helper, no BPF map lookup
+- [x] Validate Ghost prefix (`fd6b:3372`) — `is_ghost_prefix()` helper
+- [x] Keep `PEERINGS` map for cross-VPC only — IPv6 classifiers use only `PEERINGS`; `VPC_MEMBERSHIP`/`VPC_CIDRS` retained for IPv4 path
+- [x] Anti-spoofing: reject non-Ghost src with Ghost dst
+- [x] Veth interface support: `install_veth_rules` / `remove_veth_rules` on `NetworkEnforcer` trait — attaches TC classifiers (IPv4+IPv6) to host-side veth
+- [x] `AttachVeth` / `DetachVeth` protocol messages + socket dispatch + agent VPC client
+- [x] Ghost IPv6 constants (`GHOST_PREFIX`, `GHOST_VPC_ID_OFFSET`) in `k3rs-vpc-common`
 
 #### Phase 11: DNS64 Integration
-- [ ] DNS server: synthesize AAAA from A records using `64:ff9b::/96`
-- [ ] DNS server: return Ghost IPv6 AAAA for internal services
-- [ ] DNS server: VPC-scoped resolution returns AAAA instead of A
+- [x] DNS server: synthesize AAAA from A records using `64:ff9b::/96` — `dns64_forward()` sends A query upstream, synthesizes AAAA with NAT64 prefix
+- [x] DNS server: return Ghost IPv6 AAAA for internal services — `construct_ghost_ipv6()` builds Ghost IPv6 from ClusterIP + VPC ID
+- [x] DNS server: VPC-scoped resolution returns AAAA instead of A — `resolve_internal()` returns `(ClusterIP, vpc_id)`, response type selected by QTYPE
+- [x] DNS server: forward external A queries to upstream resolver (default `8.8.8.8:53`)
+- [x] DNS server: configurable Ghost IPv6 params (`set_ghost_config`) and upstream resolver (`set_upstream`)
+- [x] Route sync: pass `vpc_name_to_id` mapping to DNS server for Ghost IPv6 construction
 
 #### Phase 12: NAT64 at Node Level (eBPF)
 - [ ] eBPF NAT64: translate `64:ff9b::x` → IPv4

@@ -14,6 +14,12 @@ enum VpcRequest {
     Release { pod_id: String, vpc_name: String },
     GetRoutes { vpc_id: u16 },
     CheckReachability { src_vpc: String, dst_vpc: String },
+    AttachVeth {
+        veth_name: String,
+        guest_ipv4: String,
+        vpc_id: u16,
+    },
+    DetachVeth { veth_name: String },
     ListVpcs,
     Ping,
 }
@@ -52,6 +58,7 @@ pub enum VpcResponse {
         vpcs: Vec<VpcInfo>,
     },
     Pong,
+    Ok,
     Error {
         code: String,
         message: String,

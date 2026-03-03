@@ -187,6 +187,39 @@ async fn dispatch(
                 },
             }
         }
+        VpcRequest::AttachVeth {
+            veth_name,
+            guest_ipv4,
+            vpc_id,
+        } => {
+            let mut enf = enforcer.lock().await;
+            match enf
+                .install_veth_rules(&veth_name, &guest_ipv4, vpc_id)
+                .await
+            {
+                Ok(()) => VpcResponse::Ok,
+                Err(e) => VpcResponse::Error {
+                    code: "attach_veth_error".to_string(),
+                    message: format!(
+                        "Failed to attach TC to veth {}: {}",
+                        veth_name, e
+                    ),
+                },
+            }
+        }
+        VpcRequest::DetachVeth { veth_name } => {
+            let mut enf = enforcer.lock().await;
+            match enf.remove_veth_rules(&veth_name).await {
+                Ok(()) => VpcResponse::Ok,
+                Err(e) => VpcResponse::Error {
+                    code: "detach_veth_error".to_string(),
+                    message: format!(
+                        "Failed to detach TC from veth {}: {}",
+                        veth_name, e
+                    ),
+                },
+            }
+        }
         VpcRequest::CheckReachability { src_vpc, dst_vpc } => {
             // Same VPC is always reachable
             if src_vpc == dst_vpc {

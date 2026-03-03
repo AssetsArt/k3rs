@@ -83,7 +83,7 @@ impl EbpfEnforcer {
         Ok((network, mask))
     }
 
-    /// Attach TC classifiers to an interface (both ingress and egress).
+    /// Attach TC classifiers to an interface (IPv4 + IPv6, both ingress and egress).
     fn attach_tc(&mut self, interface: &str) -> Result<()> {
         if self.attached_interfaces.contains(interface) {
             return Ok(());
@@ -98,7 +98,7 @@ impl EbpfEnforcer {
             }
         }
 
-        // Attach egress
+        // Attach IPv4 egress
         let egress_prog: &mut SchedClassifier = self
             .bpf
             .program_mut("tc_egress")
@@ -109,19 +109,44 @@ impl EbpfEnforcer {
             .attach(interface, TcAttachType::Egress)
             .with_context(|| format!("failed to attach tc_egress to {}", interface))?;
 
-        // Attach ingress
+        // Attach IPv4 ingress
         let ingress_prog: &mut SchedClassifier = self
             .bpf
             .program_mut("tc_ingress")
             .context("tc_ingress program not found")?
             .try_into()?;
-        ingress_prog.load().ok(); // may already be loaded
+        ingress_prog.load().ok();
         ingress_prog
             .attach(interface, TcAttachType::Ingress)
             .with_context(|| format!("failed to attach tc_ingress to {}", interface))?;
 
+        // Attach IPv6 egress (Ghost IPv6 native enforcement)
+        let egress_v6: &mut SchedClassifier = self
+            .bpf
+            .program_mut("tc_egress_v6")
+            .context("tc_egress_v6 program not found")?
+            .try_into()?;
+        egress_v6.load().ok();
+        egress_v6
+            .attach(interface, TcAttachType::Egress)
+            .with_context(|| format!("failed to attach tc_egress_v6 to {}", interface))?;
+
+        // Attach IPv6 ingress
+        let ingress_v6: &mut SchedClassifier = self
+            .bpf
+            .program_mut("tc_ingress_v6")
+            .context("tc_ingress_v6 program not found")?
+            .try_into()?;
+        ingress_v6.load().ok();
+        ingress_v6
+            .attach(interface, TcAttachType::Ingress)
+            .with_context(|| format!("failed to attach tc_ingress_v6 to {}", interface))?;
+
         self.attached_interfaces.insert(interface.to_string());
-        debug!("ebpf: attached TC classifiers to {}", interface);
+        debug!(
+            "ebpf: attached TC classifiers (v4+v6) to {}",
+            interface
+        );
         Ok(())
     }
 }
@@ -277,6 +302,56 @@ impl NetworkEnforcer for EbpfEnforcer {
         }
         // Note: TC programs remain attached — they're harmless without map entries.
         // Detaching would require tracking link IDs per-interface.
+        Ok(())
+    }
+
+    async fn install_veth_rules(
+        &mut self,
+        veth_name: &str,
+        guest_ipv4: &str,
+        vpc_id: u16,
+    ) -> Result<()> {
+        let addr: Ipv4Addr = guest_ipv4.parse().context("invalid veth IPv4")?;
+        let ip_host = u32::from(addr);
+
+        // Insert into VPC_MEMBERSHIP map (same as pod/tap rules, for IPv4 path)
+        let key = PodKey { ipv4_addr: ip_host };
+        let value = PodValue { vpc_id, _pad: 0 };
+
+        let mut map: BpfHashMap<&mut aya::maps::MapData, PodKey, PodValue> = BpfHashMap::try_from(
+            self.bpf
+                .map_mut("VPC_MEMBERSHIP")
+                .context("VPC_MEMBERSHIP map not found")?,
+        )?;
+        map.insert(key, value, 0)?;
+
+        self.tap_to_ip
+            .insert(veth_name.to_string(), (ip_host, vpc_id));
+
+        // Attach TC classifiers (IPv4 + IPv6) to the veth interface
+        self.attach_tc(veth_name)?;
+
+        debug!(
+            "ebpf: installed veth rules for veth={} ipv4={} vpc_id={}",
+            veth_name, guest_ipv4, vpc_id
+        );
+        Ok(())
+    }
+
+    async fn remove_veth_rules(&mut self, veth_name: &str) -> Result<()> {
+        if let Some((ip_host, _vpc_id)) = self.tap_to_ip.remove(veth_name) {
+            let key = PodKey { ipv4_addr: ip_host };
+
+            let mut map: BpfHashMap<&mut aya::maps::MapData, PodKey, PodValue> =
+                BpfHashMap::try_from(
+                    self.bpf
+                        .map_mut("VPC_MEMBERSHIP")
+                        .context("VPC_MEMBERSHIP map not found")?,
+                )?;
+            map.remove(&key).ok();
+
+            debug!("ebpf: removed veth rules for veth={}", veth_name);
+        }
         Ok(())
     }
 

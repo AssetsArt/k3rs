@@ -75,6 +75,21 @@ impl NetworkEnforcer for NoopEnforcer {
         Ok(())
     }
 
+    async fn install_veth_rules(
+        &mut self,
+        veth_name: &str,
+        guest_ipv4: &str,
+        vpc_id: u16,
+    ) -> Result<()> {
+        debug!(veth_name, guest_ipv4, vpc_id, "noop: install_veth_rules");
+        Ok(())
+    }
+
+    async fn remove_veth_rules(&mut self, veth_name: &str) -> Result<()> {
+        debug!(veth_name, "noop: remove_veth_rules");
+        Ok(())
+    }
+
     async fn install_peering_rules(&mut self, peering: &VpcPeering, _vpcs: &[Vpc]) -> Result<()> {
         debug!(peering.name, "noop: install_peering_rules");
         Ok(())

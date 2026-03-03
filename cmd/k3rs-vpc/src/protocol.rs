@@ -11,6 +11,14 @@ pub enum VpcRequest {
     Query { pod_id: String },
     GetRoutes { vpc_id: u16 },
     CheckReachability { src_vpc: String, dst_vpc: String },
+    /// Attach TC classifiers (IPv4 + IPv6) to a veth interface for VPC enforcement.
+    AttachVeth {
+        veth_name: String,
+        guest_ipv4: String,
+        vpc_id: u16,
+    },
+    /// Detach TC classifiers from a veth interface.
+    DetachVeth { veth_name: String },
     ListVpcs,
     Ping,
 }
@@ -40,6 +48,8 @@ pub enum VpcResponse {
         vpcs: Vec<VpcInfo>,
     },
     Pong,
+    /// Acknowledgement for AttachVeth / DetachVeth.
+    Ok,
     Error {
         code: String,
         message: String,

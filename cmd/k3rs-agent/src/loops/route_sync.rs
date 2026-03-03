@@ -91,9 +91,11 @@ pub fn start(
             // Build VPC pod-IP maps from k3rs-vpc daemon
             let mut vpc_pod_ips: HashMap<String, HashSet<String>> = HashMap::new();
             let mut ip_to_vpc: HashMap<String, String> = HashMap::new();
+            let mut vpc_name_to_id: HashMap<String, u16> = HashMap::new();
 
             if let Ok(vpcs) = vpc_client.list_vpcs().await {
                 for vpc_info in &vpcs {
+                    vpc_name_to_id.insert(vpc_info.name.clone(), vpc_info.vpc_id);
                     if let Ok(routes) = vpc_client.get_routes(vpc_info.vpc_id).await {
                         let mut ips = HashSet::new();
                         for entry in routes {
@@ -127,7 +129,7 @@ pub fn start(
                 .await;
             dns_server.update_records(&all_services).await;
             dns_server
-                .update_records_vpc(&all_services, &ip_to_vpc)
+                .update_records_vpc(&all_services, &ip_to_vpc, &vpc_name_to_id)
                 .await;
             dns_server.update_peerings(&peerings).await;
 

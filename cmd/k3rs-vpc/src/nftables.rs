@@ -196,6 +196,20 @@ impl NetworkEnforcer for NftManager {
         Ok(())
     }
 
+    async fn install_veth_rules(
+        &mut self,
+        veth_name: &str,
+        guest_ipv4: &str,
+        vpc_id: u16,
+    ) -> Result<()> {
+        // nftables enforcer: veth rules use the same pattern as TAP rules
+        self.install_tap_rules(veth_name, guest_ipv4, vpc_id).await
+    }
+
+    async fn remove_veth_rules(&mut self, veth_name: &str) -> Result<()> {
+        self.remove_tap_rules(veth_name).await
+    }
+
     /// Install cross-VPC accept rules for a peering relationship.
     ///
     /// Uses `insert rule` so rules go before the drop at end of chain.
