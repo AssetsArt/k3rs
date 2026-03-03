@@ -101,11 +101,8 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     let (_election_handle, leader_rx) = election.start();
 
     // Start restore epoch watcher (runs on all servers, not just leader)
-    let _restore_watcher = RestoreWatcher::new(
-        store.clone(),
-        state.restore_in_progress.clone(),
-    )
-    .start();
+    let _restore_watcher =
+        RestoreWatcher::new(store.clone(), state.restore_in_progress.clone()).start();
 
     // Start leader-gated controllers
     let ctrl_store = store.clone();
@@ -301,10 +298,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             "/api/v1/cluster/backup",
             post(backup::create_backup_handler),
         )
-        .route(
-            "/api/v1/cluster/backup/status",
-            get(backup::backup_status),
-        )
+        .route("/api/v1/cluster/backup/status", get(backup::backup_status))
         .route(
             "/api/v1/cluster/restore",
             post(backup::restore_cluster_handler),
@@ -333,10 +327,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
             put(images::report_node_images),
         )
         // Phase 10: VPCs (cluster-scoped)
-        .route(
-            "/api/v1/vpcs",
-            post(vpc::create_vpc).get(vpc::list_vpcs),
-        )
+        .route("/api/v1/vpcs", post(vpc::create_vpc).get(vpc::list_vpcs))
         .route(
             "/api/v1/vpcs/{name}",
             get(vpc::get_vpc).delete(vpc::delete_vpc),

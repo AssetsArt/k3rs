@@ -48,8 +48,8 @@ pub fn load() -> Result<PmRegistry> {
     if !path.exists() {
         return Ok(PmRegistry::default());
     }
-    let data = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let data =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let reg: PmRegistry =
         serde_json::from_str(&data).with_context(|| "failed to parse registry.json")?;
     Ok(reg)

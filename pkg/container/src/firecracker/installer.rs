@@ -32,7 +32,10 @@ impl FcInstaller {
     pub async fn ensure_firecracker() -> Result<PathBuf> {
         // 1. Check PATH
         if let Some(path) = Self::find_in_path("firecracker") {
-            info!("[fc-installer] Found firecracker in PATH: {}", path.display());
+            info!(
+                "[fc-installer] Found firecracker in PATH: {}",
+                path.display()
+            );
             return Ok(path);
         }
 
@@ -48,7 +51,10 @@ impl FcInstaller {
         }
 
         // 3. Auto-download
-        info!("[fc-installer] Firecracker not found — downloading v{}...", FIRECRACKER_VERSION);
+        info!(
+            "[fc-installer] Firecracker not found — downloading v{}...",
+            FIRECRACKER_VERSION
+        );
         let (fc_path, _) = Self::download(&install_dir).await?;
         Ok(fc_path)
     }
@@ -174,7 +180,10 @@ impl FcInstaller {
                                 std::fs::Permissions::from_mode(0o755),
                             )?;
                         }
-                        info!("[fc-installer] Extracted firecracker to {}", fc_dest.display());
+                        info!(
+                            "[fc-installer] Extracted firecracker to {}",
+                            fc_dest.display()
+                        );
                     } else if filename == jailer_name_in_archive {
                         entry.unpack(&jailer_dest)?;
                         #[cfg(unix)]
@@ -185,7 +194,10 @@ impl FcInstaller {
                                 std::fs::Permissions::from_mode(0o755),
                             )?;
                         }
-                        info!("[fc-installer] Extracted jailer to {}", jailer_dest.display());
+                        info!(
+                            "[fc-installer] Extracted jailer to {}",
+                            jailer_dest.display()
+                        );
                     }
                 }
                 Ok(())

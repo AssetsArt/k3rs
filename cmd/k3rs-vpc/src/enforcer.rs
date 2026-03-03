@@ -27,8 +27,12 @@ pub trait NetworkEnforcer: Send {
     async fn remove_vpc(&mut self, vpc_id: u16) -> Result<()>;
 
     /// Install per-pod forwarding and anti-spoofing rules.
-    async fn install_pod_rules(&mut self, pod_id: &str, guest_ipv4: &str, vpc_id: u16)
-        -> Result<()>;
+    async fn install_pod_rules(
+        &mut self,
+        pod_id: &str,
+        guest_ipv4: &str,
+        vpc_id: u16,
+    ) -> Result<()>;
 
     /// Remove all rules associated with a pod.
     async fn remove_pod_rules(&mut self, pod_id: &str) -> Result<()>;

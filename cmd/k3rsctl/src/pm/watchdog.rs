@@ -19,8 +19,12 @@ pub fn run(component: &ComponentName) -> Result<()> {
 
     // Write watchdog PID file
     let watch_pid_path = registry::pids_dir().join(format!("{}-watch.pid", key));
-    fs::write(&watch_pid_path, std::process::id().to_string())
-        .with_context(|| format!("failed to write watchdog PID file {}", watch_pid_path.display()))?;
+    fs::write(&watch_pid_path, std::process::id().to_string()).with_context(|| {
+        format!(
+            "failed to write watchdog PID file {}",
+            watch_pid_path.display()
+        )
+    })?;
 
     loop {
         let reg = registry::load()?;
@@ -129,10 +133,7 @@ pub fn run(component: &ComponentName) -> Result<()> {
 
 /// Spawn the component process (detached with log redirection).
 /// Returns the child PID.
-fn spawn_component(
-    key: &str,
-    entry: &super::types::ProcessEntry,
-) -> Result<u32> {
+fn spawn_component(key: &str, entry: &super::types::ProcessEntry) -> Result<u32> {
     let stdout_file = fs::OpenOptions::new()
         .create(true)
         .append(true)

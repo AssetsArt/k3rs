@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::registry;
 use super::types::{ComponentName, ProcessEntry, ProcessStatus};
@@ -44,12 +44,7 @@ fn install_one(component: &ComponentName, from_source: bool, bin_path: Option<&s
         println!("  Building from source in {}...", workspace.display());
 
         let status = Command::new("cargo")
-            .args([
-                "build",
-                "--release",
-                "-p",
-                component.cargo_package(),
-            ])
+            .args(["build", "--release", "-p", component.cargo_package()])
             .current_dir(&workspace)
             .status()
             .context("failed to run cargo build")?;
@@ -69,9 +64,8 @@ fn install_one(component: &ComponentName, from_source: bool, bin_path: Option<&s
         if !built.exists() {
             bail!("built binary not found at {}", built.display());
         }
-        fs::copy(&built, &dest).with_context(|| {
-            format!("failed to copy {} to {}", built.display(), dest.display())
-        })?;
+        fs::copy(&built, &dest)
+            .with_context(|| format!("failed to copy {} to {}", built.display(), dest.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -130,7 +124,10 @@ fn download_from_github(component: &ComponentName, dest: &Path) -> Result<()> {
     let os = std::env::consts::OS; // "linux" or "macos"
 
     // Fetch latest release tag via GitHub API
-    println!("  Fetching latest release from github.com/{}...", GITHUB_REPO);
+    println!(
+        "  Fetching latest release from github.com/{}...",
+        GITHUB_REPO
+    );
     let tag_output = Command::new("curl")
         .args([
             "-sfL",
@@ -189,9 +186,7 @@ fn download_from_github(component: &ComponentName, dest: &Path) -> Result<()> {
 
 /// Verify a binary works by running `<binary> --version`.
 fn verify_binary(bin: &Path, component: &ComponentName) -> Result<()> {
-    let output = Command::new(bin)
-        .arg("--version")
-        .output();
+    let output = Command::new(bin).arg("--version").output();
 
     match output {
         Ok(out) if out.status.success() => {

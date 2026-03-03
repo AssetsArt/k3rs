@@ -8,7 +8,7 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use crate::AppState;
-use pkg_types::vpc::{Vpc, VpcPeering, VpcStatus, PeeringStatus};
+use pkg_types::vpc::{PeeringStatus, Vpc, VpcPeering, VpcStatus};
 
 // ============================================================
 // VPCs
@@ -187,7 +187,11 @@ pub async fn delete_vpc_peering(
         }
         Err(e) => {
             warn!("Failed to delete VPC peering: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete VPC peering").into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to delete VPC peering",
+            )
+                .into_response()
         }
     }
 }

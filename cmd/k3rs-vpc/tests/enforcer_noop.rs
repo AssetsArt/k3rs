@@ -1,9 +1,7 @@
 //! Integration tests for NoopEnforcer — exercises the NetworkEnforcer trait
 //! through a complete lifecycle. Always runnable, no privileges needed.
 
-use pkg_types::vpc::{
-    PeeringDirection, PeeringStatus, Vpc, VpcPeering, VpcStatus,
-};
+use pkg_types::vpc::{PeeringDirection, PeeringStatus, Vpc, VpcPeering, VpcStatus};
 
 /// Since NoopEnforcer is in a private module, we replicate its behavior for testing.
 /// In a real setup, this would be tested through the daemon binary.
@@ -163,14 +161,18 @@ async fn test_noop_enforcer_pod_rules() {
     enforcer.init().await.unwrap();
     enforcer.ensure_vpc(1, "10.0.1.0/24").await.unwrap();
 
-    assert!(enforcer
-        .install_pod_rules("pod-1", "10.0.1.10", 1)
-        .await
-        .is_ok());
-    assert!(enforcer
-        .install_pod_rules("pod-2", "10.0.1.11", 1)
-        .await
-        .is_ok());
+    assert!(
+        enforcer
+            .install_pod_rules("pod-1", "10.0.1.10", 1)
+            .await
+            .is_ok()
+    );
+    assert!(
+        enforcer
+            .install_pod_rules("pod-2", "10.0.1.11", 1)
+            .await
+            .is_ok()
+    );
 
     assert!(enforcer.remove_pod_rules("pod-1").await.is_ok());
     assert!(enforcer.remove_pod_rules("pod-nonexistent").await.is_ok());
@@ -182,10 +184,12 @@ async fn test_noop_enforcer_tap_rules() {
     enforcer.init().await.unwrap();
     enforcer.ensure_vpc(1, "10.0.1.0/24").await.unwrap();
 
-    assert!(enforcer
-        .install_tap_rules("tap-vm1", "10.0.1.20", 1)
-        .await
-        .is_ok());
+    assert!(
+        enforcer
+            .install_tap_rules("tap-vm1", "10.0.1.20", 1)
+            .await
+            .is_ok()
+    );
     assert!(enforcer.remove_tap_rules("tap-vm1").await.is_ok());
 }
 
@@ -204,15 +208,14 @@ async fn test_noop_enforcer_peering_rules() {
     enforcer.ensure_vpc(1, "10.0.1.0/24").await.unwrap();
     enforcer.ensure_vpc(2, "10.0.2.0/24").await.unwrap();
 
-    assert!(enforcer
-        .install_peering_rules(&peering, &vpcs)
-        .await
-        .is_ok());
+    assert!(
+        enforcer
+            .install_peering_rules(&peering, &vpcs)
+            .await
+            .is_ok()
+    );
     assert!(enforcer.remove_peering_rules("peer-ab").await.is_ok());
-    assert!(enforcer
-        .remove_peering_rules("nonexistent")
-        .await
-        .is_ok());
+    assert!(enforcer.remove_peering_rules("nonexistent").await.is_ok());
 }
 
 #[tokio::test]

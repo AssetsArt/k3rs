@@ -354,12 +354,10 @@ impl ContainerRuntime {
         self.vm_backend
             .get_or_try_init(|| async {
                 if cfg!(target_os = "macos") {
-                    let virt =
-                        crate::virt::VirtualizationBackend::new(&self.data_dir).await?;
+                    let virt = crate::virt::VirtualizationBackend::new(&self.data_dir).await?;
                     Ok(Arc::new(virt) as Arc<dyn RuntimeBackend>)
                 } else {
-                    let fc =
-                        crate::firecracker::FirecrackerBackend::new(&self.data_dir).await?;
+                    let fc = crate::firecracker::FirecrackerBackend::new(&self.data_dir).await?;
                     Ok(Arc::new(fc) as Arc<dyn RuntimeBackend>)
                 }
             })
@@ -483,11 +481,7 @@ impl ContainerRuntime {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to get state for discovered container {}: {}",
-                        id,
-                        e
-                    );
+                    tracing::warn!("Failed to get state for discovered container {}: {}", id, e);
                 }
             }
         }

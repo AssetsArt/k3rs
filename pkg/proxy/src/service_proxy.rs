@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use pingora::prelude::*;
+use pingora_load_balancing::selection::RoundRobin;
+use pingora_load_balancing::{Backend, Backends, LoadBalancer, discovery::Static};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -20,14 +21,15 @@ pub struct RoutingTable {
 /// based on the dynamic routing table populated from Service + Endpoint data.
 pub struct ServiceProxy {
     pub routing_table: Arc<RwLock<RoutingTable>>,
+    /// Per-route LoadBalancer instances built from Pingora's load-balancing crate.
+    lb_table: Arc<RwLock<HashMap<String, Arc<LoadBalancer<RoundRobin>>>>>,
     pub listen_port: u16,
-    round_robin: Arc<AtomicUsize>,
 }
 
 /// The Pingora `ProxyHttp` handler for service proxying.
 struct ServiceProxyHandler {
     routing_table: Arc<RwLock<RoutingTable>>,
-    round_robin: Arc<AtomicUsize>,
+    lb_table: Arc<RwLock<HashMap<String, Arc<LoadBalancer<RoundRobin>>>>>,
 }
 
 #[async_trait]
@@ -50,25 +52,26 @@ impl ProxyHttp for ServiceProxyHandler {
             .unwrap_or("unknown")
             .to_string();
 
-        let table = self.routing_table.read().await;
+        let lb_map = self.lb_table.read().await;
 
-        // Try to match against the routing table
-        if let Some(backends) = table.routes.get(&host)
-            && !backends.is_empty()
-        {
-            let idx = self.round_robin.fetch_add(1, Ordering::Relaxed) % backends.len();
-            let backend = &backends[idx];
-            let peer = HttpPeer::new(backend, false, String::new());
-            return Ok(Box::new(peer));
+        // Try exact match first
+        if let Some(lb) = lb_map.get(&host) {
+            if let Some(upstream) = lb.select(b"", 256) {
+                let peer = HttpPeer::new(upstream, false, String::new());
+                return Ok(Box::new(peer));
+            }
         }
 
         // Fallback: try without port matching (just plain host)
-        for (key, backends) in table.routes.iter() {
-            if key.starts_with(&host) && !backends.is_empty() {
-                let idx = self.round_robin.fetch_add(1, Ordering::Relaxed) % backends.len();
-                let backend = &backends[idx];
-                let peer = HttpPeer::new(backend, false, String::new());
-                return Ok(Box::new(peer));
+        let table = self.routing_table.read().await;
+        for key in table.routes.keys() {
+            if key.starts_with(&host) {
+                if let Some(lb) = lb_map.get(key) {
+                    if let Some(upstream) = lb.select(b"", 256) {
+                        let peer = HttpPeer::new(upstream, false, String::new());
+                        return Ok(Box::new(peer));
+                    }
+                }
             }
         }
 
@@ -77,13 +80,28 @@ impl ProxyHttp for ServiceProxyHandler {
     }
 }
 
+/// Build a `LoadBalancer<RoundRobin>` from a list of backend addresses.
+async fn build_lb(backends: &[String]) -> anyhow::Result<Arc<LoadBalancer<RoundRobin>>> {
+    let mut backend_set = BTreeSet::new();
+    for addr in backends {
+        if let Ok(b) = Backend::new(addr) {
+            backend_set.insert(b);
+        }
+    }
+    let discovery = Static::new(backend_set);
+    let backends = Backends::new(discovery);
+    let lb = LoadBalancer::<RoundRobin>::from_backends(backends);
+    lb.update().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+    Ok(Arc::new(lb))
+}
+
 impl ServiceProxy {
     /// Create a new service proxy listening on the given port.
     pub fn new(listen_port: u16) -> Self {
         Self {
             routing_table: Arc::new(RwLock::new(RoutingTable::default())),
+            lb_table: Arc::new(RwLock::new(HashMap::new())),
             listen_port,
-            round_robin: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -150,9 +168,28 @@ impl ServiceProxy {
             }
         }
 
+        // Build LoadBalancer instances for each route key
+        let mut new_lb_table = HashMap::new();
+        for (key, backends) in &new_routes {
+            match build_lb(backends).await {
+                Ok(lb) => {
+                    new_lb_table.insert(key.clone(), lb);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to build LB for route {}: {}", key, e);
+                }
+            }
+        }
+
         let route_count = new_routes.len();
-        let mut table = self.routing_table.write().await;
-        *table = RoutingTable { routes: new_routes };
+        {
+            let mut table = self.routing_table.write().await;
+            *table = RoutingTable { routes: new_routes };
+        }
+        {
+            let mut lb_map = self.lb_table.write().await;
+            *lb_map = new_lb_table;
+        }
         info!("ServiceProxy routing table updated: {} routes", route_count);
     }
 
@@ -161,9 +198,29 @@ impl ServiceProxy {
     pub async fn load_from_file(&self, path: &str) -> anyhow::Result<usize> {
         let data = std::fs::read_to_string(path)?;
         let routes: HashMap<String, Vec<String>> = serde_json::from_str(&data)?;
+
+        // Build LoadBalancer instances for each route key
+        let mut new_lb_table = HashMap::new();
+        for (key, backends) in &routes {
+            match build_lb(backends).await {
+                Ok(lb) => {
+                    new_lb_table.insert(key.clone(), lb);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to build LB for cached route {}: {}", key, e);
+                }
+            }
+        }
+
         let count = routes.len();
-        let mut table = self.routing_table.write().await;
-        *table = RoutingTable { routes };
+        {
+            let mut table = self.routing_table.write().await;
+            *table = RoutingTable { routes };
+        }
+        {
+            let mut lb_map = self.lb_table.write().await;
+            *lb_map = new_lb_table;
+        }
         Ok(count)
     }
 
@@ -179,7 +236,7 @@ impl ServiceProxy {
 
         let handler = ServiceProxyHandler {
             routing_table: self.routing_table.clone(),
-            round_robin: self.round_robin.clone(),
+            lb_table: self.lb_table.clone(),
         };
 
         let mut proxy = http_proxy_service(&server.configuration, handler);

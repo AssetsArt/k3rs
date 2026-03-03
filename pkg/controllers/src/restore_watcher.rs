@@ -10,8 +10,8 @@
 //! the `on_restore_detected` callback will coordinate a full reload.
 
 use pkg_state::client::StateStore;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -34,10 +34,7 @@ impl RestoreWatcher {
             let mut last_epoch: Option<String> = self.read_epoch().await;
             let mut interval = tokio::time::interval(Duration::from_secs(5));
 
-            info!(
-                "Restore watcher started (initial epoch: {:?})",
-                last_epoch
-            );
+            info!("Restore watcher started (initial epoch: {:?})", last_epoch);
 
             loop {
                 interval.tick().await;

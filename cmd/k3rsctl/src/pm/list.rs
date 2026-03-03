@@ -40,11 +40,11 @@ pub fn list() -> Result<()> {
 
         if let Some(entry) = reg.processes.get(key) {
             let (status_icon, color) = match entry.status {
-                ProcessStatus::Running => ("\u{25cf}", "\x1b[32m"),    // green
-                ProcessStatus::Stopped => ("\u{25cb}", "\x1b[90m"),    // gray
-                ProcessStatus::Crashed => ("\u{2715}", "\x1b[31m"),    // red
+                ProcessStatus::Running => ("\u{25cf}", "\x1b[32m"), // green
+                ProcessStatus::Stopped => ("\u{25cb}", "\x1b[90m"), // gray
+                ProcessStatus::Crashed => ("\u{2715}", "\x1b[31m"), // red
                 ProcessStatus::Installing => ("\u{27f3}", "\x1b[33m"), // yellow
-                ProcessStatus::Errored => ("\u{2715}", "\x1b[31m"),    // red
+                ProcessStatus::Errored => ("\u{2715}", "\x1b[31m"), // red
             };
 
             let pid_str = entry
@@ -104,13 +104,7 @@ pub fn list() -> Result<()> {
             // Not installed — show dim row with badge
             println!(
                 "\x1b[90m\u{25cb} {:<10} {:<16} {:<8} {:<8} {:<10} {:<10} {:<10}\x1b[0m",
-                key,
-                "not installed",
-                "-",
-                "-",
-                "-",
-                "-",
-                "-",
+                key, "not installed", "-", "-", "-", "-", "-",
             );
         }
     }

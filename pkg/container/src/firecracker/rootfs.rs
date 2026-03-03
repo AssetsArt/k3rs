@@ -14,9 +14,7 @@ use tracing::info;
 #[derive(Debug, Clone)]
 pub enum FcRootfsMode {
     /// ext4 block device image (mkfs.ext4 -d, no root required)
-    Ext4 {
-        image_path: PathBuf,
-    },
+    Ext4 { image_path: PathBuf },
     /// virtiofsd shared directory (no disk image)
     Virtiofsd {
         shared_dir: PathBuf,
@@ -112,10 +110,7 @@ impl FcRootfsManager {
     /// Start virtiofsd daemon for a shared directory.
     ///
     /// Returns the virtiofsd PID and socket path.
-    pub async fn start_virtiofsd(
-        rootfs_dir: &Path,
-        socket_path: &Path,
-    ) -> Result<u32> {
+    pub async fn start_virtiofsd(rootfs_dir: &Path, socket_path: &Path) -> Result<u32> {
         info!(
             "[fc-rootfs] Starting virtiofsd: shared={} socket={}",
             rootfs_dir.display(),
@@ -169,7 +164,11 @@ impl FcRootfsManager {
             );
         }
 
-        info!("[fc-rootfs] virtiofsd started (pid={}, socket={})", pid, socket_path.display());
+        info!(
+            "[fc-rootfs] virtiofsd started (pid={}, socket={})",
+            pid,
+            socket_path.display()
+        );
         Ok(pid)
     }
 

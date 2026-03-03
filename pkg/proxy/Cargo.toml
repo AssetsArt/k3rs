@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 pingora = { workspace = true, features = ["proxy"] }
+pingora-load-balancing = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

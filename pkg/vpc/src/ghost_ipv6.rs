@@ -184,7 +184,12 @@ mod tests {
 
     #[test]
     fn test_max_values() {
-        let addr = construct(0xFFFF_FFFF, u32::MAX, u16::MAX, Ipv4Addr::new(255, 255, 255, 255));
+        let addr = construct(
+            0xFFFF_FFFF,
+            u32::MAX,
+            u16::MAX,
+            Ipv4Addr::new(255, 255, 255, 255),
+        );
         let fields = parse(addr).unwrap();
         assert_eq!(fields.platform_prefix, 0xFFFF_FFFF);
         assert_eq!(fields.cluster_id, u32::MAX);

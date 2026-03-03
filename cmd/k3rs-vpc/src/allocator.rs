@@ -49,7 +49,11 @@ fn parse_cidr(cidr: &str) -> anyhow::Result<(u32, u8)> {
     ensure!(parts.len() == 2, "invalid CIDR: {}", cidr);
     let addr: Ipv4Addr = parts[0].parse()?;
     let prefix_len: u8 = parts[1].parse()?;
-    ensure!(prefix_len <= 30, "prefix_len {} too large for allocation", prefix_len);
+    ensure!(
+        prefix_len <= 30,
+        "prefix_len {} too large for allocation",
+        prefix_len
+    );
     Ok((u32::from(addr), prefix_len))
 }
 
@@ -73,7 +77,12 @@ impl GhostAllocator {
             let (base_ip, prefix_len) = match parse_cidr(&vpc.ipv4_cidr) {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!("Skipping VPC {} with invalid CIDR {}: {}", vpc.name, vpc.ipv4_cidr, e);
+                    tracing::warn!(
+                        "Skipping VPC {} with invalid CIDR {}: {}",
+                        vpc.name,
+                        vpc.ipv4_cidr,
+                        e
+                    );
                     continue;
                 }
             };
@@ -95,7 +104,10 @@ impl GhostAllocator {
             let pool = match self.pools.get_mut(&sa.vpc_name) {
                 Some(p) => p,
                 None => {
-                    tracing::warn!("Stored allocation for unknown VPC {}, skipping", sa.vpc_name);
+                    tracing::warn!(
+                        "Stored allocation for unknown VPC {}, skipping",
+                        sa.vpc_name
+                    );
                     continue;
                 }
             };
@@ -129,7 +141,10 @@ impl GhostAllocator {
         info!(
             "GhostAllocator rebuilt {} pools, {} total allocations",
             self.pools.len(),
-            self.pools.values().map(|p| p.allocations.len()).sum::<usize>()
+            self.pools
+                .values()
+                .map(|p| p.allocations.len())
+                .sum::<usize>()
         );
     }
 
@@ -140,7 +155,8 @@ impl GhostAllocator {
             vpcs.iter().map(|v| v.name.as_str()).collect();
 
         // Remove pools for VPCs no longer in the list
-        self.pools.retain(|name, _| new_names.contains(name.as_str()));
+        self.pools
+            .retain(|name, _| new_names.contains(name.as_str()));
 
         // Add pools for new VPCs
         for vpc in vpcs {
@@ -150,7 +166,12 @@ impl GhostAllocator {
             let (base_ip, prefix_len) = match parse_cidr(&vpc.ipv4_cidr) {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!("Skipping VPC {} with invalid CIDR {}: {}", vpc.name, vpc.ipv4_cidr, e);
+                    tracing::warn!(
+                        "Skipping VPC {} with invalid CIDR {}: {}",
+                        vpc.name,
+                        vpc.ipv4_cidr,
+                        e
+                    );
                     continue;
                 }
             };
@@ -169,7 +190,11 @@ impl GhostAllocator {
     }
 
     /// Allocate a (GuestIPv4, GhostIPv6) pair for a pod. Idempotent: same pod_id returns same IP.
-    pub async fn allocate(&mut self, pod_id: &str, vpc_name: &str) -> anyhow::Result<AllocateResult> {
+    pub async fn allocate(
+        &mut self,
+        pod_id: &str,
+        vpc_name: &str,
+    ) -> anyhow::Result<AllocateResult> {
         let pool = self
             .pools
             .get_mut(vpc_name)

@@ -3,7 +3,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use pkg_state::client::StateStore;
 use pkg_state::watch::EventType;
-use pkg_types::backup::{BackupEntry, BackupFile, BackupPki, BackupStatus, BACKUP_VERSION};
+use pkg_types::backup::{BACKUP_VERSION, BackupEntry, BackupFile, BackupPki, BackupStatus};
 use std::io::Write;
 use std::time::Duration;
 use tracing::{error, info, warn};

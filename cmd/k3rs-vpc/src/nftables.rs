@@ -83,7 +83,10 @@ impl NftManager {
         run_nft(&["add", "rule", TABLE_NAME, &egress, "drop"]).await?;
 
         self.active_vpc_chains.insert(vpc_id);
-        info!("nftables: created VPC chains for vpc_id={} cidr={}", vpc_id, cidr);
+        info!(
+            "nftables: created VPC chains for vpc_id={} cidr={}",
+            vpc_id, cidr
+        );
         Ok(())
     }
 
@@ -97,10 +100,16 @@ impl NftManager {
         let egress = format!("vpc_{}_egress", vpc_id);
 
         // Flush then delete (flush removes rules so delete succeeds)
-        run_nft(&["flush", "chain", TABLE_NAME, &ingress]).await.ok();
-        run_nft(&["delete", "chain", TABLE_NAME, &ingress]).await.ok();
+        run_nft(&["flush", "chain", TABLE_NAME, &ingress])
+            .await
+            .ok();
+        run_nft(&["delete", "chain", TABLE_NAME, &ingress])
+            .await
+            .ok();
         run_nft(&["flush", "chain", TABLE_NAME, &egress]).await.ok();
-        run_nft(&["delete", "chain", TABLE_NAME, &egress]).await.ok();
+        run_nft(&["delete", "chain", TABLE_NAME, &egress])
+            .await
+            .ok();
 
         info!("nftables: removed VPC chains for vpc_id={}", vpc_id);
         Ok(())
@@ -158,7 +167,10 @@ impl NftManager {
         ])
         .await?;
 
-        debug!("nftables: installed pod rules for pod={} ipv4={} vpc_id={}", pod_id, guest_ipv4, vpc_id);
+        debug!(
+            "nftables: installed pod rules for pod={} ipv4={} vpc_id={}",
+            pod_id, guest_ipv4, vpc_id
+        );
         Ok(())
     }
 
@@ -227,11 +239,7 @@ impl NftManager {
     ///
     /// Uses `insert rule` so rules go before the drop at end of chain.
     /// All rules are tagged with comment `peering:<name>` for targeted removal.
-    pub async fn install_peering_rules(
-        &self,
-        peering: &VpcPeering,
-        vpcs: &[Vpc],
-    ) -> Result<()> {
+    pub async fn install_peering_rules(&self, peering: &VpcPeering, vpcs: &[Vpc]) -> Result<()> {
         if peering.status != PeeringStatus::Active {
             return Ok(());
         }
@@ -260,42 +268,60 @@ impl NftManager {
             PeeringDirection::Bidirectional => {
                 // A ingress: accept from B
                 run_nft(&[
-                    "insert", "rule", TABLE_NAME,
+                    "insert",
+                    "rule",
+                    TABLE_NAME,
                     &format!("vpc_{}_ingress", id_a),
                     &format!("ip saddr {} accept comment \"{}\"", cidr_b, comment),
-                ]).await?;
+                ])
+                .await?;
                 // A egress: accept to B
                 run_nft(&[
-                    "insert", "rule", TABLE_NAME,
+                    "insert",
+                    "rule",
+                    TABLE_NAME,
                     &format!("vpc_{}_egress", id_a),
                     &format!("ip daddr {} accept comment \"{}\"", cidr_b, comment),
-                ]).await?;
+                ])
+                .await?;
                 // B ingress: accept from A
                 run_nft(&[
-                    "insert", "rule", TABLE_NAME,
+                    "insert",
+                    "rule",
+                    TABLE_NAME,
                     &format!("vpc_{}_ingress", id_b),
                     &format!("ip saddr {} accept comment \"{}\"", cidr_a, comment),
-                ]).await?;
+                ])
+                .await?;
                 // B egress: accept to A
                 run_nft(&[
-                    "insert", "rule", TABLE_NAME,
+                    "insert",
+                    "rule",
+                    TABLE_NAME,
                     &format!("vpc_{}_egress", id_b),
                     &format!("ip daddr {} accept comment \"{}\"", cidr_a, comment),
-                ]).await?;
+                ])
+                .await?;
             }
             PeeringDirection::InitiatorOnly => {
                 // A egress: accept to B
                 run_nft(&[
-                    "insert", "rule", TABLE_NAME,
+                    "insert",
+                    "rule",
+                    TABLE_NAME,
                     &format!("vpc_{}_egress", id_a),
                     &format!("ip daddr {} accept comment \"{}\"", cidr_b, comment),
-                ]).await?;
+                ])
+                .await?;
                 // B ingress: accept from A
                 run_nft(&[
-                    "insert", "rule", TABLE_NAME,
+                    "insert",
+                    "rule",
+                    TABLE_NAME,
                     &format!("vpc_{}_ingress", id_b),
                     &format!("ip saddr {} accept comment \"{}\"", cidr_a, comment),
-                ]).await?;
+                ])
+                .await?;
             }
         }
 

@@ -6,24 +6,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum VpcRequest {
-    Allocate {
-        pod_id: String,
-        vpc_name: String,
-    },
-    Release {
-        pod_id: String,
-        vpc_name: String,
-    },
-    Query {
-        pod_id: String,
-    },
-    GetRoutes {
-        vpc_id: u16,
-    },
-    CheckReachability {
-        src_vpc: String,
-        dst_vpc: String,
-    },
+    Allocate { pod_id: String, vpc_name: String },
+    Release { pod_id: String, vpc_name: String },
+    Query { pod_id: String },
+    GetRoutes { vpc_id: u16 },
+    CheckReachability { src_vpc: String, dst_vpc: String },
     ListVpcs,
     Ping,
 }

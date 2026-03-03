@@ -108,7 +108,11 @@ impl VpcClient {
                     vpc_id,
                 }) => return Ok((guest_ipv4, ghost_ipv6, vpc_id)),
                 Ok(VpcResponse::Error { code, message }) => {
-                    return Err(anyhow::anyhow!("VPC allocate error [{}]: {}", code, message));
+                    return Err(anyhow::anyhow!(
+                        "VPC allocate error [{}]: {}",
+                        code,
+                        message
+                    ));
                 }
                 Ok(other) => {
                     return Err(anyhow::anyhow!(
@@ -117,11 +121,7 @@ impl VpcClient {
                     ));
                 }
                 Err(e) => {
-                    warn!(
-                        "VPC daemon not ready (attempt {}/5): {}",
-                        attempt + 1,
-                        e
-                    );
+                    warn!("VPC daemon not ready (attempt {}/5): {}", attempt + 1, e);
                     last_err = Some(e);
                     tokio::time::sleep(ConnectivityManager::backoff_duration(attempt)).await;
                 }
@@ -155,9 +155,11 @@ impl VpcClient {
     pub async fn list_vpcs(&self) -> anyhow::Result<Vec<VpcInfo>> {
         match self.request(&VpcRequest::ListVpcs).await {
             Ok(VpcResponse::VpcList { vpcs }) => Ok(vpcs),
-            Ok(VpcResponse::Error { code, message }) => {
-                Err(anyhow::anyhow!("VPC list_vpcs error [{}]: {}", code, message))
-            }
+            Ok(VpcResponse::Error { code, message }) => Err(anyhow::anyhow!(
+                "VPC list_vpcs error [{}]: {}",
+                code,
+                message
+            )),
             Ok(other) => Err(anyhow::anyhow!(
                 "Unexpected VPC response to ListVpcs: {:?}",
                 other
@@ -170,9 +172,11 @@ impl VpcClient {
     pub async fn get_routes(&self, vpc_id: u16) -> anyhow::Result<Vec<RouteEntry>> {
         match self.request(&VpcRequest::GetRoutes { vpc_id }).await {
             Ok(VpcResponse::Routes { entries }) => Ok(entries),
-            Ok(VpcResponse::Error { code, message }) => {
-                Err(anyhow::anyhow!("VPC get_routes error [{}]: {}", code, message))
-            }
+            Ok(VpcResponse::Error { code, message }) => Err(anyhow::anyhow!(
+                "VPC get_routes error [{}]: {}",
+                code,
+                message
+            )),
             Ok(other) => Err(anyhow::anyhow!(
                 "Unexpected VPC response to GetRoutes: {:?}",
                 other
@@ -183,11 +187,7 @@ impl VpcClient {
 
     /// Check if two VPCs can reach each other (via peering or same-VPC).
     #[allow(dead_code)]
-    pub async fn check_reachability(
-        &self,
-        src_vpc: &str,
-        dst_vpc: &str,
-    ) -> anyhow::Result<bool> {
+    pub async fn check_reachability(&self, src_vpc: &str, dst_vpc: &str) -> anyhow::Result<bool> {
         let req = VpcRequest::CheckReachability {
             src_vpc: src_vpc.to_string(),
             dst_vpc: dst_vpc.to_string(),
@@ -195,9 +195,11 @@ impl VpcClient {
 
         match self.request(&req).await {
             Ok(VpcResponse::Reachable { reachable }) => Ok(reachable),
-            Ok(VpcResponse::Error { code, message }) => {
-                Err(anyhow::anyhow!("VPC check_reachability error [{}]: {}", code, message))
-            }
+            Ok(VpcResponse::Error { code, message }) => Err(anyhow::anyhow!(
+                "VPC check_reachability error [{}]: {}",
+                code,
+                message
+            )),
             Ok(other) => Err(anyhow::anyhow!(
                 "Unexpected VPC response to CheckReachability: {:?}",
                 other

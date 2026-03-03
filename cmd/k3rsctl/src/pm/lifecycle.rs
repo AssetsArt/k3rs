@@ -4,13 +4,13 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 
-use super::{registry, watchdog};
 use super::types::{ComponentName, ProcessStatus};
+use super::{registry, watchdog};
 
 /// Start one or more components as background daemons.
 pub fn start(component: &ComponentName, foreground: bool) -> Result<()> {
@@ -26,10 +26,12 @@ fn start_one(component: &ComponentName, foreground: bool) -> Result<()> {
     let key = component.key().to_string();
     let reg = registry::load()?;
 
-    let entry = reg
-        .processes
-        .get(&key)
-        .with_context(|| format!("{} is not installed. Run `k3rsctl pm install {}` first.", key, key))?;
+    let entry = reg.processes.get(&key).with_context(|| {
+        format!(
+            "{} is not installed. Run `k3rsctl pm install {}` first.",
+            key, key
+        )
+    })?;
 
     // Check if already running
     if let Some(pid) = entry.pid {
@@ -224,7 +226,10 @@ fn stop_one(component: &ComponentName, force: bool, timeout_secs: u64) -> Result
 
         // Escalate to SIGKILL if still alive
         if is_alive(pid) {
-            eprintln!("  {} did not stop within {}s, sending SIGKILL", key, timeout_secs);
+            eprintln!(
+                "  {} did not stop within {}s, sending SIGKILL",
+                key, timeout_secs
+            );
             signal::kill(nix_pid, Signal::SIGKILL).ok();
             thread::sleep(Duration::from_millis(500));
         }

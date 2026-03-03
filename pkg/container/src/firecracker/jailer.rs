@@ -98,7 +98,10 @@ impl Jailer {
 
         // Hard-link or copy kernel into chroot
         let kernel_dest = chroot.join("vmlinux");
-        if tokio::fs::hard_link(kernel_path, &kernel_dest).await.is_err() {
+        if tokio::fs::hard_link(kernel_path, &kernel_dest)
+            .await
+            .is_err()
+        {
             tokio::fs::copy(kernel_path, &kernel_dest).await?;
         }
 
@@ -109,7 +112,10 @@ impl Jailer {
             .to_string_lossy()
             .to_string();
         let rootfs_dest = chroot.join(&rootfs_name);
-        if tokio::fs::hard_link(rootfs_path, &rootfs_dest).await.is_err() {
+        if tokio::fs::hard_link(rootfs_path, &rootfs_dest)
+            .await
+            .is_err()
+        {
             tokio::fs::copy(rootfs_path, &rootfs_dest).await?;
         }
 

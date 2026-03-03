@@ -26,8 +26,7 @@ pub fn start_sync_loop(
     let client = reqwest::Client::new();
 
     tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
 
         // Track previous VPC IDs to detect removals
         let mut prev_vpc_ids: HashMap<u16, String> = HashMap::new();
@@ -115,7 +114,10 @@ pub fn start_sync_loop(
                 // Ensure rules for new/existing VPCs
                 for vpc in &vpcs {
                     if let Err(e) = enf.ensure_vpc(vpc.vpc_id, &vpc.ipv4_cidr).await {
-                        warn!("VPC sync: failed to ensure VPC vpc_id={}: {}", vpc.vpc_id, e);
+                        warn!(
+                            "VPC sync: failed to ensure VPC vpc_id={}: {}",
+                            vpc.vpc_id, e
+                        );
                     }
                 }
 
@@ -141,18 +143,30 @@ pub fn start_sync_loop(
                 for name in &prev_peering_names {
                     if !current_peering_names.contains(name) {
                         if let Err(e) = enf.remove_peering_rules(name).await {
-                            warn!("VPC sync: failed to remove peering rules for '{}': {}", name, e);
+                            warn!(
+                                "VPC sync: failed to remove peering rules for '{}': {}",
+                                name, e
+                            );
                         }
                     }
                 }
 
                 // Install fresh rules for active peerings (remove old first for idempotency)
-                for peering in peerings.iter().filter(|p| p.status == PeeringStatus::Active) {
+                for peering in peerings
+                    .iter()
+                    .filter(|p| p.status == PeeringStatus::Active)
+                {
                     if let Err(e) = enf.remove_peering_rules(&peering.name).await {
-                        warn!("VPC sync: failed to remove old peering rules for '{}': {}", peering.name, e);
+                        warn!(
+                            "VPC sync: failed to remove old peering rules for '{}': {}",
+                            peering.name, e
+                        );
                     }
                     if let Err(e) = enf.install_peering_rules(peering, &vpcs).await {
-                        warn!("VPC sync: failed to install peering rules for '{}': {}", peering.name, e);
+                        warn!(
+                            "VPC sync: failed to install peering rules for '{}': {}",
+                            peering.name, e
+                        );
                     }
                 }
 

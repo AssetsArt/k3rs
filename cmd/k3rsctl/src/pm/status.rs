@@ -64,13 +64,21 @@ pub fn status() -> Result<()> {
                     for line in content.lines() {
                         let trimmed = line.trim();
                         if trimmed.starts_with("port:") {
-                            println!("  Port:      {}", trimmed.trim_start_matches("port:").trim());
-                        } else if trimmed.starts_with("server:") || trimmed.starts_with("server-url:") {
+                            println!(
+                                "  Port:      {}",
+                                trimmed.trim_start_matches("port:").trim()
+                            );
+                        } else if trimmed.starts_with("server:")
+                            || trimmed.starts_with("server-url:")
+                        {
                             // server: http://... has two colons, take everything after first ':'
                             let full_val = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim();
                             println!("  Server:    {}", full_val);
                         } else if trimmed.starts_with("data-dir:") {
-                            println!("  Data Dir:  {}", trimmed.trim_start_matches("data-dir:").trim());
+                            println!(
+                                "  Data Dir:  {}",
+                                trimmed.trim_start_matches("data-dir:").trim()
+                            );
                         }
                     }
                 }

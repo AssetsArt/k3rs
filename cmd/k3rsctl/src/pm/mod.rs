@@ -1,11 +1,11 @@
-pub mod types;
-pub mod registry;
 pub mod install;
 pub mod lifecycle;
 pub mod list;
 pub mod logs;
+pub mod registry;
 pub mod startup;
 pub mod status;
+pub mod types;
 pub mod watchdog;
 
 use std::path::PathBuf;
@@ -115,7 +115,11 @@ pub async fn handle(action: &PmAction) -> Result<()> {
             component,
             from_source,
             bin_path,
-        } => install::install(component, *from_source, bin_path.as_deref().map(|p| p.to_str().unwrap())),
+        } => install::install(
+            component,
+            *from_source,
+            bin_path.as_deref().map(|p| p.to_str().unwrap()),
+        ),
         PmAction::Start {
             component,
             foreground,

@@ -9,9 +9,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
+use aya::Ebpf;
 use aya::maps::hash_map::HashMap as BpfHashMap;
 use aya::programs::tc::{self, SchedClassifier, TcAttachType};
-use aya::Ebpf;
 use tracing::{debug, info, warn};
 
 use crate::enforcer::NetworkEnforcer;
@@ -50,11 +50,8 @@ impl EbpfEnforcer {
 
         // Load the compiled eBPF program bytes
         // aya-build compiles the eBPF crate and embeds the ELF via include_bytes_aligned!
-        let bpf = Ebpf::load(include_bytes!(concat!(
-            env!("OUT_DIR"),
-            "/k3rs-vpc-ebpf"
-        )))
-        .context("failed to load eBPF programs")?;
+        let bpf = Ebpf::load(include_bytes!(concat!(env!("OUT_DIR"), "/k3rs-vpc-ebpf")))
+            .context("failed to load eBPF programs")?;
 
         Ok(Self {
             bpf,
@@ -151,10 +148,7 @@ impl NetworkEnforcer for EbpfEnforcer {
 
         let (network, mask) = Self::parse_cidr(cidr)?;
 
-        let key = VpcCidrKey {
-            vpc_id,
-            _pad: 0,
-        };
+        let key = VpcCidrKey { vpc_id, _pad: 0 };
         let value = VpcCidrValue { network, mask };
 
         let mut map: BpfHashMap<&mut aya::maps::MapData, VpcCidrKey, VpcCidrValue> =
@@ -175,10 +169,7 @@ impl NetworkEnforcer for EbpfEnforcer {
             return Ok(());
         }
 
-        let key = VpcCidrKey {
-            vpc_id,
-            _pad: 0,
-        };
+        let key = VpcCidrKey { vpc_id, _pad: 0 };
 
         let mut map: BpfHashMap<&mut aya::maps::MapData, VpcCidrKey, VpcCidrValue> =
             BpfHashMap::try_from(
@@ -202,21 +193,16 @@ impl NetworkEnforcer for EbpfEnforcer {
         let ip_host = u32::from(addr);
 
         let key = PodKey { ipv4_addr: ip_host };
-        let value = PodValue {
-            vpc_id,
-            _pad: 0,
-        };
+        let value = PodValue { vpc_id, _pad: 0 };
 
-        let mut map: BpfHashMap<&mut aya::maps::MapData, PodKey, PodValue> =
-            BpfHashMap::try_from(
-                self.bpf
-                    .map_mut("VPC_MEMBERSHIP")
-                    .context("VPC_MEMBERSHIP map not found")?,
-            )?;
+        let mut map: BpfHashMap<&mut aya::maps::MapData, PodKey, PodValue> = BpfHashMap::try_from(
+            self.bpf
+                .map_mut("VPC_MEMBERSHIP")
+                .context("VPC_MEMBERSHIP map not found")?,
+        )?;
         map.insert(key, value, 0)?;
 
-        self.pod_to_ip
-            .insert(pod_id.to_string(), (ip_host, vpc_id));
+        self.pod_to_ip.insert(pod_id.to_string(), (ip_host, vpc_id));
 
         debug!(
             "ebpf: installed pod rules for pod={} ipv4={} vpc_id={}",
@@ -253,17 +239,13 @@ impl NetworkEnforcer for EbpfEnforcer {
 
         // Insert into VPC_MEMBERSHIP map (same as pod rules)
         let key = PodKey { ipv4_addr: ip_host };
-        let value = PodValue {
-            vpc_id,
-            _pad: 0,
-        };
+        let value = PodValue { vpc_id, _pad: 0 };
 
-        let mut map: BpfHashMap<&mut aya::maps::MapData, PodKey, PodValue> =
-            BpfHashMap::try_from(
-                self.bpf
-                    .map_mut("VPC_MEMBERSHIP")
-                    .context("VPC_MEMBERSHIP map not found")?,
-            )?;
+        let mut map: BpfHashMap<&mut aya::maps::MapData, PodKey, PodValue> = BpfHashMap::try_from(
+            self.bpf
+                .map_mut("VPC_MEMBERSHIP")
+                .context("VPC_MEMBERSHIP map not found")?,
+        )?;
         map.insert(key, value, 0)?;
 
         self.tap_to_ip
@@ -356,8 +338,7 @@ impl NetworkEnforcer for EbpfEnforcer {
             }
         }
 
-        self.peering_to_keys
-            .insert(peering.name.clone(), keys);
+        self.peering_to_keys.insert(peering.name.clone(), keys);
 
         info!(
             "ebpf: installed peering rules for '{}' ({} <-> {} {:?})",
@@ -390,12 +371,11 @@ impl NetworkEnforcer for EbpfEnforcer {
 
         // VPC CIDRs
         out.push_str("\n[VPC CIDRs]\n");
-        let map: BpfHashMap<&aya::maps::MapData, VpcCidrKey, VpcCidrValue> =
-            BpfHashMap::try_from(
-                self.bpf
-                    .map("VPC_CIDRS")
-                    .context("VPC_CIDRS map not found")?,
-            )?;
+        let map: BpfHashMap<&aya::maps::MapData, VpcCidrKey, VpcCidrValue> = BpfHashMap::try_from(
+            self.bpf
+                .map("VPC_CIDRS")
+                .context("VPC_CIDRS map not found")?,
+        )?;
         for item in map.iter() {
             if let Ok((k, v)) = item {
                 let net = Ipv4Addr::from(v.network);
@@ -421,11 +401,7 @@ impl NetworkEnforcer for EbpfEnforcer {
         // Peerings
         out.push_str("\n[Peerings]\n");
         let map: BpfHashMap<&aya::maps::MapData, PeeringKey, PeeringValue> =
-            BpfHashMap::try_from(
-                self.bpf
-                    .map("PEERINGS")
-                    .context("PEERINGS map not found")?,
-            )?;
+            BpfHashMap::try_from(self.bpf.map("PEERINGS").context("PEERINGS map not found")?)?;
         for item in map.iter() {
             if let Ok((k, v)) = item {
                 out.push_str(&format!(

@@ -123,7 +123,10 @@ async fn dispatch(
                             )
                             .await
                         {
-                            warn!("enforcer: failed to install pod rules for {}: {}", pod_id, e);
+                            warn!(
+                                "enforcer: failed to install pod rules for {}: {}",
+                                pod_id, e
+                            );
                         }
                     }
                     VpcResponse::Allocated {
@@ -160,10 +163,12 @@ async fn dispatch(
             let entries = alloc
                 .get_routes(vpc_id)
                 .into_iter()
-                .map(|(_pod_id, guest_ipv4, ghost_ipv6)| crate::protocol::RouteEntry {
-                    destination: guest_ipv4,
-                    next_hop: ghost_ipv6,
-                })
+                .map(
+                    |(_pod_id, guest_ipv4, ghost_ipv6)| crate::protocol::RouteEntry {
+                        destination: guest_ipv4,
+                        next_hop: ghost_ipv6,
+                    },
+                )
                 .collect();
             VpcResponse::Routes { entries }
         }

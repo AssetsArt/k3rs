@@ -3,7 +3,7 @@ use chrono::Utc;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use pkg_types::backup::{BackupEntry, BackupFile, BackupPki, BackupStatus, BACKUP_VERSION};
+use pkg_types::backup::{BACKUP_VERSION, BackupEntry, BackupFile, BackupPki, BackupStatus};
 use std::io::{Read, Write};
 use std::sync::atomic::Ordering;
 use tracing::{info, warn};
@@ -268,10 +268,7 @@ async fn do_restore(
             let epoch = Utc::now().timestamp();
             let _ = state
                 .store
-                .put(
-                    "/registry/_restore/epoch",
-                    epoch.to_string().as_bytes(),
-                )
+                .put("/registry/_restore/epoch", epoch.to_string().as_bytes())
                 .await;
             let _ = state
                 .store

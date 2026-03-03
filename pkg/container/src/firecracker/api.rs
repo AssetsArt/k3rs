@@ -197,11 +197,7 @@ impl FcApiClient {
     }
 
     /// Add a network interface backed by a TAP device.
-    pub async fn add_network_interface(
-        &self,
-        iface_id: &str,
-        host_dev_name: &str,
-    ) -> Result<()> {
+    pub async fn add_network_interface(&self, iface_id: &str, host_dev_name: &str) -> Result<()> {
         self.put(
             &format!("/network-interfaces/{}", iface_id),
             &serde_json::json!({

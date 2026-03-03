@@ -242,7 +242,16 @@ impl FirecrackerBackend {
     ) -> Result<()> {
         // Create required guest directories
         for dir in &[
-            "sbin", "proc", "sys", "dev", "dev/pts", "dev/shm", "tmp", "run", "mnt/rootfs", "etc",
+            "sbin",
+            "proc",
+            "sys",
+            "dev",
+            "dev/pts",
+            "dev/shm",
+            "tmp",
+            "run",
+            "mnt/rootfs",
+            "etc",
         ] {
             tokio::fs::create_dir_all(rootfs_dir.join(dir)).await.ok();
         }
@@ -270,9 +279,7 @@ impl FirecrackerBackend {
                 init_src.display()
             );
         } else {
-            tracing::warn!(
-                "[fc] k3rs-init not found — guest will use existing /sbin/k3rs-init"
-            );
+            tracing::warn!("[fc] k3rs-init not found — guest will use existing /sbin/k3rs-init");
         }
 
         // Write config.json
@@ -335,10 +342,7 @@ impl FirecrackerBackend {
         let stderr_file = log_file.try_clone()?;
 
         let mut cmd = std::process::Command::new(&self.firecracker_bin);
-        cmd.args([
-            "--api-sock",
-            &api_socket.to_string_lossy(),
-        ]);
+        cmd.args(["--api-sock", &api_socket.to_string_lossy()]);
 
         cmd.stdout(log_file)
             .stderr(stderr_file)
@@ -604,7 +608,9 @@ impl FirecrackerBackend {
 
         let mut stream = tokio::net::UnixStream::connect(&vsock_uds)
             .await
-            .with_context(|| format!("failed to connect to vsock UDS at {}", vsock_uds.display()))?;
+            .with_context(|| {
+                format!("failed to connect to vsock UDS at {}", vsock_uds.display())
+            })?;
 
         // CONNECT handshake
         stream
@@ -612,21 +618,14 @@ impl FirecrackerBackend {
             .await?;
 
         let mut ok_buf = vec![0u8; 64];
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            stream.read(&mut ok_buf),
-        )
-        .await
-        .context("vsock CONNECT handshake timeout (5s)")?
-        .context("reading vsock CONNECT response")?;
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut ok_buf))
+            .await
+            .context("vsock CONNECT handshake timeout (5s)")?
+            .context("reading vsock CONNECT response")?;
 
         let response = String::from_utf8_lossy(&ok_buf[..n]);
         if !response.starts_with("OK ") {
-            anyhow::bail!(
-                "vsock CONNECT to port {} failed: {}",
-                port,
-                response.trim()
-            );
+            anyhow::bail!("vsock CONNECT to port {} failed: {}", port, response.trim());
         }
 
         Ok(stream)
@@ -776,7 +775,12 @@ impl RuntimeBackend for FirecrackerBackend {
             let log_tail = tokio::fs::read_to_string(self.log_path(id))
                 .await
                 .unwrap_or_default();
-            let log_tail: String = log_tail.lines().rev().take(10).collect::<Vec<_>>().join("\n");
+            let log_tail: String = log_tail
+                .lines()
+                .rev()
+                .take(10)
+                .collect::<Vec<_>>()
+                .join("\n");
 
             if !alive {
                 anyhow::bail!(
@@ -784,14 +788,22 @@ impl RuntimeBackend for FirecrackerBackend {
                      --- firecracker log (last 10 lines) ---\n{}",
                     pid,
                     e,
-                    if log_tail.is_empty() { "(empty)" } else { &log_tail }
+                    if log_tail.is_empty() {
+                        "(empty)"
+                    } else {
+                        &log_tail
+                    }
                 );
             } else {
                 anyhow::bail!(
                     "Firecracker API error during boot configuration: {}\n\
                      --- firecracker log (last 10 lines) ---\n{}",
                     e,
-                    if log_tail.is_empty() { "(empty)" } else { &log_tail }
+                    if log_tail.is_empty() {
+                        "(empty)"
+                    } else {
+                        &log_tail
+                    }
                 );
             }
         }
@@ -977,13 +989,11 @@ impl RuntimeBackend for FirecrackerBackend {
 
             let stdout = child.stdout.as_mut().unwrap();
             let mut ok_buf = vec![0u8; 64];
-            let n = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                stdout.read(&mut ok_buf),
-            )
-            .await
-            .context("vsock CONNECT handshake timeout (5s)")?
-            .context("reading vsock CONNECT response")?;
+            let n =
+                tokio::time::timeout(std::time::Duration::from_secs(5), stdout.read(&mut ok_buf))
+                    .await
+                    .context("vsock CONNECT handshake timeout (5s)")?
+                    .context("reading vsock CONNECT response")?;
 
             let response = String::from_utf8_lossy(&ok_buf[..n]);
             if !response.starts_with("OK ") {
@@ -1058,7 +1068,10 @@ mod tests {
             instances: Arc::new(RwLock::new(HashMap::new())),
             kernel_manager: KernelManager::with_dir(Path::new("/tmp/test")),
             next_cid: Arc::new(tokio::sync::Mutex::new(FC_GUEST_CID)),
-            version_string: format!("firecracker-{}", pkg_constants::runtime::FIRECRACKER_VERSION),
+            version_string: format!(
+                "firecracker-{}",
+                pkg_constants::runtime::FIRECRACKER_VERSION
+            ),
         };
 
         assert_eq!(

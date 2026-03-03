@@ -6,7 +6,9 @@ use std::process::Command;
 
 use crate::is_initrd_mode;
 use crate::oci_spec::OciProcess;
+#[cfg(target_os = "linux")]
 use crate::signals::{reap_zombies, reaper_loop};
+#[cfg(target_os = "linux")]
 use crate::vsock::chroot_into_rootfs;
 
 /// Execute the OCI entrypoint process.

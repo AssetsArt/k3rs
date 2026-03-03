@@ -75,7 +75,10 @@ impl FcNetworkManager {
     pub async fn setup_nat() -> Result<()> {
         // Enable IP forwarding
         if let Err(e) = tokio::fs::write("/proc/sys/net/ipv4/ip_forward", "1").await {
-            warn!("[fc-net] Failed to enable ip_forward: {} (may need root)", e);
+            warn!(
+                "[fc-net] Failed to enable ip_forward: {} (may need root)",
+                e
+            );
         }
 
         // Detect default outbound interface
@@ -94,14 +97,24 @@ impl FcNetworkManager {
         // Check if masquerade rule already exists
         let check = tokio::process::Command::new("iptables")
             .args([
-                "-t", "nat", "-C", "POSTROUTING", "-o", &default_iface, "-j", "MASQUERADE",
+                "-t",
+                "nat",
+                "-C",
+                "POSTROUTING",
+                "-o",
+                &default_iface,
+                "-j",
+                "MASQUERADE",
             ])
             .output()
             .await;
 
         if let Ok(o) = check {
             if o.status.success() {
-                info!("[fc-net] NAT masquerade already configured via {}", default_iface);
+                info!(
+                    "[fc-net] NAT masquerade already configured via {}",
+                    default_iface
+                );
                 return Ok(());
             }
         }
@@ -109,7 +122,14 @@ impl FcNetworkManager {
         // Add masquerade rule
         let output = tokio::process::Command::new("iptables")
             .args([
-                "-t", "nat", "-A", "POSTROUTING", "-o", &default_iface, "-j", "MASQUERADE",
+                "-t",
+                "nat",
+                "-A",
+                "POSTROUTING",
+                "-o",
+                &default_iface,
+                "-j",
+                "MASQUERADE",
             ])
             .output()
             .await?;
