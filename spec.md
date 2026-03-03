@@ -2981,9 +2981,11 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Route sync: pass `vpc_name_to_id` mapping to DNS server for Ghost IPv6 construction
 
 #### Phase 12: NAT64 at Node Level (eBPF)
-- [ ] eBPF NAT64: translate `64:ff9b::x` → IPv4
-- [ ] SNAT: Ghost IPv6 → node IPv4 for outbound
-- [ ] Stateful connection tracking for return traffic
+- [x] eBPF NAT64: `nat64_egress` TC classifier on k3rs0 bridge — detects IPv6 dst `64:ff9b::/96`, extracts embedded IPv4, calls `change_proto(ETH_P_IP)`, writes IPv4 header, computes checksum, redirects to physical interface via `bpf_redirect`
+- [x] SNAT: Ghost IPv6 → node IPv4 for outbound — IPv4 src set to node IPv4 from `NAT64_CONFIG` array map, L4 checksum updated via `l4_csum_replace` with `BPF_F_PSEUDO_HDR` for pseudo-header change (8 calls for 16B→4B address replacement per direction)
+- [x] Stateful connection tracking for return traffic — `NAT64_CONNTRACK` LruHashMap (65536 entries, auto-eviction), key=(protocol, pod_src_port, dst_ipv4, dst_port), value=pod's Ghost IPv6 src. `nat64_ingress` on physical interface matches return IPv4 by reversing ports/IPs for lookup, translates back to IPv6 via `change_proto(ETH_P_IPV6)`, redirects to bridge ingress
+- [x] Userspace support: `install_nat64`/`remove_nat64` on `NetworkEnforcer` trait (default no-op). `EbpfEnforcer` implementation: populates `NAT64_CONFIG` array (index 0) with node IPv4, phys_ifindex, bridge_ifindex; attaches TC classifiers; reads ifindex from sysfs
+- [x] Shared types in `k3rs-vpc-common`: `Nat64Key`, `Nat64Value`, `Nat64Config` structs, `NAT64_PREFIX_U32` constant
 
 #### Phase 13: Cross-Node Mesh
 - [ ] WireGuard tunnel setup between nodes (Ghost IPv6 traffic)

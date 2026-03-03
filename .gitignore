@@ -4,3 +4,4 @@
 ./cmd/k3rs-vmm/.build/*
 build
 .build
+cmd/k3rs-vpc-ebpf/target

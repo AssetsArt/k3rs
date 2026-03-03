@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["cmd/k3rs-vpc-ebpf"]
 members = [
     "cmd/k3rs-server",
     "cmd/k3rs-agent",

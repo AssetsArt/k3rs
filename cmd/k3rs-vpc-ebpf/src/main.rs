@@ -1,16 +1,12 @@
-//! k3rs-vpc eBPF TC classifier programs for VPC network isolation.
+//! k3rs-vpc eBPF TC classifier programs for VPC network isolation and NAT64.
 //!
-//! Attaches to pod TAP/veth interfaces as TC classifiers.
-//! Enforces VPC isolation: only allows traffic within the same VPC
-//! or between peered VPCs. Fails open on error (TC_ACT_OK).
+//! **VPC classifiers** — attach to pod TAP/veth interfaces:
+//!   IPv4 (tc_egress, tc_ingress): BPF HashMap lookup by guest IPv4.
+//!   IPv6 (tc_egress_v6, tc_ingress_v6): VPC ID from Ghost IPv6 bytes 10-11.
 //!
-//! **IPv4 classifiers** (tc_egress, tc_ingress):
-//!   Look up VPC membership in BPF HashMap by guest IPv4 address.
-//!
-//! **IPv6 classifiers** (tc_egress_v6, tc_ingress_v6):
-//!   Extract VPC ID directly from Ghost IPv6 header bytes 10-11 — no map
-//!   lookup needed. Only the PEERINGS map is used for cross-VPC decisions.
-//!   Includes anti-spoofing: non-Ghost src with Ghost dst is dropped.
+//! **NAT64** — attach to k3rs0 bridge + physical interface:
+//!   nat64_egress: IPv6 `64:ff9b::x` → IPv4, SNAT to node IPv4, redirect to phys.
+//!   nat64_ingress: IPv4 return → IPv6, reverse SNAT, redirect to bridge.
 
 #![no_std]
 #![no_main]
@@ -18,17 +14,19 @@
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     macros::{classifier, map},
-    maps::HashMap,
+    maps::{Array, HashMap, LruHashMap},
     programs::TcContext,
 };
-use aya_log_ebpf::info;
+use aya_ebpf_bindings::helpers::bpf_redirect;
 use k3rs_vpc_common::{
-    PeeringKey, PeeringValue, PodKey, PodValue, VpcCidrKey, VpcCidrValue, GHOST_PREFIX,
+    Nat64Config, Nat64Key, Nat64Value, PeeringKey, PeeringValue, PodKey, PodValue, VpcCidrKey,
+    VpcCidrValue, GHOST_PREFIX, NAT64_PREFIX_U32,
 };
-use network_types::eth::{EthHdr, EtherType};
-use network_types::ip::Ipv4Hdr;
+use network_types::eth::EthHdr;
 
 const TC_ACT_SHOT: i32 = 2;
+const ETH_P_IP: u16 = 0x0800;
+const ETH_P_IPV6: u16 = 0x86DD;
 
 // ─── IPv6 packet offsets ────────────────────────────────────────
 // IPv6 header: 4 (ver/TC/flow) + 2 (payload len) + 1 (next hdr) + 1 (hop limit) = 8 bytes
@@ -69,14 +67,13 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
 }
 
 fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
-    let eth_hdr: EthHdr = ctx.load(0).map_err(|_| ())?;
-    if eth_hdr.ether_type != EtherType::Ipv4 {
+    let etype: u16 = ctx.load(12).map_err(|_| ())?;
+    if etype != ETH_P_IP.to_be() {
         return Ok(TC_ACT_OK);
     }
 
-    let ipv4_hdr: Ipv4Hdr = ctx.load(EthHdr::LEN).map_err(|_| ())?;
-    let src_ip = u32::from_be(ipv4_hdr.src_addr());
-    let dst_ip = u32::from_be(ipv4_hdr.dst_addr());
+    let src_ip = u32::from_be(ctx.load::<u32>(EthHdr::LEN + 12).map_err(|_| ())?);
+    let dst_ip = u32::from_be(ctx.load::<u32>(EthHdr::LEN + 16).map_err(|_| ())?);
 
     // Look up source pod
     let src_key = PodKey { ipv4_addr: src_ip };
@@ -128,14 +125,13 @@ pub fn tc_ingress(ctx: TcContext) -> i32 {
 }
 
 fn try_tc_ingress(ctx: &TcContext) -> Result<i32, ()> {
-    let eth_hdr: EthHdr = ctx.load(0).map_err(|_| ())?;
-    if eth_hdr.ether_type != EtherType::Ipv4 {
+    let etype: u16 = ctx.load(12).map_err(|_| ())?;
+    if etype != ETH_P_IP.to_be() {
         return Ok(TC_ACT_OK);
     }
 
-    let ipv4_hdr: Ipv4Hdr = ctx.load(EthHdr::LEN).map_err(|_| ())?;
-    let src_ip = u32::from_be(ipv4_hdr.src_addr());
-    let dst_ip = u32::from_be(ipv4_hdr.dst_addr());
+    let src_ip = u32::from_be(ctx.load::<u32>(EthHdr::LEN + 12).map_err(|_| ())?);
+    let dst_ip = u32::from_be(ctx.load::<u32>(EthHdr::LEN + 16).map_err(|_| ())?);
 
     let src_key = PodKey { ipv4_addr: src_ip };
     let src_pod = unsafe { VPC_MEMBERSHIP.get(&src_key) };
@@ -200,8 +196,8 @@ fn extract_vpc_id(ctx: &TcContext, addr_offset: usize) -> Result<u16, ()> {
 /// 5. Different VPC → check PEERINGS map.
 /// 6. No peering → DROP.
 fn enforce_v6(ctx: &TcContext) -> Result<i32, ()> {
-    let eth_hdr: EthHdr = ctx.load(0).map_err(|_| ())?;
-    if eth_hdr.ether_type != EtherType::Ipv6 {
+    let etype: u16 = ctx.load(12).map_err(|_| ())?;
+    if etype != ETH_P_IPV6.to_be() {
         return Ok(TC_ACT_OK);
     }
 
@@ -264,6 +260,332 @@ pub fn tc_ingress_v6(ctx: TcContext) -> i32 {
         Ok(action) => action,
         Err(_) => TC_ACT_OK, // fail-open
     }
+}
+
+// ─── NAT64 Translation Programs ────────────────────────────────
+
+/// LRU hash for NAT64 connection tracking.
+/// Key: (protocol, pod_src_port, dst_ipv4, dst_port).
+/// Value: pod's Ghost IPv6 source address (for return-path translation).
+#[map]
+static NAT64_CONNTRACK: LruHashMap<Nat64Key, Nat64Value> = LruHashMap::with_max_entries(65536, 0);
+
+/// NAT64 configuration (index 0): node IPv4, physical/bridge interface indices.
+#[map]
+static NAT64_CONFIG: Array<Nat64Config> = Array::with_max_entries(1, 0);
+
+const IPV4_HDR_LEN: usize = 20;
+const IPV6_HDR_LEN: usize = 40;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const TCP_CSUM_OFF: usize = 16;
+const UDP_CSUM_OFF: usize = 6;
+const BPF_F_PSEUDO_HDR: u64 = 0x10;
+
+/// Compute IPv4 header checksum. All inputs in host byte order.
+#[inline(always)]
+fn ipv4_hdr_csum(total_len: u16, ttl: u8, proto: u8, src: u32, dst: u32) -> u16 {
+    let mut s: u32 = 0x4500;
+    s += total_len as u32;
+    s += 0x4000; // DF
+    s += ((ttl as u32) << 8) | (proto as u32);
+    s += (src >> 16) & 0xFFFF;
+    s += src & 0xFFFF;
+    s += (dst >> 16) & 0xFFFF;
+    s += dst & 0xFFFF;
+    s = (s & 0xFFFF) + (s >> 16);
+    s = (s & 0xFFFF) + (s >> 16);
+    !(s as u16)
+}
+
+/// Build `64:ff9b::ipv4` from a host-order IPv4 address.
+#[inline(always)]
+fn nat64_addr(ipv4: u32) -> [u8; 16] {
+    let b = ipv4.to_be_bytes();
+    [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0, b[0], b[1], b[2], b[3]]
+}
+
+/// Convert 16-byte address to 4 raw u32 words for packet store / csum operations.
+/// Each word's in-memory bytes match the IPv6 address bytes on the wire.
+#[inline(always)]
+fn addr_words(a: &[u8; 16]) -> [u32; 4] {
+    [
+        u32::from_ne_bytes([a[0], a[1], a[2], a[3]]),
+        u32::from_ne_bytes([a[4], a[5], a[6], a[7]]),
+        u32::from_ne_bytes([a[8], a[9], a[10], a[11]]),
+        u32::from_ne_bytes([a[12], a[13], a[14], a[15]]),
+    ]
+}
+
+/// Adjust L4 checksum: IPv6 pseudo-header → IPv4 pseudo-header.
+/// `s6`/`d6` are raw u32 words (from ctx.load), `s4`/`d4` are raw u32 (to_be of host-order).
+#[inline(always)]
+fn csum_6to4(
+    ctx: &TcContext,
+    off: usize,
+    s6: [u32; 4],
+    d6: [u32; 4],
+    s4: u32,
+    d4: u32,
+) -> Result<(), ()> {
+    let f = BPF_F_PSEUDO_HDR | 4;
+    ctx.l4_csum_replace(off, s6[0] as u64, s4 as u64, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, s6[1] as u64, 0, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, s6[2] as u64, 0, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, s6[3] as u64, 0, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, d6[0] as u64, d4 as u64, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, d6[1] as u64, 0, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, d6[2] as u64, 0, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, d6[3] as u64, 0, f).map_err(|_| ())?;
+    Ok(())
+}
+
+/// Adjust L4 checksum: IPv4 pseudo-header → IPv6 pseudo-header (reverse).
+#[inline(always)]
+fn csum_4to6(
+    ctx: &TcContext,
+    off: usize,
+    s4: u32,
+    d4: u32,
+    s6: [u32; 4],
+    d6: [u32; 4],
+) -> Result<(), ()> {
+    let f = BPF_F_PSEUDO_HDR | 4;
+    ctx.l4_csum_replace(off, s4 as u64, s6[0] as u64, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, 0, s6[1] as u64, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, 0, s6[2] as u64, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, 0, s6[3] as u64, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, d4 as u64, d6[0] as u64, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, 0, d6[1] as u64, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, 0, d6[2] as u64, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, 0, d6[3] as u64, f).map_err(|_| ())?;
+    Ok(())
+}
+
+// ─── NAT64 Egress: IPv6 64:ff9b:: → IPv4 (on k3rs0 bridge) ──
+
+/// TC classifier on k3rs0 bridge egress: translates outbound IPv6 NAT64 traffic
+/// (dst in `64:ff9b::/96`) to IPv4 with SNAT to node IPv4, then redirects to
+/// the physical interface.
+#[classifier]
+pub fn nat64_egress(mut ctx: TcContext) -> i32 {
+    match try_nat64_egress(&mut ctx) {
+        Ok(a) => a,
+        Err(_) => TC_ACT_OK, // fail-open
+    }
+}
+
+fn try_nat64_egress(ctx: &mut TcContext) -> Result<i32, ()> {
+    // 1. Check IPv6
+    let etype: u16 = ctx.load(12).map_err(|_| ())?;
+    if etype != ETH_P_IPV6.to_be() {
+        return Ok(TC_ACT_OK);
+    }
+
+    // 2. Check dst starts with 64:ff9b::/96
+    let d0: u32 = ctx.load(IPV6_DST_ADDR_OFF).map_err(|_| ())?;
+    if d0 != NAT64_PREFIX_U32.to_be() {
+        return Ok(TC_ACT_OK);
+    }
+    let d1: u32 = ctx.load(IPV6_DST_ADDR_OFF + 4).map_err(|_| ())?;
+    let d2: u32 = ctx.load(IPV6_DST_ADDR_OFF + 8).map_err(|_| ())?;
+    if d1 != 0 || d2 != 0 {
+        return Ok(TC_ACT_OK);
+    }
+    let d3: u32 = ctx.load(IPV6_DST_ADDR_OFF + 12).map_err(|_| ())?; // embedded IPv4 (raw)
+    let dst_ipv4 = u32::from_be(d3); // host order
+
+    // 3. Read IPv6 header fields
+    let payload_len = u16::from_be(ctx.load::<u16>(EthHdr::LEN + 4).map_err(|_| ())?);
+    let next_hdr: u8 = ctx.load(EthHdr::LEN + 6).map_err(|_| ())?;
+    let hop_limit: u8 = ctx.load(EthHdr::LEN + 7).map_err(|_| ())?;
+
+    // Only TCP/UDP
+    if next_hdr != IPPROTO_TCP && next_hdr != IPPROTO_UDP {
+        return Ok(TC_ACT_OK);
+    }
+    if payload_len == 0 {
+        return Ok(TC_ACT_OK); // jumbogram — not supported
+    }
+
+    // 4. Read src IPv6 (raw u32 words for csum, reconstruct bytes for conntrack)
+    let s0: u32 = ctx.load(IPV6_SRC_ADDR_OFF).map_err(|_| ())?;
+    let s1: u32 = ctx.load(IPV6_SRC_ADDR_OFF + 4).map_err(|_| ())?;
+    let s2: u32 = ctx.load(IPV6_SRC_ADDR_OFF + 8).map_err(|_| ())?;
+    let s3: u32 = ctx.load(IPV6_SRC_ADDR_OFF + 12).map_err(|_| ())?;
+    let src_v6 = [s0, s1, s2, s3];
+    let dst_v6 = [d0, d1, d2, d3];
+
+    // Reconstruct src IPv6 bytes for conntrack value
+    let src_ipv6 = {
+        let (w0, w1, w2, w3) = (
+            s0.to_ne_bytes(),
+            s1.to_ne_bytes(),
+            s2.to_ne_bytes(),
+            s3.to_ne_bytes(),
+        );
+        [
+            w0[0], w0[1], w0[2], w0[3], w1[0], w1[1], w1[2], w1[3],
+            w2[0], w2[1], w2[2], w2[3], w3[0], w3[1], w3[2], w3[3],
+        ]
+    };
+
+    // 5. Read L4 ports (before change_proto shifts offsets)
+    let l4 = EthHdr::LEN + IPV6_HDR_LEN;
+    let src_port = u16::from_be(ctx.load::<u16>(l4).map_err(|_| ())?);
+    let dst_port = u16::from_be(ctx.load::<u16>(l4 + 2).map_err(|_| ())?);
+
+    // 6. Get NAT64 config
+    let cfg = NAT64_CONFIG.get(0).ok_or(())?;
+    let node_ipv4 = cfg.node_ipv4;
+    let phys_ifindex = cfg.phys_ifindex;
+
+    // 7. Store conntrack entry for return-path matching
+    let ct_key = Nat64Key {
+        protocol: next_hdr,
+        _pad: 0,
+        src_port,
+        dst_ipv4,
+        dst_port,
+        _pad2: 0,
+    };
+    let ct_val = Nat64Value { src_ipv6 };
+    NAT64_CONNTRACK.insert(&ct_key, &ct_val, 0).map_err(|_| ())?;
+
+    // 8. Change protocol: IPv6 → IPv4 (shrinks L3 header by 20 bytes)
+    ctx.change_proto(ETH_P_IP, 0).map_err(|_| ())?;
+
+    // 9. Write IPv4 header (20 bytes at EthHdr::LEN)
+    let l3 = EthHdr::LEN;
+    let total_len = payload_len + IPV4_HDR_LEN as u16;
+    ctx.store(l3, &0x45u8, 0).map_err(|_| ())?; // version=4, IHL=5
+    ctx.store(l3 + 1, &0u8, 0).map_err(|_| ())?; // DSCP/ECN
+    ctx.store(l3 + 2, &total_len.to_be(), 0).map_err(|_| ())?; // total length
+    ctx.store(l3 + 4, &0u16, 0).map_err(|_| ())?; // identification
+    ctx.store(l3 + 6, &0x4000u16.to_be(), 0).map_err(|_| ())?; // flags=DF, frag_off=0
+    ctx.store(l3 + 8, &hop_limit, 0).map_err(|_| ())?; // TTL
+    ctx.store(l3 + 9, &next_hdr, 0).map_err(|_| ())?; // protocol
+    ctx.store(l3 + 10, &0u16, 0).map_err(|_| ())?; // checksum placeholder
+    let node_raw = node_ipv4.to_be();
+    ctx.store(l3 + 12, &node_raw, 0).map_err(|_| ())?; // src = node IPv4 (SNAT)
+    ctx.store(l3 + 16, &d3, 0).map_err(|_| ())?; // dst = embedded IPv4
+
+    // 10. Compute and store IPv4 header checksum
+    let csum = ipv4_hdr_csum(total_len, hop_limit, next_hdr, node_ipv4, dst_ipv4);
+    ctx.store(l3 + 10, &csum.to_be(), 0).map_err(|_| ())?;
+
+    // 11. Adjust L4 checksum for pseudo-header change (IPv6 addrs → IPv4 addrs)
+    let csum_off = EthHdr::LEN + IPV4_HDR_LEN
+        + if next_hdr == IPPROTO_TCP { TCP_CSUM_OFF } else { UDP_CSUM_OFF };
+    csum_6to4(ctx, csum_off, src_v6, dst_v6, node_raw, d3)?;
+
+    // 12. Redirect to physical interface
+    Ok(unsafe { bpf_redirect(phys_ifindex, 0) } as i32)
+}
+
+// ─── NAT64 Ingress: IPv4 → IPv6 (on physical interface) ──────
+
+/// TC classifier on physical interface ingress: translates return IPv4 traffic
+/// matching a NAT64 conntrack entry back to IPv6, restoring the pod's Ghost IPv6
+/// destination, then redirects to the k3rs0 bridge ingress.
+#[classifier]
+pub fn nat64_ingress(mut ctx: TcContext) -> i32 {
+    match try_nat64_ingress(&mut ctx) {
+        Ok(a) => a,
+        Err(_) => TC_ACT_OK, // fail-open
+    }
+}
+
+fn try_nat64_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
+    // 1. Check IPv4
+    let etype: u16 = ctx.load(12).map_err(|_| ())?;
+    if etype != ETH_P_IP.to_be() {
+        return Ok(TC_ACT_OK);
+    }
+
+    // Only handle standard IPv4 headers (IHL=5, no options)
+    let ver_ihl: u8 = ctx.load(EthHdr::LEN).map_err(|_| ())?;
+    if ver_ihl != 0x45 {
+        return Ok(TC_ACT_OK);
+    }
+
+    let protocol: u8 = ctx.load(EthHdr::LEN + 9).map_err(|_| ())?;
+    if protocol != IPPROTO_TCP && protocol != IPPROTO_UDP {
+        return Ok(TC_ACT_OK);
+    }
+
+    // 2. Read IPv4 addresses
+    let src_raw: u32 = ctx.load(EthHdr::LEN + 12).map_err(|_| ())?;
+    let dst_raw: u32 = ctx.load(EthHdr::LEN + 16).map_err(|_| ())?;
+    let src_ip = u32::from_be(src_raw);
+    let dst_ip = u32::from_be(dst_raw);
+
+    // 3. Quick check: dst must be node IPv4 (SNAT destination)
+    let cfg = NAT64_CONFIG.get(0).ok_or(())?;
+    if dst_ip != cfg.node_ipv4 {
+        return Ok(TC_ACT_OK);
+    }
+    let bridge_ifindex = cfg.bridge_ifindex;
+
+    // 4. Read L4 ports
+    let l4 = EthHdr::LEN + IPV4_HDR_LEN;
+    let sport = u16::from_be(ctx.load::<u16>(l4).map_err(|_| ())?);
+    let dport = u16::from_be(ctx.load::<u16>(l4 + 2).map_err(|_| ())?);
+
+    // 5. Conntrack lookup (reversed: return packet has swapped src/dst ports)
+    //    Egress stored: (proto, pod_src_port, remote_ipv4, remote_port)
+    //    Return pkt:     src=remote_ipv4, src_port=remote_port, dst_port=pod_src_port
+    let ct_key = Nat64Key {
+        protocol,
+        _pad: 0,
+        src_port: dport,  // pod's original src_port
+        dst_ipv4: src_ip, // remote server IPv4
+        dst_port: sport,  // remote server port
+        _pad2: 0,
+    };
+    let ct = unsafe { NAT64_CONNTRACK.get(&ct_key) }.ok_or(())?;
+    let pod_ipv6 = ct.src_ipv6; // copy before packet mutation
+
+    // 6. Read remaining IPv4 fields
+    let tot_len = u16::from_be(ctx.load::<u16>(EthHdr::LEN + 2).map_err(|_| ())?);
+    let payload_len = tot_len - IPV4_HDR_LEN as u16;
+    let ttl: u8 = ctx.load(EthHdr::LEN + 8).map_err(|_| ())?;
+
+    // 7. Construct new IPv6 addresses
+    //    src = 64:ff9b:: + remote IPv4 (return sender)
+    //    dst = pod's Ghost IPv6 (from conntrack)
+    let new_src = nat64_addr(src_ip);
+    let new_dst = pod_ipv6;
+    let s6 = addr_words(&new_src);
+    let d6 = addr_words(&new_dst);
+
+    // 8. Change protocol: IPv4 → IPv6 (grows L3 header by 20 bytes)
+    ctx.change_proto(ETH_P_IPV6, 0).map_err(|_| ())?;
+
+    // 9. Write IPv6 header (40 bytes at EthHdr::LEN)
+    let l3 = EthHdr::LEN;
+    ctx.store(l3, &0x60000000u32.to_be(), 0).map_err(|_| ())?; // ver=6, TC=0, flow=0
+    ctx.store(l3 + 4, &payload_len.to_be(), 0).map_err(|_| ())?; // payload length
+    ctx.store(l3 + 6, &protocol, 0).map_err(|_| ())?; // next header
+    ctx.store(l3 + 7, &ttl, 0).map_err(|_| ())?; // hop limit
+    // src IPv6: 64:ff9b:: + remote_ipv4
+    ctx.store(l3 + 8, &s6[0], 0).map_err(|_| ())?;
+    ctx.store(l3 + 12, &s6[1], 0).map_err(|_| ())?;
+    ctx.store(l3 + 16, &s6[2], 0).map_err(|_| ())?;
+    ctx.store(l3 + 20, &s6[3], 0).map_err(|_| ())?;
+    // dst IPv6: pod's Ghost IPv6
+    ctx.store(l3 + 24, &d6[0], 0).map_err(|_| ())?;
+    ctx.store(l3 + 28, &d6[1], 0).map_err(|_| ())?;
+    ctx.store(l3 + 32, &d6[2], 0).map_err(|_| ())?;
+    ctx.store(l3 + 36, &d6[3], 0).map_err(|_| ())?;
+
+    // 10. Adjust L4 checksum for pseudo-header change (IPv4 addrs → IPv6 addrs)
+    let csum_off = EthHdr::LEN + IPV6_HDR_LEN
+        + if protocol == IPPROTO_TCP { TCP_CSUM_OFF } else { UDP_CSUM_OFF };
+    csum_4to6(ctx, csum_off, src_raw, dst_raw, s6, d6)?;
+
+    // 11. Redirect to k3rs0 bridge ingress
+    Ok(unsafe { bpf_redirect(bridge_ifindex, 1) } as i32) // BPF_F_INGRESS
 }
 
 #[panic_handler]

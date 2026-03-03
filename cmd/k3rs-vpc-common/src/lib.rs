@@ -78,3 +78,48 @@ pub struct PeeringValue {
     /// 1 = allowed, 0 = denied.
     pub allowed: u32,
 }
+
+// ─── NAT64 BPF Map Types ────────────────────────────────────────
+
+/// NAT64 well-known prefix first 4 bytes: `0064:ff9b` (RFC 6052).
+/// Use `NAT64_PREFIX_U32.to_be()` for network byte order comparison.
+pub const NAT64_PREFIX_U32: u32 = 0x0064_ff9b;
+
+/// Key for the NAT64_CONNTRACK LRU hash map.
+/// Identifies a translated outbound flow for return-path matching.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Nat64Key {
+    /// Transport protocol (TCP=6, UDP=17).
+    pub protocol: u8,
+    pub _pad: u8,
+    /// Source port from the pod (kept through SNAT).
+    pub src_port: u16,
+    /// Destination IPv4 extracted from `64:ff9b::x` (host byte order).
+    pub dst_ipv4: u32,
+    /// Destination port.
+    pub dst_port: u16,
+    pub _pad2: u16,
+}
+
+/// Value for the NAT64_CONNTRACK LRU hash map.
+/// Stores the pod's Ghost IPv6 source for reverse translation.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Nat64Value {
+    /// Original Ghost IPv6 source address (16 bytes).
+    pub src_ipv6: [u8; 16],
+}
+
+/// Configuration for the NAT64 eBPF programs (BPF array, index 0).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Nat64Config {
+    /// Node's external IPv4 address for SNAT (host byte order).
+    pub node_ipv4: u32,
+    /// Physical/external interface index (for redirect after IPv6→IPv4).
+    pub phys_ifindex: u32,
+    /// k3rs0 bridge interface index (for redirect after IPv4→IPv6).
+    pub bridge_ifindex: u32,
+    pub _pad: u32,
+}

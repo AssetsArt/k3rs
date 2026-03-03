@@ -10,12 +10,15 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use aya::Ebpf;
+use aya::maps::Array as BpfArray;
 use aya::maps::hash_map::HashMap as BpfHashMap;
 use aya::programs::tc::{self, SchedClassifier, TcAttachType};
 use tracing::{debug, info, warn};
 
 use k3rs_vpc::enforcer::NetworkEnforcer;
-use k3rs_vpc_common::{PeeringKey, PeeringValue, PodKey, PodValue, VpcCidrKey, VpcCidrValue};
+use k3rs_vpc_common::{
+    Nat64Config, PeeringKey, PeeringValue, PodKey, PodValue, VpcCidrKey, VpcCidrValue,
+};
 use pkg_types::vpc::{PeeringDirection, PeeringStatus, Vpc, VpcPeering};
 
 // Safety: these #[repr(C)] types are Copy + 'static with no padding issues.
@@ -25,6 +28,7 @@ unsafe impl aya::Pod for VpcCidrKey {}
 unsafe impl aya::Pod for VpcCidrValue {}
 unsafe impl aya::Pod for PeeringKey {}
 unsafe impl aya::Pod for PeeringValue {}
+unsafe impl aya::Pod for Nat64Config {}
 
 const BPFFS_PIN_DIR: &str = "/sys/fs/bpf/k3rs_vpc";
 
@@ -148,6 +152,17 @@ impl EbpfEnforcer {
             interface
         );
         Ok(())
+    }
+
+    /// Read interface index from sysfs.
+    fn ifindex(iface: &str) -> Result<u32> {
+        let path = format!("/sys/class/net/{}/ifindex", iface);
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read ifindex for {}", iface))?;
+        content
+            .trim()
+            .parse::<u32>()
+            .with_context(|| format!("invalid ifindex for {}", iface))
     }
 }
 
@@ -437,6 +452,90 @@ impl NetworkEnforcer for EbpfEnforcer {
 
             debug!("ebpf: removed peering rules for '{}'", peering_name);
         }
+        Ok(())
+    }
+
+    async fn install_nat64(
+        &mut self,
+        node_ipv4: &str,
+        bridge_name: &str,
+        phys_name: &str,
+    ) -> Result<()> {
+        let addr: Ipv4Addr = node_ipv4.parse().context("invalid node IPv4 for NAT64")?;
+        let node_ip = u32::from(addr);
+        let phys_ifindex = Self::ifindex(phys_name)?;
+        let bridge_ifindex = Self::ifindex(bridge_name)?;
+
+        // Populate NAT64_CONFIG[0]
+        let config = Nat64Config {
+            node_ipv4: node_ip,
+            phys_ifindex,
+            bridge_ifindex,
+            _pad: 0,
+        };
+        let mut map: BpfArray<&mut aya::maps::MapData, Nat64Config> = BpfArray::try_from(
+            self.bpf
+                .map_mut("NAT64_CONFIG")
+                .context("NAT64_CONFIG map not found")?,
+        )?;
+        map.set(0, config, 0)?;
+
+        // Add clsact qdisc to bridge and physical interfaces
+        for iface in [bridge_name, phys_name] {
+            if let Err(e) = tc::qdisc_add_clsact(iface) {
+                let msg = format!("{}", e);
+                if !msg.contains("exist") {
+                    warn!("ebpf: failed to add clsact qdisc to {}: {}", iface, e);
+                }
+            }
+        }
+
+        // Attach nat64_egress to bridge egress
+        let egress: &mut SchedClassifier = self
+            .bpf
+            .program_mut("nat64_egress")
+            .context("nat64_egress program not found")?
+            .try_into()?;
+        egress.load().ok();
+        egress
+            .attach(bridge_name, TcAttachType::Egress)
+            .with_context(|| format!("failed to attach nat64_egress to {}", bridge_name))?;
+
+        // Attach nat64_ingress to physical interface ingress
+        let ingress: &mut SchedClassifier = self
+            .bpf
+            .program_mut("nat64_ingress")
+            .context("nat64_ingress program not found")?
+            .try_into()?;
+        ingress.load().ok();
+        ingress
+            .attach(phys_name, TcAttachType::Ingress)
+            .with_context(|| format!("failed to attach nat64_ingress to {}", phys_name))?;
+
+        info!(
+            "ebpf: installed NAT64 (node_ipv4={}, bridge={}, phys={})",
+            node_ipv4, bridge_name, phys_name
+        );
+        Ok(())
+    }
+
+    async fn remove_nat64(&mut self) -> Result<()> {
+        // Programs remain attached but are harmless without config.
+        // Clear the config map to disable translation.
+        let config = Nat64Config {
+            node_ipv4: 0,
+            phys_ifindex: 0,
+            bridge_ifindex: 0,
+            _pad: 0,
+        };
+        if let Ok(map_data) = self.bpf.map_mut("NAT64_CONFIG") {
+            if let Ok(mut map) =
+                BpfArray::<&mut aya::maps::MapData, Nat64Config>::try_from(map_data)
+            {
+                map.set(0, config, 0).ok();
+            }
+        }
+        info!("ebpf: removed NAT64 config");
         Ok(())
     }
 

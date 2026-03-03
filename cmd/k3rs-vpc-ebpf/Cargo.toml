@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 aya-ebpf = "0.1"
+aya-ebpf-bindings = "0.1"
 aya-log-ebpf = "0.1"
 k3rs-vpc-common = { path = "../k3rs-vpc-common" }
 network-types = "0.0.7"

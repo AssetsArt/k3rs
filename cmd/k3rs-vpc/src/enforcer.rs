@@ -66,6 +66,23 @@ pub trait NetworkEnforcer: Send {
     /// Remove all rules associated with a peering by name.
     async fn remove_peering_rules(&mut self, peering_name: &str) -> Result<()>;
 
+    /// Install NAT64 translation programs on the bridge and physical interfaces.
+    /// Populates the NAT64_CONFIG BPF map and attaches nat64_egress (bridge egress)
+    /// and nat64_ingress (physical ingress) TC classifiers.
+    async fn install_nat64(
+        &mut self,
+        _node_ipv4: &str,
+        _bridge_name: &str,
+        _phys_name: &str,
+    ) -> Result<()> {
+        Ok(()) // default no-op
+    }
+
+    /// Remove NAT64 translation state.
+    async fn remove_nat64(&mut self) -> Result<()> {
+        Ok(()) // default no-op
+    }
+
     /// Return a human-readable snapshot of current enforcement state.
     async fn snapshot(&self) -> Result<String>;
 
