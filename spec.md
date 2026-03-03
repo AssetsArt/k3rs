@@ -598,116 +598,162 @@ struct Allocation {
 
 ##### Data Plane Enforcement (eBPF, IPv6-Native)
 
-`k3rs-vpc` enforces VPC isolation via eBPF using [Aya](https://aya-rs.dev/) (pure Rust eBPF toolchain). A `NetworkEnforcer` trait abstracts backends: `EbpfEnforcer` (Linux) and `NoopEnforcer` (macOS — log-only, no isolation).
+`k3rs-vpc` enforces VPC isolation via eBPF using [Aya](https://aya-rs.dev/) (pure Rust eBPF toolchain). A `NetworkEnforcer` trait abstracts backends: `EbpfEnforcer` (Linux), `NftManager` (nftables CLI), and `NoopEnforcer` (macOS — log-only, no isolation).
 
-**Key advantage of IPv6-native enforcement**: With Ghost IPv6 as the real pod address, the eBPF classifier extracts VPC ID directly from the IPv6 header (bytes 10-11) — **no BPF map lookup needed** for same-VPC traffic decisions. This eliminates the `vpc_membership` and `vpc_cidrs` maps entirely.
+**Key design**: Pods send and receive IPv4 packets — apps bind `0.0.0.0`, use normal sockets. At the veth boundary on the host side, **per-pod SIIT** (Stateless IP/ICMP Translation) translates every IPv4 packet to IPv6 before it reaches the `k3rs0` bridge. The bridge is IPv6-only. VPC isolation is implicit in the Ghost IPv6 addresses — overlapping IPv4 CIDRs across VPCs work because IPv4 never reaches the bridge.
 
-```c
-// IPv6-native: VPC ID is embedded in the address
-// bytes 10-11 of IPv6 src/dst = VpcID — O(1) true constant time
-u16 src_vpc = (ipv6_hdr->saddr[10] << 8) | ipv6_hdr->saddr[11];
-u16 dst_vpc = (ipv6_hdr->daddr[10] << 8) | ipv6_hdr->daddr[11];
-// Same VPC? Allow. Different VPC? Check peerings map.
-```
-
-**Per-pod SIIT (Stateless IP/ICMP Translation)** translates ALL IPv4 from pods to IPv6 at the veth boundary. The bridge (`k3rs0`) sees only IPv6. VPC isolation is implicit in the Ghost IPv6 addresses — overlapping IPv4 CIDRs across VPCs are fully supported because IPv4 never reaches the bridge.
+###### Packet Flow Architecture
 
 ```
-Pod (IPv4 only) → eth0 → [veth pair] → veth-host
-                                           ↓
-                            SIIT ingress: IPv4→IPv6 (siit_in)
-                                           ↓
-                     k3rs0 bridge (IPv6 only) ──→ IPv6 VPC enforcement
-                         ↓                              ↓
-              ┌──────────┴──────────┐       dst veth-host (another pod)
-              │                     │              ↓
-       NAT64 egress          dst veth-host   SIIT egress: IPv6→IPv4 (siit_out)
-       (external IPv4)            ↓                ↓
-              ↓           SIIT egress: IPv6→IPv4   dst Pod receives IPv4
-         phys interface         ↓
-                          dst Pod receives IPv4
+                      Pod A (10.0.0.12, vpc1)         Pod B (10.0.0.13, vpc1)
+                           │                                  ▲
+                     IPv4  │ src=.12 dst=.13           IPv4   │ src=.12 dst=.13
+                           ▼                                  │
+                        [eth0]                             [eth0]
+                           │  veth pair                       │  veth pair
+                           ▼                                  │
+                     [veth-podA]                        [veth-podB]
+                           │                                  ▲
+               ┌───────────┤ host-side veth      host-side veth├──────────┐
+               │  INGRESS  │                                  │  EGRESS  │
+               │           │                                  │          │
+               │  ① siit_in│ IPv4→IPv6                        │⑤siit_out │ IPv6→IPv4
+               │           │ src=podA_ghost                   │          │ src=10.0.0.12
+               │           │ dst=podB_ghost                   │          │ dst=10.0.0.13
+               │           │                                  │          │
+               │  ② tc_ingress_v6                             │④tc_egress_v6
+               │           │ vpc_id=1==1 → ALLOW              │          │ vpc_id=1==1 → ALLOW
+               └───────────┤                                  ├──────────┘
+                           │                                  │
+                           ▼          ③ bridge FDB            │
+                        k3rs0 ────── IPv6 forward ────────────┘
+                      (IPv6 only)
 ```
 
 **Direction clarification** (host-side veth perspective):
 - **INGRESS** = packets FROM pod TO host (pod sends IPv4 → SIIT translates to IPv6)
 - **EGRESS** = packets FROM host TO pod (bridge delivers IPv6 → SIIT translates to IPv4)
 
-**BPF maps** for veth interfaces:
+###### eBPF Programs per Veth (OCI containers)
 
-| Map | Key | Value | Purpose |
-|-----|-----|-------|---------|
-| `SIIT_CONFIG` | `ifindex: u32` | `(ghost_ipv6, guest_ipv4, vpc_id)` | Per-interface SIIT config |
-| `VPC_PODS` | `(vpc_id: u16, ipv4: u32)` | `ghost_ipv6: [u8; 16]` | Intra-VPC IPv4→Ghost IPv6 resolution |
-| `PEERINGS` | `(src_vpc: u16, dst_vpc: u16)` | `allowed: u32` | Cross-VPC allow rules |
+4 TC classifiers attached by `EbpfEnforcer::attach_tc_siit()`:
 
-**SIIT ingress (`siit_in`)** — IPv4→IPv6 translation (per-packet):
+| Program | Direction | Function |
+|---------|-----------|----------|
+| `siit_in` | Ingress | IPv4→IPv6 translation + anti-spoof |
+| `tc_ingress_v6` | Ingress | IPv6 VPC enforcement (Ghost prefix + VPC ID) |
+| `siit_out` | Egress | IPv6→IPv4 translation |
+| `tc_egress_v6` | Egress | IPv6 VPC enforcement (Ghost prefix + VPC ID) |
 
-1. Check IPv4 ethertype, pass non-IPv4
-2. Read ifindex → lookup `SIIT_CONFIG[ifindex]` for pod's ghost_ipv6, guest_ipv4, vpc_id
-3. Anti-spoof: `src_ipv4 != config.guest_ipv4` → DROP
-4. Resolve dst IPv6: lookup `VPC_PODS[(vpc_id, dst_ipv4)]` → intra-VPC pod's ghost_ipv6, or `64:ff9b::dst_ipv4` for external
-5. `change_proto(ETH_P_IPV6)` → write IPv6 header, adjust L4 checksum
-6. Return `TC_ACT_OK` — packet continues as IPv6 on the bridge
+###### BPF Maps
 
-**SIIT egress (`siit_out`)** — IPv6→IPv4 translation (per-packet):
+| Map | Key | Value | Max | Purpose |
+|-----|-----|-------|-----|---------|
+| `SIIT_CONFIG` | `ifindex: u32` | `{ ghost_ipv6, guest_ipv4, vpc_id }` | 1024 | Per-veth SIIT config |
+| `VPC_PODS` | `{ vpc_id: u16, ipv4: u32 }` | `{ ghost_ipv6: [u8;16] }` | 4096 | Intra-VPC IPv4→Ghost IPv6 resolution |
+| `PEERINGS` | `{ src_vpc: u16, dst_vpc: u16 }` | `{ allowed: u32 }` | 1024 | Cross-VPC allow rules |
+| `VPC_MEMBERSHIP` | `{ ipv4: u32 }` | `{ vpc_id: u16 }` | 4096 | TAP-only (VM IPv4 path) |
+| `VPC_CIDRS` | `{ vpc_id: u16 }` | `{ network, mask }` | 256 | TAP-only (VM IPv4 path) |
 
-1. Check IPv6 ethertype, pass non-IPv6
-2. Read ifindex → lookup `SIIT_CONFIG[ifindex]`
-3. Verify dst IPv6 matches `config.ghost_ipv6` (not for this pod → pass)
-4. Extract src IPv4 from bytes 12-15 of src IPv6 (works for both Ghost and `64:ff9b::`)
-5. `change_proto(ETH_P_IP)` → write IPv4 header + checksum, adjust L4 checksum
-6. Return `TC_ACT_OK` — pod receives IPv4
+`SIIT_CONFIG` and `VPC_PODS` are populated by `install_veth_rules()`. `VPC_MEMBERSHIP` is used only by the IPv4 classifiers on TAP interfaces (VMs).
 
-**IPv6 VPC enforcement** (`tc_egress_v6`/`tc_ingress_v6`) still runs on the same veth (after SIIT), enforcing isolation on the now-IPv6 traffic:
-
-1. Parse Ethernet header → if not IPv6, pass
-2. Parse IPv6 header → validate Ghost prefix (bytes 0-3 = `fd6b:3372`)
-3. If not Ghost traffic → pass (NDP, external IPv6)
-4. Extract src VPC ID (bytes 10-11 of src addr) and dst VPC ID (bytes 10-11 of dst addr)
-5. Same VPC → **allow** (no map lookup)
-6. Different VPC → check `PEERINGS` map → allow if peered, **drop** otherwise
-7. On any parse error → allow (fail-open)
-
-**TAP interfaces** (VMs) retain the original IPv4 classifiers (`tc_egress`/`tc_ingress`) and `VPC_MEMBERSHIP` map — they are NOT on the k3rs0 bridge and use separate iptables NAT.
+###### SIIT Ingress (`siit_in`) — IPv4→IPv6
 
 ```rust
-// k3rs-vpc-ebpf: IPv6-native TC classifier (simplified)
-fn try_classify_v6(ctx: &TcContext) -> Result<i32, ()> {
-    let eth_hdr: EthHdr = ctx.load(0).map_err(|_| ())?;
-    if eth_hdr.ether_type != EtherType::Ipv6 {
-        return Ok(TC_ACT_OK);  // pass IPv4 (NAT64 traffic)
-    }
+// k3rs-vpc-ebpf: siit_in (simplified)
+fn try_siit_in(ctx: &mut TcContext) -> Result<i32, ()> {
+    if etype != ETH_P_IP { return Ok(TC_ACT_OK); }       // pass non-IPv4
+    if protocol != TCP && protocol != UDP { return Ok(TC_ACT_OK); }
 
-    let ipv6_hdr: Ipv6Hdr = ctx.load(EthHdr::LEN).map_err(|_| ())?;
-    let src = ipv6_hdr.src_addr();
-    let dst = ipv6_hdr.dst_addr();
+    let ifindex = (*skb).ingress_ifindex;
+    let config = SIIT_CONFIG.get(ifindex)?;               // pod's ghost, ipv4, vpc_id
 
-    // Validate Ghost prefix
-    let src_prefix = u32::from_be_bytes([src[0], src[1], src[2], src[3]]);
-    let dst_prefix = u32::from_be_bytes([dst[0], dst[1], dst[2], dst[3]]);
-    if src_prefix != PLATFORM_PREFIX || dst_prefix != PLATFORM_PREFIX {
-        return Ok(TC_ACT_OK);  // not Ghost traffic
-    }
+    if src_ipv4 != config.guest_ipv4 { return Ok(TC_ACT_SHOT); }  // anti-spoof
 
-    // Extract VPC ID directly from address bytes 10-11
-    let src_vpc = u16::from_be_bytes([src[10], src[11]]);
-    let dst_vpc = u16::from_be_bytes([dst[10], dst[11]]);
+    let dst_ipv6 = match VPC_PODS.get((config.vpc_id, dst_ipv4)) {
+        Some(pod) => pod.ghost_ipv6,                      // intra-VPC
+        None      => nat64_addr(dst_ipv4),                // external: 64:ff9b::x
+    };
 
-    if src_vpc == dst_vpc { return Ok(TC_ACT_OK); }  // same VPC → allow
-
-    // Cross-VPC: check peering map
-    let key = PeeringKey { src_vpc_id: src_vpc, dst_vpc_id: dst_vpc };
-    if let Some(p) = unsafe { PEERINGS.get(&key) } {
-        if p.allowed != 0 { return Ok(TC_ACT_OK); }
-    }
-
-    Ok(TC_ACT_SHOT)  // different VPC, no peering → drop
+    ctx.change_proto(ETH_P_IPV6)?;                        // grow L3 header +20
+    // write IPv6 header: src=config.ghost_ipv6, dst=dst_ipv6
+    // adjust L4 checksum via csum_4to6()
+    Ok(TC_ACT_OK)
 }
 ```
 
-Programs and maps are **pinned to bpffs** at `/sys/fs/bpf/k3rs/`, surviving daemon crashes. On restart, `k3rs-vpc` re-opens pinned maps and reconciles them against VpcStore state — no traffic interruption.
+The `VPC_PODS` lookup is keyed by `(vpc_id, ipv4)` — this is how overlapping CIDRs work: `(vpc1, 10.0.0.13)` resolves to podB, while `(vpc2, 10.0.0.13)` resolves to podC. The vpc_id comes from `SIIT_CONFIG` which is keyed by the source pod's veth ifindex — so each pod can only resolve destinations within its own VPC.
 
-**Anti-spoofing**: SIIT ingress (`siit_in`) enforces source IPv4 validation — a pod can only send packets with its assigned `guest_ipv4` as source. The IPv6 VPC classifier validates Ghost prefix and version on every packet. Packets with non-Ghost source addresses targeting Ghost destinations are dropped. Pods cannot forge traffic appearing to come from a different VPC.
+###### SIIT Egress (`siit_out`) — IPv6→IPv4
+
+```rust
+// k3rs-vpc-ebpf: siit_out (simplified)
+fn try_siit_out(ctx: &mut TcContext) -> Result<i32, ()> {
+    if etype != ETH_P_IPV6 { return Ok(TC_ACT_OK); }     // pass non-IPv6
+    if next_hdr != TCP && next_hdr != UDP { return Ok(TC_ACT_OK); }
+
+    let ifindex = (*skb).ifindex;
+    let config = SIIT_CONFIG.get(ifindex)?;
+
+    if dst_ipv6 != config.ghost_ipv6 { return Ok(TC_ACT_OK); }  // not for this pod
+
+    let src_ipv4 = bytes_12_15(src_ipv6);                 // works for Ghost + NAT64
+    let dst_ipv4 = config.guest_ipv4;
+
+    ctx.change_proto(ETH_P_IP)?;                          // shrink L3 header -20
+    // write IPv4 header: src=src_ipv4, dst=dst_ipv4
+    // compute IPv4 header checksum, adjust L4 checksum via csum_6to4()
+    Ok(TC_ACT_OK)
+}
+```
+
+###### IPv6 VPC Enforcement (`tc_egress_v6` / `tc_ingress_v6`)
+
+Runs on the same veth after SIIT. Enforces isolation on the now-IPv6 traffic:
+
+1. Check IPv6 ethertype, pass non-IPv6
+2. Validate Ghost prefix (bytes 0-3 = `fd6b:3372`) on src and dst
+3. Anti-spoofing: non-Ghost src + Ghost dst → DROP
+4. Extract VPC ID from bytes 10-11 — no BPF map lookup
+5. Same VPC → **allow**
+6. Different VPC → check `PEERINGS` map → allow if peered, **drop** otherwise
+7. On any parse error → allow (fail-open)
+
+###### TAP Interfaces (VMs)
+
+VMs use TAP devices, not veth pairs, and are NOT on the k3rs0 bridge. They retain the original IPv4 classifiers (`tc_egress`/`tc_ingress`) which use the `VPC_MEMBERSHIP` map. SIIT is not used for TAP interfaces.
+
+###### Overlapping CIDRs — Worked Example
+
+Setup: vpc1 and vpc2 both use `10.0.0.0/16`. podA=vpc1(10.0.0.12), podB=vpc1(10.0.0.13), podC=vpc2(10.0.0.13).
+
+```
+VPC_PODS map:
+  (vpc_id=1, 10.0.0.12) → podA_ghost    fd6b:3372:...:0001:...:0a00:000c
+  (vpc_id=1, 10.0.0.13) → podB_ghost    fd6b:3372:...:0001:...:0a00:000d
+  (vpc_id=2, 10.0.0.13) → podC_ghost    fd6b:3372:...:0002:...:0a00:000d
+```
+
+podA sends to 10.0.0.13:
+- `siit_in` on veth-podA reads vpc_id=1 from SIIT_CONFIG
+- `VPC_PODS[(1, 10.0.0.13)]` → **podB_ghost** (not podC — vpc_id scopes the lookup)
+- `tc_ingress_v6`: src_vpc=1, dst_vpc=1 → same VPC → ALLOW
+- Bridge forwards to veth-podB
+- `siit_out` on veth-podB: dst matches podB_ghost → translate to IPv4
+- podB receives `src=10.0.0.12 dst=10.0.0.13` — correct
+
+podC (vpc2, 10.0.0.13) is never involved.
+
+###### Anti-Spoofing
+
+Two layers of anti-spoofing enforcement:
+
+1. **SIIT layer**: `siit_in` validates `src_ipv4 == config.guest_ipv4` — a pod can only send packets from its assigned IPv4. A pod in vpc1 cannot pretend to be a pod in vpc2.
+2. **IPv6 layer**: `tc_ingress_v6` validates Ghost prefix — non-Ghost src targeting Ghost dst is dropped. Pods cannot forge Ghost IPv6 addresses from a different VPC.
+
+###### Programs & Pinning
+
+Programs and maps are **pinned to bpffs** at `/sys/fs/bpf/k3rs_vpc/`, surviving daemon crashes. On restart, `k3rs-vpc` re-opens pinned maps and reconciles them against VpcStore state — no traffic interruption.
 
 ##### Recovery & Reconciliation
 
