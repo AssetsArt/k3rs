@@ -7,8 +7,10 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use tracing::{debug, info, warn};
 
+use crate::enforcer::NetworkEnforcer;
 use crate::store::StoredAllocation;
 use pkg_types::vpc::{PeeringDirection, PeeringStatus, Vpc, VpcPeering};
 
@@ -373,6 +375,77 @@ impl NftManager {
         run_nft(&["delete", "table", TABLE_NAME]).await?;
         info!("nftables: deleted table {}", TABLE_NAME);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl NetworkEnforcer for NftManager {
+    fn name(&self) -> &str {
+        "nftables"
+    }
+
+    async fn init(&mut self) -> Result<()> {
+        self.init_table().await
+    }
+
+    async fn ensure_vpc(&mut self, vpc_id: u16, cidr: &str) -> Result<()> {
+        self.ensure_vpc_chains(vpc_id, cidr).await
+    }
+
+    async fn remove_vpc(&mut self, vpc_id: u16) -> Result<()> {
+        self.remove_vpc_chains(vpc_id).await
+    }
+
+    async fn install_pod_rules(
+        &mut self,
+        pod_id: &str,
+        guest_ipv4: &str,
+        vpc_id: u16,
+    ) -> Result<()> {
+        NftManager::install_pod_rules(self, pod_id, guest_ipv4, vpc_id).await
+    }
+
+    async fn remove_pod_rules(&mut self, pod_id: &str) -> Result<()> {
+        NftManager::remove_pod_rules(self, pod_id).await
+    }
+
+    async fn install_tap_rules(
+        &mut self,
+        tap_name: &str,
+        guest_ipv4: &str,
+        vpc_id: u16,
+    ) -> Result<()> {
+        NftManager::install_tap_rules(self, tap_name, guest_ipv4, vpc_id).await
+    }
+
+    async fn remove_tap_rules(&mut self, tap_name: &str) -> Result<()> {
+        NftManager::remove_tap_rules(self, tap_name).await
+    }
+
+    async fn install_peering_rules(&mut self, peering: &VpcPeering, vpcs: &[Vpc]) -> Result<()> {
+        NftManager::install_peering_rules(self, peering, vpcs).await
+    }
+
+    async fn remove_peering_rules(&mut self, peering_name: &str) -> Result<()> {
+        NftManager::remove_peering_rules(self, peering_name).await
+    }
+
+    async fn snapshot(&self) -> Result<String> {
+        NftManager::snapshot(self).await
+    }
+
+    async fn cleanup(&mut self) -> Result<()> {
+        NftManager::cleanup(self).await
+    }
+
+    async fn rebuild(
+        &mut self,
+        vpcs: &[Vpc],
+        allocations: &[StoredAllocation],
+        peerings: &[VpcPeering],
+    ) -> Result<()> {
+        self.rebuild_from_allocations(vpcs, allocations, peerings)
+            .await
     }
 }
 

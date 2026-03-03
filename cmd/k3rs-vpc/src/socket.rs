@@ -9,14 +9,14 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::allocator::GhostAllocator;
-use crate::nftables::NftManager;
+use crate::enforcer::NetworkEnforcer;
 use crate::protocol::{VpcInfo, VpcRequest, VpcResponse};
 
 /// Start the Unix socket listener. Returns a `JoinHandle` for the accept loop.
 pub fn start_listener(
     socket_path: &str,
     allocator: Arc<Mutex<GhostAllocator>>,
-    nft: Arc<Mutex<NftManager>>,
+    enforcer: Arc<Mutex<Box<dyn NetworkEnforcer>>>,
 ) -> JoinHandle<()> {
     // Remove stale socket file if it exists
     let _ = std::fs::remove_file(socket_path);
@@ -34,9 +34,9 @@ pub fn start_listener(
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let allocator = Arc::clone(&allocator);
-                    let nft = Arc::clone(&nft);
+                    let enforcer = Arc::clone(&enforcer);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, allocator, nft).await {
+                        if let Err(e) = handle_connection(stream, allocator, enforcer).await {
                             warn!("VPC socket connection error: {}", e);
                         }
                     });
@@ -52,7 +52,7 @@ pub fn start_listener(
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     allocator: Arc<Mutex<GhostAllocator>>,
-    nft: Arc<Mutex<NftManager>>,
+    enforcer: Arc<Mutex<Box<dyn NetworkEnforcer>>>,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -64,7 +64,7 @@ async fn handle_connection(
         }
 
         let response = match serde_json::from_str::<VpcRequest>(&line) {
-            Ok(req) => dispatch(req, &allocator, &nft).await,
+            Ok(req) => dispatch(req, &allocator, &enforcer).await,
             Err(e) => VpcResponse::Error {
                 code: "parse_error".to_string(),
                 message: format!("Invalid request: {}", e),
@@ -82,7 +82,7 @@ async fn handle_connection(
 async fn dispatch(
     req: VpcRequest,
     allocator: &Arc<Mutex<GhostAllocator>>,
-    nft: &Arc<Mutex<NftManager>>,
+    enforcer: &Arc<Mutex<Box<dyn NetworkEnforcer>>>,
 ) -> VpcResponse {
     match req {
         VpcRequest::Ping => VpcResponse::Pong,
@@ -112,10 +112,10 @@ async fn dispatch(
             let is_existing = alloc.query(&pod_id).is_some();
             match alloc.allocate(&pod_id, &vpc_name).await {
                 Ok(result) => {
-                    // Only install nftables rules for new allocations
+                    // Only install rules for new allocations
                     if !is_existing {
-                        let nft_mgr = nft.lock().await;
-                        if let Err(e) = nft_mgr
+                        let mut enf = enforcer.lock().await;
+                        if let Err(e) = enf
                             .install_pod_rules(
                                 &pod_id,
                                 &result.guest_ipv4.to_string(),
@@ -123,7 +123,7 @@ async fn dispatch(
                             )
                             .await
                         {
-                            warn!("nftables: failed to install pod rules for {}: {}", pod_id, e);
+                            warn!("enforcer: failed to install pod rules for {}: {}", pod_id, e);
                         }
                     }
                     VpcResponse::Allocated {
@@ -142,10 +142,10 @@ async fn dispatch(
             let mut alloc = allocator.lock().await;
             match alloc.release(&pod_id, &vpc_name).await {
                 Ok(()) => {
-                    // Remove nftables rules for this pod
-                    let nft_mgr = nft.lock().await;
-                    if let Err(e) = nft_mgr.remove_pod_rules(&pod_id).await {
-                        warn!("nftables: failed to remove pod rules for {}: {}", pod_id, e);
+                    // Remove rules for this pod
+                    let mut enf = enforcer.lock().await;
+                    if let Err(e) = enf.remove_pod_rules(&pod_id).await {
+                        warn!("enforcer: failed to remove pod rules for {}: {}", pod_id, e);
                     }
                     VpcResponse::Released
                 }

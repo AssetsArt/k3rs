@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::allocator::GhostAllocator;
-use crate::nftables::NftManager;
+use crate::enforcer::NetworkEnforcer;
 use crate::store::{VpcDaemonMeta, VpcStore};
 use pkg_types::vpc::{PeeringStatus, Vpc, VpcPeering};
 use pkg_vpc::constants::PLATFORM_PREFIX;
@@ -20,7 +20,7 @@ pub fn start_sync_loop(
     token: String,
     store: Arc<VpcStore>,
     allocator: Arc<Mutex<GhostAllocator>>,
-    nft: Arc<Mutex<NftManager>>,
+    enforcer: Arc<Mutex<Box<dyn NetworkEnforcer>>>,
     interval_secs: u64,
 ) -> JoinHandle<()> {
     let client = reqwest::Client::new();
@@ -103,27 +103,27 @@ pub fn start_sync_loop(
                 alloc.sync_vpcs(&vpcs);
             }
 
-            // Sync nftables VPC chains
+            // Sync enforcer VPC rules
             {
                 let current_vpc_ids: HashMap<u16, String> = vpcs
                     .iter()
                     .map(|v| (v.vpc_id, v.ipv4_cidr.clone()))
                     .collect();
 
-                let mut nft_mgr = nft.lock().await;
+                let mut enf = enforcer.lock().await;
 
-                // Ensure chains for new/existing VPCs
+                // Ensure rules for new/existing VPCs
                 for vpc in &vpcs {
-                    if let Err(e) = nft_mgr.ensure_vpc_chains(vpc.vpc_id, &vpc.ipv4_cidr).await {
-                        warn!("VPC sync: failed to ensure nft chains for vpc_id={}: {}", vpc.vpc_id, e);
+                    if let Err(e) = enf.ensure_vpc(vpc.vpc_id, &vpc.ipv4_cidr).await {
+                        warn!("VPC sync: failed to ensure VPC vpc_id={}: {}", vpc.vpc_id, e);
                     }
                 }
 
-                // Remove chains for VPCs that no longer exist
+                // Remove rules for VPCs that no longer exist
                 for vpc_id in prev_vpc_ids.keys() {
                     if !current_vpc_ids.contains_key(vpc_id) {
-                        if let Err(e) = nft_mgr.remove_vpc_chains(*vpc_id).await {
-                            warn!("VPC sync: failed to remove nft chains for vpc_id={}: {}", vpc_id, e);
+                        if let Err(e) = enf.remove_vpc(*vpc_id).await {
+                            warn!("VPC sync: failed to remove VPC vpc_id={}: {}", vpc_id, e);
                         }
                     }
                 }
@@ -140,7 +140,7 @@ pub fn start_sync_loop(
                 // Remove rules for peerings that disappeared or became inactive
                 for name in &prev_peering_names {
                     if !current_peering_names.contains(name) {
-                        if let Err(e) = nft_mgr.remove_peering_rules(name).await {
+                        if let Err(e) = enf.remove_peering_rules(name).await {
                             warn!("VPC sync: failed to remove peering rules for '{}': {}", name, e);
                         }
                     }
@@ -148,10 +148,10 @@ pub fn start_sync_loop(
 
                 // Install fresh rules for active peerings (remove old first for idempotency)
                 for peering in peerings.iter().filter(|p| p.status == PeeringStatus::Active) {
-                    if let Err(e) = nft_mgr.remove_peering_rules(&peering.name).await {
+                    if let Err(e) = enf.remove_peering_rules(&peering.name).await {
                         warn!("VPC sync: failed to remove old peering rules for '{}': {}", peering.name, e);
                     }
-                    if let Err(e) = nft_mgr.install_peering_rules(peering, &vpcs).await {
+                    if let Err(e) = enf.install_peering_rules(peering, &vpcs).await {
                         warn!("VPC sync: failed to install peering rules for '{}': {}", peering.name, e);
                     }
                 }

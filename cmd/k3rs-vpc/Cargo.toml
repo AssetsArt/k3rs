@@ -19,6 +19,19 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
 slatedb = { workspace = true }
+async-trait = { workspace = true }
 pkg-types = { path = "../../pkg/types" }
 pkg-constants = { path = "../../pkg/constants" }
 pkg-vpc = { path = "../../pkg/vpc" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { workspace = true }
+aya-log = { workspace = true }
+k3rs-vpc-common = { path = "../k3rs-vpc-common" }
+
+[build-dependencies]
+aya-build = { version = "0.1", optional = true }
+
+[features]
+default = []
+ebpf = ["aya-build"]

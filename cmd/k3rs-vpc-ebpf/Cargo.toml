@@ -1,0 +1,25 @@
+[package]
+name = "k3rs-vpc-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "k3rs-vpc-ebpf"
+path = "src/main.rs"
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+k3rs-vpc-common = { path = "../k3rs-vpc-common" }
+network-types = "0.0.7"
+
+[profile.dev]
+opt-level = 2
+debug = false
+overflow-checks = false
+lto = true
+panic = "abort"
+
+[profile.release]
+lto = true
+panic = "abort"

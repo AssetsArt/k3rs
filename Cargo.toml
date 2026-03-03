@@ -20,7 +20,10 @@ members = [
     "cmd/k3rs-ui",
     "cmd/k3rs-init",
     "cmd/k3rs-vpc",
+    "cmd/k3rs-vpc-common",
 ]
+# Note: cmd/k3rs-vpc-ebpf is NOT a workspace member — it targets bpfel-unknown-none
+# and must be built separately via aya-build (see cmd/k3rs-vpc/build.rs).
 # k3rs-init is Linux-only (guest PID 1) — excluded from default builds on macOS.
 # k3rs-vmm is macOS-only (Virtualization.framework) — excluded from default builds on Linux.
 # Build explicitly: cargo build -p k3rs-vmm (macOS) / cargo build -p k3rs-init --target x86_64-unknown-linux-musl (Linux)
@@ -68,3 +71,5 @@ pkg-constants = { path = "pkg/constants" }
 crossterm = "0.28"
 flate2 = "1.0"
 nix = { version = "0.29", features = ["signal", "process"] }
+aya = "0.13"
+aya-log = "0.2"

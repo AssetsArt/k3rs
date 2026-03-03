@@ -1,9 +1,14 @@
 mod allocator;
+mod enforcer;
 mod nftables;
+mod noop_enforcer;
 mod protocol;
 mod socket;
 mod store;
 mod sync;
+
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+mod ebpf_enforcer;
 
 use std::sync::Arc;
 
@@ -14,7 +19,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::allocator::GhostAllocator;
-use crate::nftables::NftManager;
+use crate::enforcer::NetworkEnforcer;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -45,6 +50,37 @@ struct Cli {
     /// Log format: 'text' or 'json'
     #[arg(long, default_value = "text")]
     log_format: String,
+}
+
+/// Select the best available network enforcement backend.
+/// Priority: eBPF (Linux + feature, if available) → nftables (Linux) → noop (any platform).
+fn select_enforcer() -> Box<dyn NetworkEnforcer> {
+    #[cfg(target_os = "linux")]
+    {
+        // Try eBPF first (only available with the ebpf feature)
+        #[cfg(feature = "ebpf")]
+        {
+            match ebpf_enforcer::EbpfEnforcer::new() {
+                Ok(e) => {
+                    info!("Selected eBPF network enforcer");
+                    return Box::new(e);
+                }
+                Err(e) => {
+                    info!("eBPF not available ({}), falling back to nftables", e);
+                }
+            }
+        }
+
+        // Fall back to nftables
+        info!("Selected nftables network enforcer");
+        return Box::new(nftables::NftManager::new());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        info!("Selected noop network enforcer (non-Linux platform)");
+        Box::new(noop_enforcer::NoopEnforcer::new())
+    }
 }
 
 #[tokio::main]
@@ -121,21 +157,22 @@ async fn main() -> anyhow::Result<()> {
     allocator.rebuild_pools(&cached_vpcs, &stored_allocations);
     let allocator = Arc::new(Mutex::new(allocator));
 
-    // 7. Initialize nftables: create table, rebuild rules from stored allocations
-    let mut nft = NftManager::new();
-    nft.init_table().await?;
-    nft.rebuild_from_allocations(&cached_vpcs, &stored_allocations, &cached_peerings)
+    // 7. Initialize network enforcer and rebuild rules from stored state
+    let mut enforcer = select_enforcer();
+    enforcer.init().await?;
+    enforcer
+        .rebuild(&cached_vpcs, &stored_allocations, &cached_peerings)
         .await?;
-    if let Ok(snapshot) = nft.snapshot().await {
+    if let Ok(snapshot) = enforcer.snapshot().await {
         if let Err(e) = store.save_nft_snapshot(&snapshot).await {
-            tracing::warn!("Failed to save nftables snapshot: {}", e);
+            tracing::warn!("Failed to save enforcer snapshot: {}", e);
         }
     }
-    let nft = Arc::new(Mutex::new(nft));
+    let enforcer: Arc<Mutex<Box<dyn NetworkEnforcer>>> = Arc::new(Mutex::new(enforcer));
 
     // 8. Start Unix socket listener
     let socket_handle =
-        socket::start_listener(&socket_path, Arc::clone(&allocator), Arc::clone(&nft));
+        socket::start_listener(&socket_path, Arc::clone(&allocator), Arc::clone(&enforcer));
 
     // 9. Start VPC sync loop (every 10s)
     let sync_handle = sync::start_sync_loop(
@@ -143,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
         token,
         Arc::clone(&store),
         Arc::clone(&allocator),
-        Arc::clone(&nft),
+        Arc::clone(&enforcer),
         10,
     );
 
@@ -159,12 +196,12 @@ async fn main() -> anyhow::Result<()> {
     // Clean up socket file
     let _ = std::fs::remove_file(&socket_path);
 
-    // Note: nftables rules are NOT cleaned up on graceful shutdown.
-    // Rules persist in kernel for zero-downtime restarts. Use --cleanup flag for uninstall.
+    // Note: enforcement rules are NOT cleaned up on graceful shutdown.
+    // Rules persist for zero-downtime restarts. Use --cleanup flag for uninstall.
 
     // Close the store (flush WAL)
     drop(allocator);
-    drop(nft);
+    drop(enforcer);
     Arc::try_unwrap(store)
         .map_err(|_| anyhow::anyhow!("VpcStore still has outstanding references"))?
         .close()
