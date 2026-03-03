@@ -1,7 +1,7 @@
 //! k3rs0 bridge manager — creates and manages the pod network bridge.
 //!
 //! Called once at agent startup (idempotent). All pods on the same node
-//! attach their veth host-side to this bridge for same-node connectivity.
+//! attach their netkit host-side to this bridge for same-node connectivity.
 
 use anyhow::Result;
 use tracing::{info, warn};

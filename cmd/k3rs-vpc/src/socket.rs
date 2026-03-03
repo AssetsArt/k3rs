@@ -187,36 +187,36 @@ async fn dispatch(
                 },
             }
         }
-        VpcRequest::AttachVeth {
-            veth_name,
+        VpcRequest::AttachNetkit {
+            nk_name,
             guest_ipv4,
             ghost_ipv6,
             vpc_id,
         } => {
             let mut enf = enforcer.lock().await;
             match enf
-                .install_veth_rules(&veth_name, &guest_ipv4, &ghost_ipv6, vpc_id)
+                .install_netkit_rules(&nk_name, &guest_ipv4, &ghost_ipv6, vpc_id)
                 .await
             {
                 Ok(()) => VpcResponse::Ok,
                 Err(e) => VpcResponse::Error {
-                    code: "attach_veth_error".to_string(),
+                    code: "attach_netkit_error".to_string(),
                     message: format!(
-                        "Failed to attach TC to veth {}: {}",
-                        veth_name, e
+                        "Failed to attach TC to netkit {}: {}",
+                        nk_name, e
                     ),
                 },
             }
         }
-        VpcRequest::DetachVeth { veth_name } => {
+        VpcRequest::DetachNetkit { nk_name } => {
             let mut enf = enforcer.lock().await;
-            match enf.remove_veth_rules(&veth_name).await {
+            match enf.remove_netkit_rules(&nk_name).await {
                 Ok(()) => VpcResponse::Ok,
                 Err(e) => VpcResponse::Error {
-                    code: "detach_veth_error".to_string(),
+                    code: "detach_netkit_error".to_string(),
                     message: format!(
-                        "Failed to detach TC from veth {}: {}",
-                        veth_name, e
+                        "Failed to detach TC from netkit {}: {}",
+                        nk_name, e
                     ),
                 },
             }

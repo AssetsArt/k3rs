@@ -79,31 +79,7 @@ pub struct PeeringValue {
     pub allowed: u32,
 }
 
-// ─── SIIT BPF Map Types ─────────────────────────────────────────
-
-/// Key for the SIIT_CONFIG BPF hash map.
-/// Per-interface SIIT configuration, keyed by host-side veth ifindex.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SiitKey {
-    /// Interface index of the host-side veth.
-    pub ifindex: u32,
-}
-
-/// Value for the SIIT_CONFIG BPF hash map.
-/// Contains the pod's Ghost IPv6 address, guest IPv4, and VPC ID.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SiitValue {
-    /// Pod's Ghost IPv6 address (16 bytes).
-    pub ghost_ipv6: [u8; 16],
-    /// Pod's guest IPv4 address in host byte order.
-    pub guest_ipv4: u32,
-    /// VPC ID this pod belongs to.
-    pub vpc_id: u16,
-    /// Padding for alignment.
-    pub _pad: u16,
-}
+// ─── SIIT / VPC Pod BPF Map Types ───────────────────────────────
 
 /// Key for the VPC_PODS BPF hash map.
 /// VPC-scoped pod lookup for intra-VPC IPv4→Ghost IPv6 translation.

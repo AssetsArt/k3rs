@@ -345,7 +345,7 @@ async fn run_pod_lifecycle(
         return;
     }
 
-    // 2b. Pod network setup (veth pair + Ghost IPv6) — skip for VM backends
+    // 2b. Pod network setup (netkit pair + Ghost IPv6) — skip for VM backends
     #[cfg(target_os = "linux")]
     if runtime.backend_name_for(&pod.id) != "vm" {
         if let Some((ref guest_ipv4, ref ghost_ipv6, _)) = vpc_alloc {

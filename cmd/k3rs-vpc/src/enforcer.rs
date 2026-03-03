@@ -48,18 +48,18 @@ pub trait NetworkEnforcer: Send {
     /// Remove all rules associated with a TAP interface.
     async fn remove_tap_rules(&mut self, tap_name: &str) -> Result<()>;
 
-    /// Install veth-interface-specific rules (OCI container traffic).
-    /// Attaches SIIT translators (IPv4↔IPv6) and IPv6 VPC classifiers to the host-side veth.
-    async fn install_veth_rules(
+    /// Install netkit-interface-specific rules (OCI container traffic).
+    /// Attaches SIIT translators (IPv4↔IPv6) and IPv6 VPC classifiers to the host-side netkit.
+    async fn install_netkit_rules(
         &mut self,
-        veth_name: &str,
+        nk_name: &str,
         guest_ipv4: &str,
         ghost_ipv6: &str,
         vpc_id: u16,
     ) -> Result<()>;
 
-    /// Remove all rules associated with a veth interface.
-    async fn remove_veth_rules(&mut self, veth_name: &str) -> Result<()>;
+    /// Remove all rules associated with a netkit interface.
+    async fn remove_netkit_rules(&mut self, nk_name: &str) -> Result<()>;
 
     /// Install cross-VPC peering accept rules.
     async fn install_peering_rules(&mut self, peering: &VpcPeering, vpcs: &[Vpc]) -> Result<()>;

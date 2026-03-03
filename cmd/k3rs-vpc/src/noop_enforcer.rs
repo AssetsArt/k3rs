@@ -75,19 +75,19 @@ impl NetworkEnforcer for NoopEnforcer {
         Ok(())
     }
 
-    async fn install_veth_rules(
+    async fn install_netkit_rules(
         &mut self,
-        veth_name: &str,
+        nk_name: &str,
         guest_ipv4: &str,
         ghost_ipv6: &str,
         vpc_id: u16,
     ) -> Result<()> {
-        debug!(veth_name, guest_ipv4, ghost_ipv6, vpc_id, "noop: install_veth_rules");
+        debug!(nk_name, guest_ipv4, ghost_ipv6, vpc_id, "noop: install_netkit_rules");
         Ok(())
     }
 
-    async fn remove_veth_rules(&mut self, veth_name: &str) -> Result<()> {
-        debug!(veth_name, "noop: remove_veth_rules");
+    async fn remove_netkit_rules(&mut self, nk_name: &str) -> Result<()> {
+        debug!(nk_name, "noop: remove_netkit_rules");
         Ok(())
     }
 

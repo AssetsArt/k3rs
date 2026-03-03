@@ -11,15 +11,15 @@ pub enum VpcRequest {
     Query { pod_id: String },
     GetRoutes { vpc_id: u16 },
     CheckReachability { src_vpc: String, dst_vpc: String },
-    /// Attach SIIT translators and IPv6 VPC classifiers to a veth interface.
-    AttachVeth {
-        veth_name: String,
+    /// Attach SIIT translators and IPv6 VPC classifiers to a netkit interface.
+    AttachNetkit {
+        nk_name: String,
         guest_ipv4: String,
         ghost_ipv6: String,
         vpc_id: u16,
     },
-    /// Detach TC classifiers from a veth interface.
-    DetachVeth { veth_name: String },
+    /// Detach TC classifiers from a netkit interface.
+    DetachNetkit { nk_name: String },
     ListVpcs,
     Ping,
 }
@@ -49,7 +49,7 @@ pub enum VpcResponse {
         vpcs: Vec<VpcInfo>,
     },
     Pong,
-    /// Acknowledgement for AttachVeth / DetachVeth.
+    /// Acknowledgement for AttachNetkit / DetachNetkit.
     Ok,
     Error {
         code: String,

@@ -10,6 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use aya::Ebpf;
+use aya::EbpfLoader;
 use aya::maps::Array as BpfArray;
 use aya::maps::hash_map::HashMap as BpfHashMap;
 use aya::programs::tc::{self, SchedClassifier, TcAttachType};
@@ -17,8 +18,8 @@ use tracing::{debug, info, warn};
 
 use k3rs_vpc::enforcer::NetworkEnforcer;
 use k3rs_vpc_common::{
-    Nat64Config, PeeringKey, PeeringValue, PodKey, PodValue, SiitKey, SiitValue, VpcCidrKey,
-    VpcCidrValue, VpcPodKey, VpcPodValue,
+    Nat64Config, PeeringKey, PeeringValue, PodKey, PodValue, VpcCidrKey, VpcCidrValue, VpcPodKey,
+    VpcPodValue,
 };
 use pkg_types::vpc::{PeeringDirection, PeeringStatus, Vpc, VpcPeering};
 
@@ -30,25 +31,27 @@ unsafe impl aya::Pod for VpcCidrValue {}
 unsafe impl aya::Pod for PeeringKey {}
 unsafe impl aya::Pod for PeeringValue {}
 unsafe impl aya::Pod for Nat64Config {}
-unsafe impl aya::Pod for SiitKey {}
-unsafe impl aya::Pod for SiitValue {}
 unsafe impl aya::Pod for VpcPodKey {}
 unsafe impl aya::Pod for VpcPodValue {}
 
 const BPFFS_PIN_DIR: &str = "/sys/fs/bpf/k3rs_vpc";
+const EBPF_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/k3rs-vpc-ebpf"));
 
 pub struct EbpfEnforcer {
     bpf: Ebpf,
     active_vpcs: HashSet<u16>,
-    attached_interfaces: HashSet<String>,
     /// Reverse lookup: pod_id → (ipv4 in host byte order, vpc_id)
     pod_to_ip: HashMap<String, (u32, u16)>,
     /// Reverse lookup: tap_name → (ipv4 in host byte order, vpc_id)
     tap_to_ip: HashMap<String, (u32, u16)>,
     /// Reverse lookup: peering_name → list of PeeringKey entries inserted
     peering_to_keys: HashMap<String, Vec<PeeringKey>>,
-    /// Reverse lookup: veth_name → (ifindex, guest_ipv4_host_order, vpc_id) for SIIT cleanup
-    veth_to_siit: HashMap<String, (u32, u32, u16)>,
+    /// Per-netkit Ebpf instances: nk_name → Ebpf (holds SIIT programs with baked-in .rodata)
+    pod_bpf: HashMap<String, Ebpf>,
+    /// Reverse lookup: nk_name → (guest_ipv4_host_order, vpc_id) for VPC_PODS cleanup
+    nk_vpc_pods: HashMap<String, (u32, u16)>,
+    /// Per-TAP Ebpf instances: tap_name → Ebpf (holds tc_egress/tc_ingress with baked-in .rodata)
+    tap_bpf: HashMap<String, Ebpf>,
 }
 
 impl EbpfEnforcer {
@@ -59,19 +62,25 @@ impl EbpfEnforcer {
             bail!("bpffs not mounted at /sys/fs/bpf");
         }
 
-        // Load the compiled eBPF program bytes
-        // aya-build compiles the eBPF crate and embeds the ELF via include_bytes_aligned!
-        let bpf = Ebpf::load(include_bytes!(concat!(env!("OUT_DIR"), "/k3rs-vpc-ebpf")))
+        // Ensure pin directory exists before loading (pinned maps need it)
+        std::fs::create_dir_all(BPFFS_PIN_DIR)
+            .with_context(|| format!("failed to create {}", BPFFS_PIN_DIR))?;
+
+        // Load the main eBPF instance with map_pin_path for shared pinned maps
+        let bpf = EbpfLoader::new()
+            .map_pin_path(BPFFS_PIN_DIR)
+            .load(EBPF_BYTES)
             .context("failed to load eBPF programs")?;
 
         Ok(Self {
             bpf,
             active_vpcs: HashSet::new(),
-            attached_interfaces: HashSet::new(),
             pod_to_ip: HashMap::new(),
             tap_to_ip: HashMap::new(),
             peering_to_keys: HashMap::new(),
-            veth_to_siit: HashMap::new(),
+            pod_bpf: HashMap::new(),
+            nk_vpc_pods: HashMap::new(),
+            tap_bpf: HashMap::new(),
         })
     }
 
@@ -93,140 +102,6 @@ impl EbpfEnforcer {
             !0u32 << (32 - prefix_len)
         };
         Ok((network, mask))
-    }
-
-    /// Attach TC classifiers to an interface (IPv4 + IPv6, both ingress and egress).
-    fn attach_tc(&mut self, interface: &str) -> Result<()> {
-        if self.attached_interfaces.contains(interface) {
-            return Ok(());
-        }
-
-        // Add clsact qdisc (required for TC programs)
-        if let Err(e) = tc::qdisc_add_clsact(interface) {
-            // Ignore "already exists" errors
-            let msg = format!("{}", e);
-            if !msg.contains("exist") {
-                warn!("ebpf: failed to add clsact qdisc to {}: {}", interface, e);
-            }
-        }
-
-        // Attach IPv4 egress
-        let egress_prog: &mut SchedClassifier = self
-            .bpf
-            .program_mut("tc_egress")
-            .context("tc_egress program not found")?
-            .try_into()?;
-        egress_prog.load().ok(); // may already be loaded
-        egress_prog
-            .attach(interface, TcAttachType::Egress)
-            .with_context(|| format!("failed to attach tc_egress to {}", interface))?;
-
-        // Attach IPv4 ingress
-        let ingress_prog: &mut SchedClassifier = self
-            .bpf
-            .program_mut("tc_ingress")
-            .context("tc_ingress program not found")?
-            .try_into()?;
-        ingress_prog.load().ok();
-        ingress_prog
-            .attach(interface, TcAttachType::Ingress)
-            .with_context(|| format!("failed to attach tc_ingress to {}", interface))?;
-
-        // Attach IPv6 egress (Ghost IPv6 native enforcement)
-        let egress_v6: &mut SchedClassifier = self
-            .bpf
-            .program_mut("tc_egress_v6")
-            .context("tc_egress_v6 program not found")?
-            .try_into()?;
-        egress_v6.load().ok();
-        egress_v6
-            .attach(interface, TcAttachType::Egress)
-            .with_context(|| format!("failed to attach tc_egress_v6 to {}", interface))?;
-
-        // Attach IPv6 ingress
-        let ingress_v6: &mut SchedClassifier = self
-            .bpf
-            .program_mut("tc_ingress_v6")
-            .context("tc_ingress_v6 program not found")?
-            .try_into()?;
-        ingress_v6.load().ok();
-        ingress_v6
-            .attach(interface, TcAttachType::Ingress)
-            .with_context(|| format!("failed to attach tc_ingress_v6 to {}", interface))?;
-
-        self.attached_interfaces.insert(interface.to_string());
-        debug!(
-            "ebpf: attached TC classifiers (v4+v6) to {}",
-            interface
-        );
-        Ok(())
-    }
-
-    /// Attach SIIT translators + IPv6 VPC classifiers to a veth interface.
-    /// Attaches: siit_in (ingress) + tc_ingress_v6 (ingress) + siit_out (egress) + tc_egress_v6 (egress).
-    fn attach_tc_siit(&mut self, interface: &str) -> Result<()> {
-        if self.attached_interfaces.contains(interface) {
-            return Ok(());
-        }
-
-        // Add clsact qdisc
-        if let Err(e) = tc::qdisc_add_clsact(interface) {
-            let msg = format!("{}", e);
-            if !msg.contains("exist") {
-                warn!("ebpf: failed to add clsact qdisc to {}: {}", interface, e);
-            }
-        }
-
-        // Attach siit_in to ingress (IPv4→IPv6 translation, pod→host)
-        let siit_in: &mut SchedClassifier = self
-            .bpf
-            .program_mut("siit_in")
-            .context("siit_in program not found")?
-            .try_into()?;
-        siit_in.load().ok();
-        siit_in
-            .attach(interface, TcAttachType::Ingress)
-            .with_context(|| format!("failed to attach siit_in to {}", interface))?;
-
-        // Attach tc_ingress_v6 to ingress (IPv6 VPC enforcement)
-        let ingress_v6: &mut SchedClassifier = self
-            .bpf
-            .program_mut("tc_ingress_v6")
-            .context("tc_ingress_v6 program not found")?
-            .try_into()?;
-        ingress_v6.load().ok();
-        ingress_v6
-            .attach(interface, TcAttachType::Ingress)
-            .with_context(|| format!("failed to attach tc_ingress_v6 to {}", interface))?;
-
-        // Attach siit_out to egress (IPv6→IPv4 translation, host→pod)
-        let siit_out: &mut SchedClassifier = self
-            .bpf
-            .program_mut("siit_out")
-            .context("siit_out program not found")?
-            .try_into()?;
-        siit_out.load().ok();
-        siit_out
-            .attach(interface, TcAttachType::Egress)
-            .with_context(|| format!("failed to attach siit_out to {}", interface))?;
-
-        // Attach tc_egress_v6 to egress (IPv6 VPC enforcement)
-        let egress_v6: &mut SchedClassifier = self
-            .bpf
-            .program_mut("tc_egress_v6")
-            .context("tc_egress_v6 program not found")?
-            .try_into()?;
-        egress_v6.load().ok();
-        egress_v6
-            .attach(interface, TcAttachType::Egress)
-            .with_context(|| format!("failed to attach tc_egress_v6 to {}", interface))?;
-
-        self.attached_interfaces.insert(interface.to_string());
-        debug!(
-            "ebpf: attached SIIT + IPv6 classifiers to {}",
-            interface
-        );
-        Ok(())
     }
 
     /// Read interface index from sysfs.
@@ -352,83 +227,134 @@ impl NetworkEnforcer for EbpfEnforcer {
         let addr: Ipv4Addr = guest_ipv4.parse().context("invalid tap IPv4")?;
         let ip_host = u32::from(addr);
 
-        // Insert into VPC_MEMBERSHIP map (same as pod rules)
-        let key = PodKey { ipv4_addr: ip_host };
-        let value = PodValue { vpc_id, _pad: 0 };
+        // 1. Insert into VPC_PODS (VPC-scoped key for same-VPC checks in per-pod tc_egress/tc_ingress)
+        //    TAP pods don't use SIIT, so ghost_ipv6 is a dummy value.
+        let vpc_pod_key = VpcPodKey {
+            vpc_id,
+            _pad: 0,
+            ipv4_addr: ip_host,
+        };
+        let vpc_pod_value = VpcPodValue {
+            ghost_ipv6: [0u8; 16],
+        };
+        {
+            let mut map: BpfHashMap<&mut aya::maps::MapData, VpcPodKey, VpcPodValue> =
+                BpfHashMap::try_from(
+                    self.bpf
+                        .map_mut("VPC_PODS")
+                        .context("VPC_PODS map not found")?,
+                )?;
+            map.insert(vpc_pod_key, vpc_pod_value, 0)?;
+        }
 
-        let mut map: BpfHashMap<&mut aya::maps::MapData, PodKey, PodValue> = BpfHashMap::try_from(
-            self.bpf
-                .map_mut("VPC_MEMBERSHIP")
-                .context("VPC_MEMBERSHIP map not found")?,
-        )?;
-        map.insert(key, value, 0)?;
+        // 2. Load per-TAP Ebpf with .rodata globals baked in
+        let mut tap_ebpf = EbpfLoader::new()
+            .set_global("MY_GUEST_IPV4", &ip_host, true)
+            .set_global("MY_VPC_ID", &vpc_id, true)
+            .map_pin_path(BPFFS_PIN_DIR)
+            .load(EBPF_BYTES)
+            .with_context(|| format!("failed to load per-TAP eBPF for {}", tap_name))?;
 
+        // 3. Add clsact qdisc
+        if let Err(e) = tc::qdisc_add_clsact(tap_name) {
+            let msg = format!("{}", e);
+            if !msg.contains("exist") {
+                warn!("ebpf: failed to add clsact qdisc to {}: {}", tap_name, e);
+            }
+        }
+
+        // 4. From per-TAP instance: load + attach tc_egress (egress) and tc_ingress (ingress)
+        let egress: &mut SchedClassifier = tap_ebpf
+            .program_mut("tc_egress")
+            .context("tc_egress program not found in per-TAP instance")?
+            .try_into()?;
+        egress.load()?;
+        egress
+            .attach(tap_name, TcAttachType::Egress)
+            .with_context(|| format!("failed to attach tc_egress to {}", tap_name))?;
+
+        let ingress: &mut SchedClassifier = tap_ebpf
+            .program_mut("tc_ingress")
+            .context("tc_ingress program not found in per-TAP instance")?
+            .try_into()?;
+        ingress.load()?;
+        ingress
+            .attach(tap_name, TcAttachType::Ingress)
+            .with_context(|| format!("failed to attach tc_ingress to {}", tap_name))?;
+
+        // 5. From main instance: attach IPv6 VPC classifiers (already loaded, shared)
+        let ingress_v6: &mut SchedClassifier = self
+            .bpf
+            .program_mut("tc_ingress_v6")
+            .context("tc_ingress_v6 program not found")?
+            .try_into()?;
+        ingress_v6.load().ok();
+        ingress_v6
+            .attach(tap_name, TcAttachType::Ingress)
+            .with_context(|| format!("failed to attach tc_ingress_v6 to {}", tap_name))?;
+
+        let egress_v6: &mut SchedClassifier = self
+            .bpf
+            .program_mut("tc_egress_v6")
+            .context("tc_egress_v6 program not found")?
+            .try_into()?;
+        egress_v6.load().ok();
+        egress_v6
+            .attach(tap_name, TcAttachType::Egress)
+            .with_context(|| format!("failed to attach tc_egress_v6 to {}", tap_name))?;
+
+        // 6. Store per-TAP instance and cleanup info
+        self.tap_bpf.insert(tap_name.to_string(), tap_ebpf);
         self.tap_to_ip
             .insert(tap_name.to_string(), (ip_host, vpc_id));
 
-        // Attach TC classifiers to the TAP interface
-        self.attach_tc(tap_name)?;
-
         debug!(
-            "ebpf: installed TAP rules for tap={} ipv4={} vpc_id={}",
+            "ebpf: installed per-TAP rules for tap={} ipv4={} vpc_id={}",
             tap_name, guest_ipv4, vpc_id
         );
         Ok(())
     }
 
     async fn remove_tap_rules(&mut self, tap_name: &str) -> Result<()> {
-        if let Some((ip_host, _vpc_id)) = self.tap_to_ip.remove(tap_name) {
-            let key = PodKey { ipv4_addr: ip_host };
+        if let Some((ip_host, vpc_id)) = self.tap_to_ip.remove(tap_name) {
+            // Remove VPC_PODS entry from shared pinned map
+            let vpc_pod_key = VpcPodKey {
+                vpc_id,
+                _pad: 0,
+                ipv4_addr: ip_host,
+            };
+            {
+                let mut map: BpfHashMap<&mut aya::maps::MapData, VpcPodKey, VpcPodValue> =
+                    BpfHashMap::try_from(
+                        self.bpf
+                            .map_mut("VPC_PODS")
+                            .context("VPC_PODS map not found")?,
+                    )?;
+                map.remove(&vpc_pod_key).ok();
+            }
 
-            let mut map: BpfHashMap<&mut aya::maps::MapData, PodKey, PodValue> =
-                BpfHashMap::try_from(
-                    self.bpf
-                        .map_mut("VPC_MEMBERSHIP")
-                        .context("VPC_MEMBERSHIP map not found")?,
-                )?;
-            map.remove(&key).ok();
+            // Drop per-TAP Ebpf instance — kernel cleans up TC programs when TAP is deleted
+            self.tap_bpf.remove(tap_name);
 
-            debug!("ebpf: removed TAP rules for tap={}", tap_name);
+            debug!("ebpf: removed per-TAP rules for tap={}", tap_name);
         }
-        // Note: TC programs remain attached — they're harmless without map entries.
-        // Detaching would require tracking link IDs per-interface.
         Ok(())
     }
 
-    async fn install_veth_rules(
+    async fn install_netkit_rules(
         &mut self,
-        veth_name: &str,
+        nk_name: &str,
         guest_ipv4: &str,
         ghost_ipv6: &str,
         vpc_id: u16,
     ) -> Result<()> {
-        let ipv4_addr: Ipv4Addr = guest_ipv4.parse().context("invalid veth IPv4")?;
+        let ipv4_addr: Ipv4Addr = guest_ipv4.parse().context("invalid netkit IPv4")?;
         let ip_host = u32::from(ipv4_addr);
 
-        let ipv6_addr: Ipv6Addr = ghost_ipv6.parse().context("invalid veth Ghost IPv6")?;
+        let ipv6_addr: Ipv6Addr = ghost_ipv6.parse().context("invalid netkit Ghost IPv6")?;
         let ipv6_bytes: [u8; 16] = ipv6_addr.octets();
 
-        let ifindex = Self::ifindex(veth_name)?;
-
-        // Populate SIIT_CONFIG[ifindex]
-        let siit_key = SiitKey { ifindex };
-        let siit_value = SiitValue {
-            ghost_ipv6: ipv6_bytes,
-            guest_ipv4: ip_host,
-            vpc_id,
-            _pad: 0,
-        };
-        {
-            let mut map: BpfHashMap<&mut aya::maps::MapData, SiitKey, SiitValue> =
-                BpfHashMap::try_from(
-                    self.bpf
-                        .map_mut("SIIT_CONFIG")
-                        .context("SIIT_CONFIG map not found")?,
-                )?;
-            map.insert(siit_key, siit_value, 0)?;
-        }
-
-        // Populate VPC_PODS[(vpc_id, guest_ipv4)]
+        // 1. Populate VPC_PODS in main instance (shared pinned map)
         let vpc_pod_key = VpcPodKey {
             vpc_id,
             _pad: 0,
@@ -447,35 +373,80 @@ impl NetworkEnforcer for EbpfEnforcer {
             map.insert(vpc_pod_key, vpc_pod_value, 0)?;
         }
 
-        // Store reverse lookup for cleanup
-        self.veth_to_siit
-            .insert(veth_name.to_string(), (ifindex, ip_host, vpc_id));
+        // 2. Load per-pod Ebpf with .rodata globals baked in
+        //    .rodata is PinningType::None — each load gets a fresh copy.
+        //    Pinned maps (VPC_PODS, etc.) are reused from the shared pin dir.
+        let mut pod_ebpf = EbpfLoader::new()
+            .set_global("MY_GHOST_IPV6", &ipv6_bytes, true)
+            .set_global("MY_GUEST_IPV4", &ip_host, true)
+            .set_global("MY_VPC_ID", &vpc_id, true)
+            .map_pin_path(BPFFS_PIN_DIR)
+            .load(EBPF_BYTES)
+            .with_context(|| format!("failed to load per-pod eBPF for {}", nk_name))?;
 
-        // Attach SIIT translators + IPv6 VPC classifiers
-        self.attach_tc_siit(veth_name)?;
+        // 3. Add clsact qdisc
+        if let Err(e) = tc::qdisc_add_clsact(nk_name) {
+            let msg = format!("{}", e);
+            if !msg.contains("exist") {
+                warn!("ebpf: failed to add clsact qdisc to {}: {}", nk_name, e);
+            }
+        }
+
+        // 4. From per-pod instance: load + attach siit_in (ingress) and siit_out (egress)
+        let siit_in: &mut SchedClassifier = pod_ebpf
+            .program_mut("siit_in")
+            .context("siit_in program not found in per-pod instance")?
+            .try_into()?;
+        siit_in.load()?;
+        siit_in
+            .attach(nk_name, TcAttachType::Ingress)
+            .with_context(|| format!("failed to attach siit_in to {}", nk_name))?;
+
+        let siit_out: &mut SchedClassifier = pod_ebpf
+            .program_mut("siit_out")
+            .context("siit_out program not found in per-pod instance")?
+            .try_into()?;
+        siit_out.load()?;
+        siit_out
+            .attach(nk_name, TcAttachType::Egress)
+            .with_context(|| format!("failed to attach siit_out to {}", nk_name))?;
+
+        // 5. From main instance: attach IPv6 VPC classifiers (already loaded, shared)
+        let ingress_v6: &mut SchedClassifier = self
+            .bpf
+            .program_mut("tc_ingress_v6")
+            .context("tc_ingress_v6 program not found")?
+            .try_into()?;
+        ingress_v6.load().ok(); // may already be loaded
+        ingress_v6
+            .attach(nk_name, TcAttachType::Ingress)
+            .with_context(|| format!("failed to attach tc_ingress_v6 to {}", nk_name))?;
+
+        let egress_v6: &mut SchedClassifier = self
+            .bpf
+            .program_mut("tc_egress_v6")
+            .context("tc_egress_v6 program not found")?
+            .try_into()?;
+        egress_v6.load().ok();
+        egress_v6
+            .attach(nk_name, TcAttachType::Egress)
+            .with_context(|| format!("failed to attach tc_egress_v6 to {}", nk_name))?;
+
+        // 6. Store per-pod instance and cleanup info
+        self.pod_bpf.insert(nk_name.to_string(), pod_ebpf);
+        self.nk_vpc_pods
+            .insert(nk_name.to_string(), (ip_host, vpc_id));
 
         debug!(
-            "ebpf: installed SIIT veth rules for veth={} ipv4={} ipv6={} vpc_id={}",
-            veth_name, guest_ipv4, ghost_ipv6, vpc_id
+            "ebpf: installed per-pod SIIT netkit rules for nk={} ipv4={} ipv6={} vpc_id={}",
+            nk_name, guest_ipv4, ghost_ipv6, vpc_id
         );
         Ok(())
     }
 
-    async fn remove_veth_rules(&mut self, veth_name: &str) -> Result<()> {
-        if let Some((ifindex, ip_host, vpc_id)) = self.veth_to_siit.remove(veth_name) {
-            // Clean SIIT_CONFIG[ifindex]
-            let siit_key = SiitKey { ifindex };
-            {
-                let mut map: BpfHashMap<&mut aya::maps::MapData, SiitKey, SiitValue> =
-                    BpfHashMap::try_from(
-                        self.bpf
-                            .map_mut("SIIT_CONFIG")
-                            .context("SIIT_CONFIG map not found")?,
-                    )?;
-                map.remove(&siit_key).ok();
-            }
-
-            // Clean VPC_PODS[(vpc_id, guest_ipv4)]
+    async fn remove_netkit_rules(&mut self, nk_name: &str) -> Result<()> {
+        if let Some((ip_host, vpc_id)) = self.nk_vpc_pods.remove(nk_name) {
+            // Remove VPC_PODS entry from shared pinned map
             let vpc_pod_key = VpcPodKey {
                 vpc_id,
                 _pad: 0,
@@ -491,7 +462,10 @@ impl NetworkEnforcer for EbpfEnforcer {
                 map.remove(&vpc_pod_key).ok();
             }
 
-            debug!("ebpf: removed SIIT veth rules for veth={}", veth_name);
+            // Drop per-pod Ebpf instance — kernel cleans up TC programs when netkit is deleted
+            self.pod_bpf.remove(nk_name);
+
+            debug!("ebpf: removed per-pod SIIT netkit rules for nk={}", nk_name);
         }
         Ok(())
     }
@@ -711,23 +685,24 @@ impl NetworkEnforcer for EbpfEnforcer {
             }
         }
 
-        // SIIT config
-        out.push_str("\n[SIIT Config]\n");
-        if let Ok(map_data) = self.bpf.map("SIIT_CONFIG") {
-            if let Ok(map) =
-                BpfHashMap::<&aya::maps::MapData, SiitKey, SiitValue>::try_from(map_data)
-            {
-                for item in map.iter() {
-                    if let Ok((k, v)) = item {
-                        let ipv4 = Ipv4Addr::from(v.guest_ipv4);
-                        let ipv6 = Ipv6Addr::from(v.ghost_ipv6);
-                        out.push_str(&format!(
-                            "  ifindex={} → ipv4={} ipv6={} vpc_id={}\n",
-                            k.ifindex, ipv4, ipv6, v.vpc_id
-                        ));
-                    }
-                }
-            }
+        // Per-netkit SIIT instances
+        out.push_str("\n[Per-Netkit SIIT Instances]\n");
+        for (nk, (ipv4, vpc_id)) in &self.nk_vpc_pods {
+            let addr = Ipv4Addr::from(*ipv4);
+            out.push_str(&format!(
+                "  nk={} ipv4={} vpc_id={}\n",
+                nk, addr, vpc_id
+            ));
+        }
+
+        // Per-TAP instances
+        out.push_str("\n[Per-TAP Instances]\n");
+        for (tap, (ipv4, vpc_id)) in &self.tap_to_ip {
+            let addr = Ipv4Addr::from(*ipv4);
+            out.push_str(&format!(
+                "  tap={} ipv4={} vpc_id={}\n",
+                tap, addr, vpc_id
+            ));
         }
 
         // VPC Pods
@@ -749,11 +724,6 @@ impl NetworkEnforcer for EbpfEnforcer {
             }
         }
 
-        out.push_str(&format!(
-            "\n[Attached interfaces]: {:?}\n",
-            self.attached_interfaces
-        ));
-
         Ok(out)
     }
 
@@ -764,11 +734,12 @@ impl NetworkEnforcer for EbpfEnforcer {
         }
 
         self.active_vpcs.clear();
-        self.attached_interfaces.clear();
         self.pod_to_ip.clear();
         self.tap_to_ip.clear();
         self.peering_to_keys.clear();
-        self.veth_to_siit.clear();
+        self.pod_bpf.clear();
+        self.nk_vpc_pods.clear();
+        self.tap_bpf.clear();
 
         info!("ebpf: cleaned up all state");
         Ok(())

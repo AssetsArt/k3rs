@@ -1,5 +1,5 @@
-//! Per-pod veth setup — creates veth pairs, assigns Ghost IPv6 + guest IPv4,
-//! and configures routes inside the container network namespace.
+//! Per-pod netkit setup — creates netkit pairs (L2 mode), assigns Ghost IPv6 +
+//! guest IPv4, and configures routes inside the container network namespace.
 //!
 //! Uses `ip` commands and `nsenter` to configure networking inside the
 //! container's network namespace, consistent with the existing Firecracker
@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 /// Network configuration for a single pod.
 pub struct PodNetworkConfig {
-    /// Pod identifier (used to derive veth names).
+    /// Pod identifier (used to derive netkit device names).
     pub pod_id: String,
     /// Ghost IPv6 address allocated by k3rs-vpc.
     pub ghost_ipv6: String,
@@ -18,21 +18,21 @@ pub struct PodNetworkConfig {
     pub guest_ipv4: String,
     /// PID of the container's init process (from OCI create --pid-file).
     pub container_pid: u32,
-    /// Bridge to attach the host-side veth to.
+    /// Bridge to attach the host-side netkit to.
     pub bridge_name: String,
 }
 
 impl PodNetworkConfig {
-    /// Derive the host-side veth name from the pod ID.
-    fn veth_host(&self) -> String {
+    /// Derive the host-side netkit name from the pod ID.
+    fn nk_host(&self) -> String {
         let short = &self.pod_id[..8.min(self.pod_id.len())];
-        format!("veth-{}", short)
+        format!("nk-{}", short)
     }
 
     /// Derive the temporary peer name (moved into the netns, then renamed to eth0).
-    fn veth_peer(&self) -> String {
+    fn nk_peer(&self) -> String {
         let short = &self.pod_id[..8.min(self.pod_id.len())];
-        format!("vethtmp-{}", short)
+        format!("nktmp-{}", short)
     }
 }
 
@@ -71,40 +71,40 @@ async fn nsenter_run(pid: u32, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Create veth pair, move peer into container netns, attach host side to
-/// bridge, and configure IPv6/IPv4 addresses + routes inside the container.
+/// Create netkit pair (L2 mode), move peer into container netns, attach host
+/// side to bridge, and configure IPv6/IPv4 addresses + routes inside the container.
 pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
-    let veth_host = config.veth_host();
-    let veth_peer = config.veth_peer();
+    let nk_host = config.nk_host();
+    let nk_peer = config.nk_peer();
     let pid = config.container_pid;
 
     info!(
-        "[netns:{}] Setting up pod network: veth={}, ghost_ipv6={}, guest_ipv4={}, pid={}",
+        "[netns:{}] Setting up pod network: nk={}, ghost_ipv6={}, guest_ipv4={}, pid={}",
         &config.pod_id[..8.min(config.pod_id.len())],
-        veth_host,
+        nk_host,
         config.ghost_ipv6,
         config.guest_ipv4,
         pid
     );
 
-    // 1. Create veth pair
+    // 1. Create netkit pair (L2 mode)
     run_ip(&[
-        "link", "add", &veth_host, "type", "veth", "peer", "name", &veth_peer,
+        "link", "add", &nk_host, "type", "netkit", "mode", "l2", "peer", "name", &nk_peer,
     ])
     .await?;
 
     // 2. Move peer into container netns
     let pid_str = pid.to_string();
-    run_ip(&["link", "set", &veth_peer, "netns", &pid_str]).await?;
+    run_ip(&["link", "set", &nk_peer, "netns", &pid_str]).await?;
 
     // 3. Attach host side to bridge and bring up
-    run_ip(&["link", "set", &veth_host, "master", &config.bridge_name]).await?;
-    run_ip(&["link", "set", &veth_host, "up"]).await?;
+    run_ip(&["link", "set", &nk_host, "master", &config.bridge_name]).await?;
+    run_ip(&["link", "set", &nk_host, "up"]).await?;
 
     // 4. Inside netns: rename peer → eth0, bring up lo + eth0
     nsenter_run(
         pid,
-        &["ip", "link", "set", &veth_peer, "name", "eth0"],
+        &["ip", "link", "set", &nk_peer, "name", "eth0"],
     )
     .await?;
     nsenter_run(pid, &["ip", "link", "set", "lo", "up"]).await?;
@@ -134,7 +134,7 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     )
     .await?;
 
-    // 7. IPv4 default route via link-local gateway (SIIT on host-side veth)
+    // 7. IPv4 default route via link-local gateway (SIIT on host-side netkit)
     //    Add 169.254.1.1 as a directly-connected next-hop, then use it as default gw.
     nsenter_run(
         pid,
@@ -151,16 +151,16 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     )
     .await?;
 
-    // 8. Enable proxy_arp on host-side veth so it responds to ARP for 169.254.1.1
+    // 8. Enable proxy_arp on host-side netkit so it responds to ARP for 169.254.1.1
     let proxy_arp_path = format!(
         "/proc/sys/net/ipv4/conf/{}/proxy_arp",
-        config.veth_host()
+        config.nk_host()
     );
     if let Err(e) = tokio::fs::write(&proxy_arp_path, "1").await {
         warn!(
             "[netns:{}] Failed to enable proxy_arp on {}: {}",
             &config.pod_id[..8.min(config.pod_id.len())],
-            config.veth_host(),
+            config.nk_host(),
             e
         );
     }
@@ -174,16 +174,16 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     Ok(())
 }
 
-/// Tear down pod networking by deleting the host-side veth.
+/// Tear down pod networking by deleting the host-side netkit device.
 /// The peer inside the netns is automatically removed by the kernel.
 pub async fn teardown_pod_network(pod_id: &str) {
     let short = &pod_id[..8.min(pod_id.len())];
-    let veth_host = format!("veth-{}", short);
+    let nk_host = format!("nk-{}", short);
 
     let _ = tokio::process::Command::new("ip")
-        .args(["link", "delete", &veth_host])
+        .args(["link", "delete", &nk_host])
         .output()
         .await;
 
-    info!("[netns:{}] veth {} removed", short, veth_host);
+    info!("[netns:{}] netkit {} removed", short, nk_host);
 }

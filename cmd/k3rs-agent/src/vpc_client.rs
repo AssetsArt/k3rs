@@ -14,13 +14,13 @@ enum VpcRequest {
     Release { pod_id: String, vpc_name: String },
     GetRoutes { vpc_id: u16 },
     CheckReachability { src_vpc: String, dst_vpc: String },
-    AttachVeth {
-        veth_name: String,
+    AttachNetkit {
+        nk_name: String,
         guest_ipv4: String,
         ghost_ipv6: String,
         vpc_id: u16,
     },
-    DetachVeth { veth_name: String },
+    DetachNetkit { nk_name: String },
     ListVpcs,
     Ping,
 }
