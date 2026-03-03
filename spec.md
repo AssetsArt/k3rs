@@ -644,21 +644,31 @@ table inet k3rs_vpc {
 }
 ```
 
-**Crash recovery**: On `k3rs-vpc` restart, rules are rebuilt from VpcStore allocations. The serialized nftables snapshot at `/vpc/nftables-snapshot` provides instant recovery before the full rebuild completes.
+**eBPF enforcement (Linux primary)**. The primary enforcement backend on Linux uses eBPF via [Aya](https://aya-rs.dev/) (pure Rust eBPF toolchain). A `NetworkEnforcer` trait abstracts backends: `EbpfEnforcer` (primary), `NftEnforcer` (fallback for kernels without BPF support), and `NoopEnforcer` (macOS — log-only, no isolation). At startup, `k3rs-vpc` probes for eBPF support and falls back automatically.
 
-**Future: eBPF**. nftables is the initial enforcement mechanism. A future phase can replace it with eBPF programs (pinned to bpffs, surviving daemon restarts) for higher performance and richer Ghost IPv6 packet inspection.
+**TC classifier programs** are attached to each pod veth (container) or TAP (Firecracker VM) interface. Three BPF HashMap maps drive policy decisions:
+
+| Map | Key | Value | Purpose |
+|-----|-----|-------|---------|
+| `vpc_membership` | `pod_ip: u32` | `vpc_id: u16` | Identify source/dest VPC |
+| `vpc_cidrs` | `vpc_id: u16` | `cidr: (u32, u8)` | VPC address range validation |
+| `peerings` | `(src_vpc: u16, dst_vpc: u16)` | `direction: u8` | Cross-VPC allow rules |
+
+Programs and maps are **pinned to bpffs** at `/sys/fs/bpf/k3rs/`, surviving daemon crashes. On restart, `k3rs-vpc` re-opens pinned maps and reconciles them against VpcStore state — no traffic interruption.
+
+**nftables fallback**. On older kernels or when eBPF is unavailable, `NftEnforcer` wraps the existing `NftManager` logic (per-VPC chains, per-pod rules, anti-spoofing). The serialized nftables snapshot at `/vpc/nftables-snapshot` provides instant recovery before the full rebuild completes.
 
 ##### Recovery & Reconciliation
 
 On `k3rs-vpc` restart:
 
 1. **Load VpcStore** — all VPCs, allocations, peerings restored instantly
-2. **Rebuild nftables** — regenerate all rules from allocations
+2. **Re-open pinned BPF maps** (eBPF) or **rebuild nftables** (fallback) — enforcement rules survive in kernel
 3. **Reconcile with server** — pull latest VPCs/peerings, diff and apply changes
 4. **Adopt existing allocations** — pods are still running, their IPs haven't changed
 5. **Resume Unix socket listener** — Agent reconnects automatically
 
-**Key invariant**: `k3rs-vpc` crash does NOT affect running pods. nftables rules persist in kernel. Only new allocations are blocked until the daemon restarts.
+**Key invariant**: `k3rs-vpc` crash does NOT affect running pods. eBPF programs/maps (or nftables rules) persist in kernel. Only new allocations are blocked until the daemon restarts.
 
 #### VPC Resource Model
 
@@ -986,7 +996,7 @@ VMs already get isolated TAP networks (`172.16.x.0/30`). With Ghost IPv6:
 3. Server blocks new Pod creation in this VPC
 4. Existing Pods continue running (fail-static)
 5. As pods terminate, Agents call `Release` on `k3rs-vpc`
-6. When all allocations are released, `k3rs-vpc` removes VPC nftables chains
+6. When all allocations are released, `k3rs-vpc` removes VPC enforcement rules (eBPF maps/nftables chains)
 7. Server marks VPC as `Deleted`
 8. **Cooldown period** (300 seconds) before VpcID can be reused
 
@@ -2792,7 +2802,7 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Pod Sync Loop: call `Release` on pod termination
 - [x] Report `ghost_ipv6`, `vpc_name` to server
 
-#### Phase 6: nftables Isolation Enforcement
+#### Phase 6: nftables Isolation Enforcement (Fallback)
 - [x] `k3rs-vpc` manages `table inet k3rs_vpc`
 - [x] Per-VPC ingress/egress chains
 - [x] Per-pod rules installed on `Allocate`, removed on `Release`
@@ -2812,6 +2822,18 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Bidirectional and InitiatorOnly enforcement
 - [x] `CheckReachability` command in k3rs-vpc
 - [x] Cross-VPC DNS resolution for peered VPCs
+
+#### Phase 9: eBPF Enforcement (Linux Primary)
+- [ ] Define `NetworkEnforcer` trait abstracting NftManager's public API
+- [ ] Implement `NftEnforcer` wrapping existing NftManager (fallback backend)
+- [ ] Implement `NoopEnforcer` for macOS (log-only, no isolation)
+- [ ] Add `aya` + `aya-ebpf` dependencies to workspace
+- [ ] Implement `EbpfEnforcer` — TC classifier programs for pod veth/TAP
+- [ ] BPF HashMap maps: `vpc_membership`, `vpc_cidrs`, `peerings`
+- [ ] Pin programs/maps to bpffs for crash survival
+- [ ] Runtime backend selection: eBPF → nftables fallback → noop
+- [ ] Update `k3rs-vpc` sync loop + main.rs to use `NetworkEnforcer` trait
+- [ ] Integration tests for eBPF enforcement path
 
 ### 16.7 Process Manager Checklists
 
