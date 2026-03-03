@@ -19,6 +19,7 @@ enum VpcRequest {
         guest_ipv4: String,
         ghost_ipv6: String,
         vpc_id: u16,
+        container_pid: u32,
     },
     DetachNetkit { nk_name: String },
     ListVpcs,

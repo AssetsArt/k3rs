@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -347,6 +348,7 @@ impl NetworkEnforcer for EbpfEnforcer {
         guest_ipv4: &str,
         ghost_ipv6: &str,
         vpc_id: u16,
+        container_pid: u32,
     ) -> Result<()> {
         let ipv4_addr: Ipv4Addr = guest_ipv4.parse().context("invalid netkit IPv4")?;
         let ip_host = u32::from(ipv4_addr);
@@ -384,7 +386,88 @@ impl NetworkEnforcer for EbpfEnforcer {
             .load(EBPF_BYTES)
             .with_context(|| format!("failed to load per-pod eBPF for {}", nk_name))?;
 
-        // 3. Add clsact qdisc
+        // 3. Enter pod netns via setns() and attach SIIT programs to eth0
+        //    Must use spawn_blocking to avoid affecting other async tasks on the tokio thread.
+        let nk_name_owned = nk_name.to_string();
+        let pid = container_pid;
+
+        // Load SIIT programs before entering the netns (loading is kernel-global)
+        let siit_in: &mut SchedClassifier = pod_ebpf
+            .program_mut("siit_in")
+            .context("siit_in program not found in per-pod instance")?
+            .try_into()?;
+        siit_in.load()?;
+
+        let siit_out: &mut SchedClassifier = pod_ebpf
+            .program_mut("siit_out")
+            .context("siit_out program not found in per-pod instance")?
+            .try_into()?;
+        siit_out.load()?;
+
+        // Enter pod netns, add clsact qdisc to eth0, attach SIIT with flipped directions
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let pod_ns_path = format!("/proc/{}/ns/net", pid);
+            let pod_ns = std::fs::File::open(&pod_ns_path)
+                .with_context(|| format!("failed to open pod netns at {}", pod_ns_path))?;
+            let orig_ns = std::fs::File::open("/proc/self/ns/net")
+                .context("failed to open current netns")?;
+
+            // Enter pod network namespace
+            let ret = unsafe { libc::setns(pod_ns.as_raw_fd(), libc::CLONE_NEWNET) };
+            if ret != 0 {
+                bail!(
+                    "setns into pod netns failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+
+            // Add clsact qdisc to eth0 inside the pod
+            let attach_result = (|| -> Result<()> {
+                if let Err(e) = tc::qdisc_add_clsact("eth0") {
+                    let msg = format!("{}", e);
+                    if !msg.contains("exist") {
+                        warn!("ebpf: failed to add clsact qdisc to eth0 in pod: {}", e);
+                    }
+                }
+
+                // Attach siit_in → eth0 Egress (app sends IPv4 out → translated to IPv6)
+                siit_in
+                    .attach("eth0", TcAttachType::Egress)
+                    .with_context(|| {
+                        format!("failed to attach siit_in to eth0 egress in pod (nk={})", nk_name_owned)
+                    })?;
+
+                // Attach siit_out → eth0 Ingress (IPv6 arrives → translated to IPv4 for app)
+                siit_out
+                    .attach("eth0", TcAttachType::Ingress)
+                    .with_context(|| {
+                        format!("failed to attach siit_out to eth0 ingress in pod (nk={})", nk_name_owned)
+                    })?;
+
+                Ok(())
+            })();
+
+            // Always restore original netns before returning
+            let restore_ret = unsafe { libc::setns(orig_ns.as_raw_fd(), libc::CLONE_NEWNET) };
+            if restore_ret != 0 {
+                bail!(
+                    "setns restore to original netns failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+
+            attach_result
+        })
+        .await
+        .context("spawn_blocking panicked")?
+        .with_context(|| {
+            format!(
+                "failed to attach SIIT programs inside pod netns (pid={}, nk={})",
+                container_pid, nk_name
+            )
+        })?;
+
+        // 4. Add clsact qdisc to host-side netkit (for IPv6 classifiers)
         if let Err(e) = tc::qdisc_add_clsact(nk_name) {
             let msg = format!("{}", e);
             if !msg.contains("exist") {
@@ -392,26 +475,7 @@ impl NetworkEnforcer for EbpfEnforcer {
             }
         }
 
-        // 4. From per-pod instance: load + attach siit_in (ingress) and siit_out (egress)
-        let siit_in: &mut SchedClassifier = pod_ebpf
-            .program_mut("siit_in")
-            .context("siit_in program not found in per-pod instance")?
-            .try_into()?;
-        siit_in.load()?;
-        siit_in
-            .attach(nk_name, TcAttachType::Ingress)
-            .with_context(|| format!("failed to attach siit_in to {}", nk_name))?;
-
-        let siit_out: &mut SchedClassifier = pod_ebpf
-            .program_mut("siit_out")
-            .context("siit_out program not found in per-pod instance")?
-            .try_into()?;
-        siit_out.load()?;
-        siit_out
-            .attach(nk_name, TcAttachType::Egress)
-            .with_context(|| format!("failed to attach siit_out to {}", nk_name))?;
-
-        // 5. From main instance: attach IPv6 VPC classifiers (already loaded, shared)
+        // 5. From main instance: attach IPv6 VPC classifiers on host-side netkit (already loaded, shared)
         let ingress_v6: &mut SchedClassifier = self
             .bpf
             .program_mut("tc_ingress_v6")
@@ -438,8 +502,8 @@ impl NetworkEnforcer for EbpfEnforcer {
             .insert(nk_name.to_string(), (ip_host, vpc_id));
 
         debug!(
-            "ebpf: installed per-pod SIIT netkit rules for nk={} ipv4={} ipv6={} vpc_id={}",
-            nk_name, guest_ipv4, ghost_ipv6, vpc_id
+            "ebpf: installed SIIT in pod netns (pid={}) on eth0, IPv6 classifiers on nk={} ipv4={} ipv6={} vpc_id={}",
+            container_pid, nk_name, guest_ipv4, ghost_ipv6, vpc_id
         );
         Ok(())
     }
@@ -462,10 +526,11 @@ impl NetworkEnforcer for EbpfEnforcer {
                 map.remove(&vpc_pod_key).ok();
             }
 
-            // Drop per-pod Ebpf instance — kernel cleans up TC programs when netkit is deleted
+            // Drop per-pod Ebpf instance — TC programs on eth0 inside the pod are cleaned
+            // up automatically when Aya detaches on drop or when the pod netns is destroyed.
             self.pod_bpf.remove(nk_name);
 
-            debug!("ebpf: removed per-pod SIIT netkit rules for nk={}", nk_name);
+            debug!("ebpf: removed netkit rules for nk={} (in-pod SIIT cleaned up automatically)", nk_name);
         }
         Ok(())
     }

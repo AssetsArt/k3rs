@@ -284,8 +284,9 @@ pub fn tc_ingress_v6(ctx: TcContext) -> i32 {
 #[map]
 static VPC_PODS: HashMap<VpcPodKey, VpcPodValue> = HashMap::pinned(4096, 0);
 
-/// SIIT ingress classifier (attached to host-side netkit INGRESS).
-/// Translates IPv4 packets from pod → IPv6 for the bridge.
+/// SIIT inbound translator (IPv4 → IPv6).
+/// Attached inside the pod's netns on eth0 TC **Egress** (app sends IPv4 out).
+/// Translates IPv4 packets from the pod application → IPv6 before they exit to the host.
 ///
 /// Pod identity (ghost_ipv6, guest_ipv4, vpc_id) is baked into .rodata globals
 /// at load time — no map lookup needed.
@@ -397,8 +398,9 @@ fn try_siit_in(ctx: &mut TcContext) -> Result<i32, ()> {
     Ok(TC_ACT_OK)
 }
 
-/// SIIT egress classifier (attached to host-side netkit EGRESS).
-/// Translates IPv6 packets from bridge → IPv4 for the pod.
+/// SIIT outbound translator (IPv6 → IPv4).
+/// Attached inside the pod's netns on eth0 TC **Ingress** (IPv6 arrives from host,
+/// deliver IPv4 to app).
 ///
 /// Pod identity is baked into .rodata globals at load time.
 ///

@@ -1,7 +1,6 @@
 //! NetworkEnforcer trait — abstract interface for VPC network isolation backends.
 //!
-//! Implementations: NftManager (nftables CLI), NoopEnforcer (log-only),
-//! EbpfEnforcer (TC classifier via Aya).
+//! Implementations: EbpfEnforcer (TC classifier via Aya), NoopEnforcer (log-only).
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -14,7 +13,7 @@ use pkg_types::vpc::{Vpc, VpcPeering};
 /// All methods take `&mut self` — objects are held behind `Arc<Mutex<>>`.
 #[async_trait]
 pub trait NetworkEnforcer: Send {
-    /// Human-readable backend name (e.g. "nftables", "ebpf", "noop").
+    /// Human-readable backend name (e.g. "ebpf", "noop").
     fn name(&self) -> &str;
 
     /// One-time initialization (create tables, load BPF programs, etc).
@@ -49,13 +48,15 @@ pub trait NetworkEnforcer: Send {
     async fn remove_tap_rules(&mut self, tap_name: &str) -> Result<()>;
 
     /// Install netkit-interface-specific rules (OCI container traffic).
-    /// Attaches SIIT translators (IPv4↔IPv6) and IPv6 VPC classifiers to the host-side netkit.
+    /// Attaches SIIT translators (IPv4↔IPv6) inside the pod's netns on eth0,
+    /// and IPv6 VPC classifiers on the host-side netkit.
     async fn install_netkit_rules(
         &mut self,
         nk_name: &str,
         guest_ipv4: &str,
         ghost_ipv6: &str,
         vpc_id: u16,
+        container_pid: u32,
     ) -> Result<()>;
 
     /// Remove all rules associated with a netkit interface.

@@ -11,12 +11,14 @@ pub enum VpcRequest {
     Query { pod_id: String },
     GetRoutes { vpc_id: u16 },
     CheckReachability { src_vpc: String, dst_vpc: String },
-    /// Attach SIIT translators and IPv6 VPC classifiers to a netkit interface.
+    /// Attach SIIT translators (inside pod netns on eth0) and IPv6 VPC classifiers
+    /// (on host-side netkit) for a container.
     AttachNetkit {
         nk_name: String,
         guest_ipv4: String,
         ghost_ipv6: String,
         vpc_id: u16,
+        container_pid: u32,
     },
     /// Detach TC classifiers from a netkit interface.
     DetachNetkit { nk_name: String },

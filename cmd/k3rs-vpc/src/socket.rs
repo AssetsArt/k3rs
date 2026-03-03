@@ -192,10 +192,11 @@ async fn dispatch(
             guest_ipv4,
             ghost_ipv6,
             vpc_id,
+            container_pid,
         } => {
             let mut enf = enforcer.lock().await;
             match enf
-                .install_netkit_rules(&nk_name, &guest_ipv4, &ghost_ipv6, vpc_id)
+                .install_netkit_rules(&nk_name, &guest_ipv4, &ghost_ipv6, vpc_id, container_pid)
                 .await
             {
                 Ok(()) => VpcResponse::Ok,

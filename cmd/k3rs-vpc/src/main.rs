@@ -1,5 +1,4 @@
 mod allocator;
-mod nftables;
 mod socket;
 mod sync;
 
@@ -49,34 +48,23 @@ struct Cli {
 }
 
 /// Select the best available network enforcement backend.
-/// Priority: eBPF (Linux + feature, if available) → nftables (Linux) → noop (any platform).
+/// Priority: eBPF (Linux + feature) → noop (fallback / non-Linux).
 fn select_enforcer() -> Box<dyn NetworkEnforcer> {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
     {
-        // Try eBPF first (only available with the ebpf feature)
-        #[cfg(feature = "ebpf")]
-        {
-            match ebpf_enforcer::EbpfEnforcer::new() {
-                Ok(e) => {
-                    info!("Selected eBPF network enforcer");
-                    return Box::new(e);
-                }
-                Err(e) => {
-                    info!("eBPF not available ({}), falling back to nftables", e);
-                }
+        match ebpf_enforcer::EbpfEnforcer::new() {
+            Ok(e) => {
+                info!("Selected eBPF network enforcer");
+                return Box::new(e);
+            }
+            Err(e) => {
+                info!("eBPF not available ({}), falling back to noop", e);
             }
         }
-
-        // Fall back to nftables
-        info!("Selected nftables network enforcer");
-        return Box::new(nftables::NftManager::new());
     }
 
-    #[cfg(not(target_os = "linux"))]
-    {
-        info!("Selected noop network enforcer (non-Linux platform)");
-        Box::new(k3rs_vpc::noop_enforcer::NoopEnforcer::new())
-    }
+    info!("Selected noop network enforcer");
+    Box::new(k3rs_vpc::noop_enforcer::NoopEnforcer::new())
 }
 
 #[tokio::main]
@@ -160,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
         .rebuild(&cached_vpcs, &stored_allocations, &cached_peerings)
         .await?;
     if let Ok(snapshot) = enforcer.snapshot().await
-        && let Err(e) = store.save_nft_snapshot(&snapshot).await
+        && let Err(e) = store.save_enforcer_snapshot(&snapshot).await
     {
         tracing::warn!("Failed to save enforcer snapshot: {}", e);
     }

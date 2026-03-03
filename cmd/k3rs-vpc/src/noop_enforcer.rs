@@ -1,6 +1,6 @@
 //! NoopEnforcer — log-only network enforcement backend.
 //!
-//! Used on platforms without nftables or eBPF (e.g. macOS development).
+//! Used on platforms without eBPF (e.g. macOS development).
 //! All operations succeed immediately with debug logging.
 
 use anyhow::Result;
@@ -81,6 +81,7 @@ impl NetworkEnforcer for NoopEnforcer {
         guest_ipv4: &str,
         ghost_ipv6: &str,
         vpc_id: u16,
+        _container_pid: u32,
     ) -> Result<()> {
         debug!(nk_name, guest_ipv4, ghost_ipv6, vpc_id, "noop: install_netkit_rules");
         Ok(())

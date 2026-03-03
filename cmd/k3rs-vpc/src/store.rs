@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tracing::info;
 
 const KEY_META: &[u8] = b"/vpc/meta";
-const KEY_NFT_SNAPSHOT: &[u8] = b"/vpc/nftables-snapshot";
+const KEY_ENFORCER_SNAPSHOT: &[u8] = b"/vpc/enforcer-snapshot";
 const PREFIX_DEFINITIONS: &str = "/vpc/definitions/";
 const PREFIX_PEERINGS: &str = "/vpc/peerings/";
 const PREFIX_ALLOCATIONS: &str = "/vpc/allocations/";
@@ -172,20 +172,20 @@ impl VpcStore {
         Ok(results)
     }
 
-    pub async fn save_nft_snapshot(&self, snapshot: &str) -> anyhow::Result<()> {
+    pub async fn save_enforcer_snapshot(&self, snapshot: &str) -> anyhow::Result<()> {
         self.db
-            .put(KEY_NFT_SNAPSHOT, snapshot.as_bytes().to_vec())
+            .put(KEY_ENFORCER_SNAPSHOT, snapshot.as_bytes().to_vec())
             .await
-            .map_err(|e| anyhow::anyhow!("VpcStore save_nft_snapshot: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("VpcStore save_enforcer_snapshot: {}", e))?;
         Ok(())
     }
 
-    pub async fn load_nft_snapshot(&self) -> anyhow::Result<Option<String>> {
+    pub async fn load_enforcer_snapshot(&self) -> anyhow::Result<Option<String>> {
         match self
             .db
-            .get(KEY_NFT_SNAPSHOT)
+            .get(KEY_ENFORCER_SNAPSHOT)
             .await
-            .map_err(|e| anyhow::anyhow!("VpcStore get nft_snapshot: {}", e))?
+            .map_err(|e| anyhow::anyhow!("VpcStore get enforcer_snapshot: {}", e))?
         {
             Some(b) => Ok(Some(String::from_utf8(b.to_vec())?)),
             None => Ok(None),
