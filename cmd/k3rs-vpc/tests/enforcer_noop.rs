@@ -86,7 +86,7 @@ async fn test_noop_enforcer_tap_rules() {
 
     assert!(
         enforcer
-            .install_tap_rules("tap-vm1", "10.0.1.20", 1)
+            .install_tap_rules("tap-vm1", "10.0.1.20", "fe80::1", 1)
             .await
             .is_ok()
     );
@@ -160,7 +160,7 @@ async fn test_noop_enforcer_full_lifecycle() {
 
     // Install TAP
     enforcer
-        .install_tap_rules("tap-vm1", "10.0.1.20", 1)
+        .install_tap_rules("tap-vm1", "10.0.1.20", "fe80::1", 1)
         .await
         .unwrap();
 
