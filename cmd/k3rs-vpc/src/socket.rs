@@ -9,8 +9,8 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::allocator::GhostAllocator;
-use crate::enforcer::NetworkEnforcer;
-use crate::protocol::{VpcInfo, VpcRequest, VpcResponse};
+use k3rs_vpc::enforcer::NetworkEnforcer;
+use k3rs_vpc::protocol::{VpcInfo, VpcRequest, VpcResponse};
 
 /// Start the Unix socket listener. Returns a `JoinHandle` for the accept loop.
 pub fn start_listener(
@@ -164,7 +164,7 @@ async fn dispatch(
                 .get_routes(vpc_id)
                 .into_iter()
                 .map(
-                    |(_pod_id, guest_ipv4, ghost_ipv6)| crate::protocol::RouteEntry {
+                    |(_pod_id, guest_ipv4, ghost_ipv6)| k3rs_vpc::protocol::RouteEntry {
                         destination: guest_ipv4,
                         next_hop: ghost_ipv6,
                     },

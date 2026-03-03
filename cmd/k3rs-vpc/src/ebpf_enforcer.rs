@@ -14,7 +14,7 @@ use aya::maps::hash_map::HashMap as BpfHashMap;
 use aya::programs::tc::{self, SchedClassifier, TcAttachType};
 use tracing::{debug, info, warn};
 
-use crate::enforcer::NetworkEnforcer;
+use k3rs_vpc::enforcer::NetworkEnforcer;
 use k3rs_vpc_common::{PeeringKey, PeeringValue, PodKey, PodValue, VpcCidrKey, VpcCidrValue};
 use pkg_types::vpc::{PeeringDirection, PeeringStatus, Vpc, VpcPeering};
 

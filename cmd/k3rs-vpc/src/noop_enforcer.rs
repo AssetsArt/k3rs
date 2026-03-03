@@ -10,8 +10,13 @@ use tracing::debug;
 use crate::enforcer::NetworkEnforcer;
 use pkg_types::vpc::{Vpc, VpcPeering};
 
-#[allow(dead_code)]
 pub struct NoopEnforcer;
+
+impl Default for NoopEnforcer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl NoopEnforcer {
     pub fn new() -> Self {
@@ -31,12 +36,12 @@ impl NetworkEnforcer for NoopEnforcer {
     }
 
     async fn ensure_vpc(&mut self, vpc_id: u16, cidr: &str) -> Result<()> {
-        debug!("noop: ensure_vpc vpc_id={} cidr={}", vpc_id, cidr);
+        debug!(vpc_id, cidr, "noop: ensure_vpc");
         Ok(())
     }
 
     async fn remove_vpc(&mut self, vpc_id: u16) -> Result<()> {
-        debug!("noop: remove_vpc vpc_id={}", vpc_id);
+        debug!(vpc_id, "noop: remove_vpc");
         Ok(())
     }
 
@@ -46,15 +51,12 @@ impl NetworkEnforcer for NoopEnforcer {
         guest_ipv4: &str,
         vpc_id: u16,
     ) -> Result<()> {
-        debug!(
-            "noop: install_pod_rules pod={} ipv4={} vpc_id={}",
-            pod_id, guest_ipv4, vpc_id
-        );
+        debug!(pod_id, guest_ipv4, vpc_id, "noop: install_pod_rules");
         Ok(())
     }
 
     async fn remove_pod_rules(&mut self, pod_id: &str) -> Result<()> {
-        debug!("noop: remove_pod_rules pod={}", pod_id);
+        debug!(pod_id, "noop: remove_pod_rules");
         Ok(())
     }
 
@@ -64,25 +66,22 @@ impl NetworkEnforcer for NoopEnforcer {
         guest_ipv4: &str,
         vpc_id: u16,
     ) -> Result<()> {
-        debug!(
-            "noop: install_tap_rules tap={} ipv4={} vpc_id={}",
-            tap_name, guest_ipv4, vpc_id
-        );
+        debug!(tap_name, guest_ipv4, vpc_id, "noop: install_tap_rules");
         Ok(())
     }
 
     async fn remove_tap_rules(&mut self, tap_name: &str) -> Result<()> {
-        debug!("noop: remove_tap_rules tap={}", tap_name);
+        debug!(tap_name, "noop: remove_tap_rules");
         Ok(())
     }
 
     async fn install_peering_rules(&mut self, peering: &VpcPeering, _vpcs: &[Vpc]) -> Result<()> {
-        debug!("noop: install_peering_rules peering={}", peering.name);
+        debug!(peering.name, "noop: install_peering_rules");
         Ok(())
     }
 
     async fn remove_peering_rules(&mut self, peering_name: &str) -> Result<()> {
-        debug!("noop: remove_peering_rules peering={}", peering_name);
+        debug!(peering_name, "noop: remove_peering_rules");
         Ok(())
     }
 

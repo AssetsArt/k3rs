@@ -8,7 +8,7 @@ use anyhow::{bail, ensure};
 use chrono::Utc;
 use tracing::info;
 
-use crate::store::{StoredAllocation, VpcStore};
+use k3rs_vpc::store::{StoredAllocation, VpcStore};
 use pkg_types::vpc::Vpc;
 
 struct Allocation {

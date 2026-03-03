@@ -104,25 +104,7 @@ impl VpcStore {
     }
 
     pub async fn load_vpcs(&self) -> anyhow::Result<Vec<Vpc>> {
-        let prefix = PREFIX_DEFINITIONS.as_bytes();
-        let mut vpcs = Vec::new();
-        let mut iter = self
-            .db
-            .scan(prefix..)
-            .await
-            .map_err(|e| anyhow::anyhow!("VpcStore scan vpcs: {}", e))?;
-        while let Some(kv) = iter
-            .next()
-            .await
-            .map_err(|e| anyhow::anyhow!("VpcStore scan vpcs next: {}", e))?
-        {
-            if !kv.key.starts_with(prefix) {
-                break;
-            }
-            let vpc: Vpc = serde_json::from_slice(&kv.value)?;
-            vpcs.push(vpc);
-        }
-        Ok(vpcs)
+        self.scan_prefix(PREFIX_DEFINITIONS).await
     }
 
     pub async fn save_peerings(&self, peerings: &[VpcPeering]) -> anyhow::Result<()> {
@@ -140,25 +122,7 @@ impl VpcStore {
     }
 
     pub async fn load_peerings(&self) -> anyhow::Result<Vec<VpcPeering>> {
-        let prefix = PREFIX_PEERINGS.as_bytes();
-        let mut peerings = Vec::new();
-        let mut iter = self
-            .db
-            .scan(prefix..)
-            .await
-            .map_err(|e| anyhow::anyhow!("VpcStore scan peerings: {}", e))?;
-        while let Some(kv) = iter
-            .next()
-            .await
-            .map_err(|e| anyhow::anyhow!("VpcStore scan peerings next: {}", e))?
-        {
-            if !kv.key.starts_with(prefix) {
-                break;
-            }
-            let peering: VpcPeering = serde_json::from_slice(&kv.value)?;
-            peerings.push(peering);
-        }
-        Ok(peerings)
+        self.scan_prefix(PREFIX_PEERINGS).await
     }
 
     pub async fn save_allocation(&self, alloc: &StoredAllocation) -> anyhow::Result<()> {
@@ -180,25 +144,32 @@ impl VpcStore {
     }
 
     pub async fn load_all_allocations(&self) -> anyhow::Result<Vec<StoredAllocation>> {
-        let prefix = PREFIX_ALLOCATIONS.as_bytes();
-        let mut allocs = Vec::new();
+        self.scan_prefix(PREFIX_ALLOCATIONS).await
+    }
+
+    /// Generic prefix scan: deserializes all values under a key prefix into `Vec<T>`.
+    async fn scan_prefix<T: serde::de::DeserializeOwned>(
+        &self,
+        prefix: &str,
+    ) -> anyhow::Result<Vec<T>> {
+        let prefix_bytes = prefix.as_bytes();
+        let mut results = Vec::new();
         let mut iter = self
             .db
-            .scan(prefix..)
+            .scan(prefix_bytes..)
             .await
-            .map_err(|e| anyhow::anyhow!("VpcStore scan allocations: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("VpcStore scan {}: {}", prefix, e))?;
         while let Some(kv) = iter
             .next()
             .await
-            .map_err(|e| anyhow::anyhow!("VpcStore scan allocations next: {}", e))?
+            .map_err(|e| anyhow::anyhow!("VpcStore scan {} next: {}", prefix, e))?
         {
-            if !kv.key.starts_with(prefix) {
+            if !kv.key.starts_with(prefix_bytes) {
                 break;
             }
-            let alloc: StoredAllocation = serde_json::from_slice(&kv.value)?;
-            allocs.push(alloc);
+            results.push(serde_json::from_slice(&kv.value)?);
         }
-        Ok(allocs)
+        Ok(results)
     }
 
     pub async fn save_nft_snapshot(&self, snapshot: &str) -> anyhow::Result<()> {

@@ -3,6 +3,7 @@
 //! Manages `table inet k3rs_vpc` with per-VPC ingress/egress chains,
 //! per-pod forwarding rules, anti-spoofing, and TAP interface rules.
 //! Uses `nft` CLI for rule manipulation (no library dependency).
+//! Multi-command operations use atomic `nft -f` batching for performance.
 
 use std::collections::HashSet;
 
@@ -10,8 +11,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
 
-use crate::enforcer::NetworkEnforcer;
-use crate::store::StoredAllocation;
+use k3rs_vpc::enforcer::NetworkEnforcer;
+use k3rs_vpc::store::StoredAllocation;
 use pkg_types::vpc::{PeeringDirection, PeeringStatus, Vpc, VpcPeering};
 
 const TABLE_NAME: &str = "inet k3rs_vpc";
@@ -27,31 +28,27 @@ impl NftManager {
             active_vpc_chains: HashSet::new(),
         }
     }
+}
+
+#[async_trait]
+impl NetworkEnforcer for NftManager {
+    fn name(&self) -> &str {
+        "nftables"
+    }
 
     /// Create `table inet k3rs_vpc` with the base `forward` chain and `input_validation` chain.
     /// Idempotent (uses `add` not `create`).
-    pub async fn init_table(&self) -> Result<()> {
-        // Create the table (idempotent with `add`)
-        run_nft(&["add", "table", TABLE_NAME]).await?;
-
-        // Base forward chain: filter hook, priority 0, policy accept.
-        // policy accept so non-VPC traffic is unaffected; per-VPC chains enforce drop.
-        run_nft(&[
-            "add",
-            "chain",
-            TABLE_NAME,
-            "forward",
-            "{ type filter hook forward priority 0; policy accept; }",
-        ])
-        .await?;
-
-        // Anti-spoofing chain: input hook, priority -1 (before conntrack), policy accept.
-        run_nft(&[
-            "add",
-            "chain",
-            TABLE_NAME,
-            "input_validation",
-            "{ type filter hook input priority -1; policy accept; }",
+    async fn init(&mut self) -> Result<()> {
+        run_nft_batch(&[
+            &format!("add table {}", TABLE_NAME),
+            &format!(
+                "add chain {} forward {{ type filter hook forward priority 0; policy accept; }}",
+                TABLE_NAME
+            ),
+            &format!(
+                "add chain {} input_validation {{ type filter hook input priority -1; policy accept; }}",
+                TABLE_NAME
+            ),
         ])
         .await?;
 
@@ -61,26 +58,24 @@ impl NftManager {
 
     /// Create per-VPC ingress and egress chains with intra-VPC accept + default drop.
     /// Idempotent — tracks in `active_vpc_chains`.
-    pub async fn ensure_vpc_chains(&mut self, vpc_id: u16, cidr: &str) -> Result<()> {
+    async fn ensure_vpc(&mut self, vpc_id: u16, cidr: &str) -> Result<()> {
         if self.active_vpc_chains.contains(&vpc_id) {
             return Ok(());
         }
 
         let ingress = format!("vpc_{}_ingress", vpc_id);
         let egress = format!("vpc_{}_egress", vpc_id);
-
-        // Create chains (regular chains, not base chains — no hook)
-        run_nft(&["add", "chain", TABLE_NAME, &ingress]).await?;
-        run_nft(&["add", "chain", TABLE_NAME, &egress]).await?;
-
-        // Intra-VPC accept rules
         let intra_rule = format!("ip saddr {} ip daddr {} accept", cidr, cidr);
-        run_nft(&["add", "rule", TABLE_NAME, &ingress, &intra_rule]).await?;
-        run_nft(&["add", "rule", TABLE_NAME, &egress, &intra_rule]).await?;
 
-        // Default drop at end of chain
-        run_nft(&["add", "rule", TABLE_NAME, &ingress, "drop"]).await?;
-        run_nft(&["add", "rule", TABLE_NAME, &egress, "drop"]).await?;
+        run_nft_batch(&[
+            &format!("add chain {} {}", TABLE_NAME, ingress),
+            &format!("add chain {} {}", TABLE_NAME, egress),
+            &format!("add rule {} {} {}", TABLE_NAME, ingress, intra_rule),
+            &format!("add rule {} {} {}", TABLE_NAME, egress, intra_rule),
+            &format!("add rule {} {} drop", TABLE_NAME, ingress),
+            &format!("add rule {} {} drop", TABLE_NAME, egress),
+        ])
+        .await?;
 
         self.active_vpc_chains.insert(vpc_id);
         info!(
@@ -91,7 +86,7 @@ impl NftManager {
     }
 
     /// Delete VPC chains when a VPC is removed.
-    pub async fn remove_vpc_chains(&mut self, vpc_id: u16) -> Result<()> {
+    async fn remove_vpc(&mut self, vpc_id: u16) -> Result<()> {
         if !self.active_vpc_chains.remove(&vpc_id) {
             return Ok(());
         }
@@ -99,17 +94,16 @@ impl NftManager {
         let ingress = format!("vpc_{}_ingress", vpc_id);
         let egress = format!("vpc_{}_egress", vpc_id);
 
-        // Flush then delete (flush removes rules so delete succeeds)
-        run_nft(&["flush", "chain", TABLE_NAME, &ingress])
-            .await
-            .ok();
-        run_nft(&["delete", "chain", TABLE_NAME, &ingress])
-            .await
-            .ok();
-        run_nft(&["flush", "chain", TABLE_NAME, &egress]).await.ok();
-        run_nft(&["delete", "chain", TABLE_NAME, &egress])
-            .await
-            .ok();
+        // Flush then delete (flush removes rules so delete succeeds).
+        // Each pair must be sequential (flush before delete), but we can batch all four.
+        run_nft_batch(&[
+            &format!("flush chain {} {}", TABLE_NAME, ingress),
+            &format!("delete chain {} {}", TABLE_NAME, ingress),
+            &format!("flush chain {} {}", TABLE_NAME, egress),
+            &format!("delete chain {} {}", TABLE_NAME, egress),
+        ])
+        .await
+        .ok();
 
         info!("nftables: removed VPC chains for vpc_id={}", vpc_id);
         Ok(())
@@ -117,8 +111,8 @@ impl NftManager {
 
     /// Install forwarding rules and anti-spoofing for a pod.
     /// Uses `comment "pod:<pod_id>"` for targeted removal.
-    pub async fn install_pod_rules(
-        &self,
+    async fn install_pod_rules(
+        &mut self,
         pod_id: &str,
         guest_ipv4: &str,
         vpc_id: u16,
@@ -127,42 +121,21 @@ impl NftManager {
         let egress_chain = format!("vpc_{}_egress", vpc_id);
         let ingress_chain = format!("vpc_{}_ingress", vpc_id);
 
-        // Forward chain: jump to VPC egress for traffic FROM this pod
-        run_nft(&[
-            "add",
-            "rule",
-            TABLE_NAME,
-            "forward",
+        run_nft_batch(&[
+            // Forward chain: jump to VPC egress for traffic FROM this pod
             &format!(
-                "ip saddr {} jump {} comment \"{}\"",
-                guest_ipv4, egress_chain, comment
+                "add rule {} forward ip saddr {} jump {} comment \"{}\"",
+                TABLE_NAME, guest_ipv4, egress_chain, comment
             ),
-        ])
-        .await?;
-
-        // Forward chain: jump to VPC ingress for traffic TO this pod
-        run_nft(&[
-            "add",
-            "rule",
-            TABLE_NAME,
-            "forward",
+            // Forward chain: jump to VPC ingress for traffic TO this pod
             &format!(
-                "ip daddr {} jump {} comment \"{}\"",
-                guest_ipv4, ingress_chain, comment
+                "add rule {} forward ip daddr {} jump {} comment \"{}\"",
+                TABLE_NAME, guest_ipv4, ingress_chain, comment
             ),
-        ])
-        .await?;
-
-        // Anti-spoofing: drop packets from TAP interfaces claiming this pod's IP
-        // but arriving on the wrong interface. Only for TAP interfaces.
-        run_nft(&[
-            "add",
-            "rule",
-            TABLE_NAME,
-            "input_validation",
+            // Anti-spoofing: drop packets from TAP interfaces claiming this pod's IP
             &format!(
-                "iifname \"tap-*\" ip saddr != {} drop comment \"{}\"",
-                guest_ipv4, comment
+                "add rule {} input_validation iifname \"tap-*\" ip saddr != {} drop comment \"{}\"",
+                TABLE_NAME, guest_ipv4, comment
             ),
         ])
         .await?;
@@ -175,7 +148,7 @@ impl NftManager {
     }
 
     /// Remove all rules with comment `pod:<pod_id>` by listing + deleting by handle.
-    pub async fn remove_pod_rules(&self, pod_id: &str) -> Result<()> {
+    async fn remove_pod_rules(&mut self, pod_id: &str) -> Result<()> {
         let comment = format!("pod:{}", pod_id);
         remove_rules_by_comment(&comment).await?;
         debug!("nftables: removed pod rules for pod={}", pod_id);
@@ -184,8 +157,8 @@ impl NftManager {
 
     /// Install TAP-specific rules matching iifname/oifname on the TAP device.
     /// Uses `comment "tap:<tap_name>"`.
-    pub async fn install_tap_rules(
-        &self,
+    async fn install_tap_rules(
+        &mut self,
         tap_name: &str,
         guest_ipv4: &str,
         vpc_id: u16,
@@ -194,28 +167,16 @@ impl NftManager {
         let egress_chain = format!("vpc_{}_egress", vpc_id);
         let ingress_chain = format!("vpc_{}_ingress", vpc_id);
 
-        // Traffic leaving the TAP (from VM) → VPC egress chain
-        run_nft(&[
-            "add",
-            "rule",
-            TABLE_NAME,
-            "forward",
+        run_nft_batch(&[
+            // Traffic leaving the TAP (from VM) → VPC egress chain
             &format!(
-                "iifname \"{}\" ip saddr {} jump {} comment \"{}\"",
-                tap_name, guest_ipv4, egress_chain, comment
+                "add rule {} forward iifname \"{}\" ip saddr {} jump {} comment \"{}\"",
+                TABLE_NAME, tap_name, guest_ipv4, egress_chain, comment
             ),
-        ])
-        .await?;
-
-        // Traffic entering the TAP (to VM) → VPC ingress chain
-        run_nft(&[
-            "add",
-            "rule",
-            TABLE_NAME,
-            "forward",
+            // Traffic entering the TAP (to VM) → VPC ingress chain
             &format!(
-                "oifname \"{}\" ip daddr {} jump {} comment \"{}\"",
-                tap_name, guest_ipv4, ingress_chain, comment
+                "add rule {} forward oifname \"{}\" ip daddr {} jump {} comment \"{}\"",
+                TABLE_NAME, tap_name, guest_ipv4, ingress_chain, comment
             ),
         ])
         .await?;
@@ -228,7 +189,7 @@ impl NftManager {
     }
 
     /// Remove all rules with comment `tap:<tap_name>`.
-    pub async fn remove_tap_rules(&self, tap_name: &str) -> Result<()> {
+    async fn remove_tap_rules(&mut self, tap_name: &str) -> Result<()> {
         let comment = format!("tap:{}", tap_name);
         remove_rules_by_comment(&comment).await?;
         debug!("nftables: removed TAP rules for tap={}", tap_name);
@@ -239,7 +200,7 @@ impl NftManager {
     ///
     /// Uses `insert rule` so rules go before the drop at end of chain.
     /// All rules are tagged with comment `peering:<name>` for targeted removal.
-    pub async fn install_peering_rules(&self, peering: &VpcPeering, vpcs: &[Vpc]) -> Result<()> {
+    async fn install_peering_rules(&mut self, peering: &VpcPeering, vpcs: &[Vpc]) -> Result<()> {
         if peering.status != PeeringStatus::Active {
             return Ok(());
         }
@@ -264,66 +225,45 @@ impl NftManager {
         let cidr_a = &vpc_a.ipv4_cidr;
         let cidr_b = &vpc_b.ipv4_cidr;
 
-        match peering.direction {
-            PeeringDirection::Bidirectional => {
+        let cmds: Vec<String> = match peering.direction {
+            PeeringDirection::Bidirectional => vec![
                 // A ingress: accept from B
-                run_nft(&[
-                    "insert",
-                    "rule",
-                    TABLE_NAME,
-                    &format!("vpc_{}_ingress", id_a),
-                    &format!("ip saddr {} accept comment \"{}\"", cidr_b, comment),
-                ])
-                .await?;
+                format!(
+                    "insert rule {} vpc_{}_ingress ip saddr {} accept comment \"{}\"",
+                    TABLE_NAME, id_a, cidr_b, comment
+                ),
                 // A egress: accept to B
-                run_nft(&[
-                    "insert",
-                    "rule",
-                    TABLE_NAME,
-                    &format!("vpc_{}_egress", id_a),
-                    &format!("ip daddr {} accept comment \"{}\"", cidr_b, comment),
-                ])
-                .await?;
+                format!(
+                    "insert rule {} vpc_{}_egress ip daddr {} accept comment \"{}\"",
+                    TABLE_NAME, id_a, cidr_b, comment
+                ),
                 // B ingress: accept from A
-                run_nft(&[
-                    "insert",
-                    "rule",
-                    TABLE_NAME,
-                    &format!("vpc_{}_ingress", id_b),
-                    &format!("ip saddr {} accept comment \"{}\"", cidr_a, comment),
-                ])
-                .await?;
+                format!(
+                    "insert rule {} vpc_{}_ingress ip saddr {} accept comment \"{}\"",
+                    TABLE_NAME, id_b, cidr_a, comment
+                ),
                 // B egress: accept to A
-                run_nft(&[
-                    "insert",
-                    "rule",
-                    TABLE_NAME,
-                    &format!("vpc_{}_egress", id_b),
-                    &format!("ip daddr {} accept comment \"{}\"", cidr_a, comment),
-                ])
-                .await?;
-            }
-            PeeringDirection::InitiatorOnly => {
+                format!(
+                    "insert rule {} vpc_{}_egress ip daddr {} accept comment \"{}\"",
+                    TABLE_NAME, id_b, cidr_a, comment
+                ),
+            ],
+            PeeringDirection::InitiatorOnly => vec![
                 // A egress: accept to B
-                run_nft(&[
-                    "insert",
-                    "rule",
-                    TABLE_NAME,
-                    &format!("vpc_{}_egress", id_a),
-                    &format!("ip daddr {} accept comment \"{}\"", cidr_b, comment),
-                ])
-                .await?;
+                format!(
+                    "insert rule {} vpc_{}_egress ip daddr {} accept comment \"{}\"",
+                    TABLE_NAME, id_a, cidr_b, comment
+                ),
                 // B ingress: accept from A
-                run_nft(&[
-                    "insert",
-                    "rule",
-                    TABLE_NAME,
-                    &format!("vpc_{}_ingress", id_b),
-                    &format!("ip saddr {} accept comment \"{}\"", cidr_a, comment),
-                ])
-                .await?;
-            }
-        }
+                format!(
+                    "insert rule {} vpc_{}_ingress ip saddr {} accept comment \"{}\"",
+                    TABLE_NAME, id_b, cidr_a, comment
+                ),
+            ],
+        };
+
+        let cmd_refs: Vec<&str> = cmds.iter().map(|s| s.as_str()).collect();
+        run_nft_batch(&cmd_refs).await?;
 
         info!(
             "nftables: installed peering rules for '{}' ({} <-> {} {:?})",
@@ -333,7 +273,7 @@ impl NftManager {
     }
 
     /// Remove all nftables rules associated with a peering by name.
-    pub async fn remove_peering_rules(&self, peering_name: &str) -> Result<()> {
+    async fn remove_peering_rules(&mut self, peering_name: &str) -> Result<()> {
         let comment = format!("peering:{}", peering_name);
         remove_rules_by_comment(&comment).await?;
         debug!("nftables: removed peering rules for '{}'", peering_name);
@@ -341,21 +281,27 @@ impl NftManager {
     }
 
     /// Snapshot current ruleset: `nft list table inet k3rs_vpc`.
-    pub async fn snapshot(&self) -> Result<String> {
+    async fn snapshot(&self) -> Result<String> {
         run_nft(&["list", "table", TABLE_NAME]).await
     }
 
+    /// Delete the entire k3rs_vpc table (for explicit cleanup/uninstall).
+    async fn cleanup(&mut self) -> Result<()> {
+        run_nft(&["delete", "table", TABLE_NAME]).await?;
+        info!("nftables: deleted table {}", TABLE_NAME);
+        Ok(())
+    }
+
     /// Rebuild all nftables rules from stored VPC definitions, allocations, and peerings.
-    /// Called on daemon startup for crash recovery.
-    pub async fn rebuild_from_allocations(
+    /// Called on daemon startup for crash recovery. Uses `with_context` for better error reporting.
+    async fn rebuild(
         &mut self,
         vpcs: &[Vpc],
         allocations: &[StoredAllocation],
         peerings: &[VpcPeering],
     ) -> Result<()> {
-        // Create VPC chains for all known VPCs
         for vpc in vpcs {
-            self.ensure_vpc_chains(vpc.vpc_id, &vpc.ipv4_cidr)
+            self.ensure_vpc(vpc.vpc_id, &vpc.ipv4_cidr)
                 .await
                 .with_context(|| {
                     format!(
@@ -365,7 +311,6 @@ impl NftManager {
                 })?;
         }
 
-        // Install rules for all existing allocations
         for alloc in allocations {
             self.install_pod_rules(&alloc.pod_id, &alloc.guest_ipv4, alloc.vpc_id)
                 .await
@@ -377,7 +322,6 @@ impl NftManager {
                 })?;
         }
 
-        // Install peering rules for all active peerings
         for peering in peerings {
             if let Err(e) = self.install_peering_rules(peering, vpcs).await {
                 warn!(
@@ -394,84 +338,6 @@ impl NftManager {
             peerings.len()
         );
         Ok(())
-    }
-
-    /// Delete the entire k3rs_vpc table (for explicit cleanup/uninstall).
-    pub async fn cleanup(&self) -> Result<()> {
-        run_nft(&["delete", "table", TABLE_NAME]).await?;
-        info!("nftables: deleted table {}", TABLE_NAME);
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl NetworkEnforcer for NftManager {
-    fn name(&self) -> &str {
-        "nftables"
-    }
-
-    async fn init(&mut self) -> Result<()> {
-        self.init_table().await
-    }
-
-    async fn ensure_vpc(&mut self, vpc_id: u16, cidr: &str) -> Result<()> {
-        self.ensure_vpc_chains(vpc_id, cidr).await
-    }
-
-    async fn remove_vpc(&mut self, vpc_id: u16) -> Result<()> {
-        self.remove_vpc_chains(vpc_id).await
-    }
-
-    async fn install_pod_rules(
-        &mut self,
-        pod_id: &str,
-        guest_ipv4: &str,
-        vpc_id: u16,
-    ) -> Result<()> {
-        NftManager::install_pod_rules(self, pod_id, guest_ipv4, vpc_id).await
-    }
-
-    async fn remove_pod_rules(&mut self, pod_id: &str) -> Result<()> {
-        NftManager::remove_pod_rules(self, pod_id).await
-    }
-
-    async fn install_tap_rules(
-        &mut self,
-        tap_name: &str,
-        guest_ipv4: &str,
-        vpc_id: u16,
-    ) -> Result<()> {
-        NftManager::install_tap_rules(self, tap_name, guest_ipv4, vpc_id).await
-    }
-
-    async fn remove_tap_rules(&mut self, tap_name: &str) -> Result<()> {
-        NftManager::remove_tap_rules(self, tap_name).await
-    }
-
-    async fn install_peering_rules(&mut self, peering: &VpcPeering, vpcs: &[Vpc]) -> Result<()> {
-        NftManager::install_peering_rules(self, peering, vpcs).await
-    }
-
-    async fn remove_peering_rules(&mut self, peering_name: &str) -> Result<()> {
-        NftManager::remove_peering_rules(self, peering_name).await
-    }
-
-    async fn snapshot(&self) -> Result<String> {
-        NftManager::snapshot(self).await
-    }
-
-    async fn cleanup(&mut self) -> Result<()> {
-        NftManager::cleanup(self).await
-    }
-
-    async fn rebuild(
-        &mut self,
-        vpcs: &[Vpc],
-        allocations: &[StoredAllocation],
-        peerings: &[VpcPeering],
-    ) -> Result<()> {
-        self.rebuild_from_allocations(vpcs, allocations, peerings)
-            .await
     }
 }
 
@@ -493,12 +359,47 @@ async fn run_nft(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Execute multiple nftables commands atomically via `nft -f -`.
+/// All commands are piped to stdin as a single batch, which is both faster
+/// (one process spawn instead of N) and atomic (all-or-nothing application).
+async fn run_nft_batch(commands: &[&str]) -> Result<()> {
+    let script = commands.join("\n");
+    debug!("nft batch:\n{}", script);
+
+    let mut child = tokio::process::Command::new("nft")
+        .arg("-f")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to spawn nft")?;
+
+    use tokio::io::AsyncWriteExt;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(script.as_bytes()).await?;
+        stdin.shutdown().await?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .context("failed to wait on nft")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!("nft batch failed: {}", stderr.trim());
+        anyhow::bail!("nft batch failed: {}", stderr.trim());
+    }
+
+    Ok(())
+}
+
 /// Remove all rules in `table inet k3rs_vpc` whose comment matches the given string.
 /// Lists all rules as JSON, finds matching handles, then deletes them.
 async fn remove_rules_by_comment(comment: &str) -> Result<()> {
     // List the entire table as JSON for programmatic parsing
-    let output = run_nft(&["-j", "list", "table", TABLE_NAME]).await;
-    let json_str = match output {
+    let json_str = match run_nft(&["-j", "list", "table", TABLE_NAME]).await {
         Ok(s) => s,
         Err(e) => {
             warn!("nftables: could not list table for rule removal: {}", e);

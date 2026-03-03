@@ -9,8 +9,8 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::allocator::GhostAllocator;
-use crate::enforcer::NetworkEnforcer;
-use crate::store::{VpcDaemonMeta, VpcStore};
+use k3rs_vpc::enforcer::NetworkEnforcer;
+use k3rs_vpc::store::{VpcDaemonMeta, VpcStore};
 use pkg_types::vpc::{PeeringStatus, Vpc, VpcPeering};
 use pkg_vpc::constants::PLATFORM_PREFIX;
 

@@ -1,10 +1,6 @@
 mod allocator;
-mod enforcer;
 mod nftables;
-mod noop_enforcer;
-mod protocol;
 mod socket;
-mod store;
 mod sync;
 
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
@@ -13,13 +9,13 @@ mod ebpf_enforcer;
 use std::sync::Arc;
 
 use clap::Parser;
+use k3rs_vpc::enforcer::NetworkEnforcer;
+use k3rs_vpc::store::VpcStore;
 use pkg_types::config::{VpcConfigFile, load_config_file};
-use store::VpcStore;
 use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::allocator::GhostAllocator;
-use crate::enforcer::NetworkEnforcer;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -79,7 +75,7 @@ fn select_enforcer() -> Box<dyn NetworkEnforcer> {
     #[cfg(not(target_os = "linux"))]
     {
         info!("Selected noop network enforcer (non-Linux platform)");
-        Box::new(noop_enforcer::NoopEnforcer::new())
+        Box::new(k3rs_vpc::noop_enforcer::NoopEnforcer::new())
     }
 }
 

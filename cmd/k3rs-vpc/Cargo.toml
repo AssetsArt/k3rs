@@ -3,6 +3,10 @@ name = "k3rs-vpc"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "k3rs_vpc"
+path = "src/lib.rs"
+
 [[bin]]
 name = "k3rs-vpc"
 path = "src/main.rs"
