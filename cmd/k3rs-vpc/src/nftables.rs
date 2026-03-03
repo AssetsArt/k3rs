@@ -200,9 +200,10 @@ impl NetworkEnforcer for NftManager {
         &mut self,
         veth_name: &str,
         guest_ipv4: &str,
+        _ghost_ipv6: &str,
         vpc_id: u16,
     ) -> Result<()> {
-        // nftables enforcer: veth rules use the same pattern as TAP rules
+        // nftables enforcer: veth rules use the same pattern as TAP rules (no SIIT)
         self.install_tap_rules(veth_name, guest_ipv4, vpc_id).await
     }
 

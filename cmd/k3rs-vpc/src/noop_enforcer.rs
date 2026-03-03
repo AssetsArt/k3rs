@@ -79,9 +79,10 @@ impl NetworkEnforcer for NoopEnforcer {
         &mut self,
         veth_name: &str,
         guest_ipv4: &str,
+        ghost_ipv6: &str,
         vpc_id: u16,
     ) -> Result<()> {
-        debug!(veth_name, guest_ipv4, vpc_id, "noop: install_veth_rules");
+        debug!(veth_name, guest_ipv4, ghost_ipv6, vpc_id, "noop: install_veth_rules");
         Ok(())
     }
 

@@ -12,15 +12,16 @@
 #![no_main]
 
 use aya_ebpf::{
-    bindings::TC_ACT_OK,
+    EbpfContext,
+    bindings::{TC_ACT_OK, __sk_buff},
     macros::{classifier, map},
     maps::{Array, HashMap, LruHashMap},
     programs::TcContext,
 };
 use aya_ebpf_bindings::helpers::bpf_redirect;
 use k3rs_vpc_common::{
-    Nat64Config, Nat64Key, Nat64Value, PeeringKey, PeeringValue, PodKey, PodValue, VpcCidrKey,
-    VpcCidrValue, GHOST_PREFIX, NAT64_PREFIX_U32,
+    Nat64Config, Nat64Key, Nat64Value, PeeringKey, PeeringValue, PodKey, PodValue, SiitKey,
+    SiitValue, VpcCidrKey, VpcCidrValue, VpcPodKey, VpcPodValue, GHOST_PREFIX, NAT64_PREFIX_U32,
 };
 use network_types::eth::EthHdr;
 
@@ -260,6 +261,237 @@ pub fn tc_ingress_v6(ctx: TcContext) -> i32 {
         Ok(action) => action,
         Err(_) => TC_ACT_OK, // fail-open
     }
+}
+
+// ─── SIIT Per-Pod Translation Programs ─────────────────────────
+
+/// Per-interface SIIT config: ifindex → (ghost_ipv6, guest_ipv4, vpc_id).
+#[map]
+static SIIT_CONFIG: HashMap<SiitKey, SiitValue> = HashMap::with_max_entries(1024, 0);
+
+/// VPC-scoped pod lookup: (vpc_id, ipv4) → ghost_ipv6 (for intra-VPC routing).
+#[map]
+static VPC_PODS: HashMap<VpcPodKey, VpcPodValue> = HashMap::with_max_entries(4096, 0);
+
+/// SIIT ingress classifier (attached to host-side veth INGRESS).
+/// Translates IPv4 packets from pod → IPv6 for the bridge.
+///
+/// 1. Check IPv4, pass non-IPv4.
+/// 2. Lookup SIIT_CONFIG by ifindex → pod's ghost_ipv6, guest_ipv4, vpc_id.
+/// 3. Anti-spoof: src_ipv4 must match guest_ipv4.
+/// 4. Resolve dst IPv6: intra-VPC (VPC_PODS) or external (64:ff9b::).
+/// 5. Translate: change_proto(IPv6), write IPv6 header, adjust L4 checksum.
+#[classifier]
+pub fn siit_in(mut ctx: TcContext) -> i32 {
+    match try_siit_in(&mut ctx) {
+        Ok(action) => action,
+        Err(_) => TC_ACT_OK, // fail-open
+    }
+}
+
+fn try_siit_in(ctx: &mut TcContext) -> Result<i32, ()> {
+    // 1. Check IPv4 ethertype
+    let etype: u16 = ctx.load(12).map_err(|_| ())?;
+    if etype != ETH_P_IP.to_be() {
+        return Ok(TC_ACT_OK);
+    }
+
+    // Only handle standard IPv4 headers (IHL=5, no options)
+    let ver_ihl: u8 = ctx.load(EthHdr::LEN).map_err(|_| ())?;
+    if ver_ihl != 0x45 {
+        return Ok(TC_ACT_OK);
+    }
+
+    // 2. Read ifindex from __sk_buff
+    let skb = ctx.as_ptr() as *const __sk_buff;
+    let ifindex = unsafe { (*skb).ingress_ifindex };
+    if ifindex == 0 {
+        return Ok(TC_ACT_OK);
+    }
+
+    // 3. Lookup SIIT config for this interface
+    let siit_key = SiitKey { ifindex };
+    let config = unsafe { SIIT_CONFIG.get(&siit_key) };
+    let config = match config {
+        Some(v) => v,
+        None => return Ok(TC_ACT_OK), // not a SIIT-managed interface
+    };
+
+    // 4. Read IPv4 header fields
+    let protocol: u8 = ctx.load(EthHdr::LEN + 9).map_err(|_| ())?;
+    // Only TCP/UDP
+    if protocol != IPPROTO_TCP && protocol != IPPROTO_UDP {
+        return Ok(TC_ACT_OK);
+    }
+
+    let src_raw: u32 = ctx.load(EthHdr::LEN + 12).map_err(|_| ())?;
+    let dst_raw: u32 = ctx.load(EthHdr::LEN + 16).map_err(|_| ())?;
+    let src_ip = u32::from_be(src_raw);
+    let dst_ip = u32::from_be(dst_raw);
+
+    // 5. Anti-spoof: source must be this pod's guest IPv4
+    if src_ip != config.guest_ipv4 {
+        return Ok(TC_ACT_SHOT);
+    }
+
+    // 6. Resolve destination IPv6
+    let dst_ipv6 = {
+        let vpc_key = VpcPodKey {
+            vpc_id: config.vpc_id,
+            _pad: 0,
+            ipv4_addr: dst_ip,
+        };
+        match unsafe { VPC_PODS.get(&vpc_key) } {
+            Some(pod) => pod.ghost_ipv6,
+            None => nat64_addr(dst_ip), // external: 64:ff9b::dst_ipv4
+        }
+    };
+
+    // 7. Source IPv6 = pod's Ghost IPv6
+    let src_ipv6 = config.ghost_ipv6;
+
+    // 8. Read remaining IPv4 fields before change_proto
+    let tot_len = u16::from_be(ctx.load::<u16>(EthHdr::LEN + 2).map_err(|_| ())?);
+    let payload_len = tot_len - IPV4_HDR_LEN as u16;
+    let ttl: u8 = ctx.load(EthHdr::LEN + 8).map_err(|_| ())?;
+    if ttl <= 1 {
+        return Ok(TC_ACT_SHOT); // TTL expired
+    }
+
+    // Read L4 ports (for checksum offset)
+    let l4 = EthHdr::LEN + IPV4_HDR_LEN;
+    let _src_port: u16 = ctx.load(l4).map_err(|_| ())?;
+
+    // 9. Change protocol: IPv4 → IPv6 (grows L3 header by 20 bytes)
+    ctx.change_proto(ETH_P_IPV6, 0).map_err(|_| ())?;
+
+    // 10. Write IPv6 header
+    let l3 = EthHdr::LEN;
+    let s6 = addr_words(&src_ipv6);
+    let d6 = addr_words(&dst_ipv6);
+
+    ctx.store(l3, &0x60000000u32.to_be(), 0).map_err(|_| ())?; // ver=6, TC=0, flow=0
+    ctx.store(l3 + 4, &payload_len.to_be(), 0).map_err(|_| ())?;
+    ctx.store(l3 + 6, &protocol, 0).map_err(|_| ())?; // next header
+    ctx.store(l3 + 7, &(ttl - 1), 0).map_err(|_| ())?; // hop limit = TTL-1
+    // src IPv6
+    ctx.store(l3 + 8, &s6[0], 0).map_err(|_| ())?;
+    ctx.store(l3 + 12, &s6[1], 0).map_err(|_| ())?;
+    ctx.store(l3 + 16, &s6[2], 0).map_err(|_| ())?;
+    ctx.store(l3 + 20, &s6[3], 0).map_err(|_| ())?;
+    // dst IPv6
+    ctx.store(l3 + 24, &d6[0], 0).map_err(|_| ())?;
+    ctx.store(l3 + 28, &d6[1], 0).map_err(|_| ())?;
+    ctx.store(l3 + 32, &d6[2], 0).map_err(|_| ())?;
+    ctx.store(l3 + 36, &d6[3], 0).map_err(|_| ())?;
+
+    // 11. Adjust L4 checksum (IPv4 pseudo → IPv6 pseudo)
+    let csum_off = EthHdr::LEN + IPV6_HDR_LEN
+        + if protocol == IPPROTO_TCP { TCP_CSUM_OFF } else { UDP_CSUM_OFF };
+    csum_4to6(ctx, csum_off, src_raw, dst_raw, s6, d6)?;
+
+    Ok(TC_ACT_OK)
+}
+
+/// SIIT egress classifier (attached to host-side veth EGRESS).
+/// Translates IPv6 packets from bridge → IPv4 for the pod.
+///
+/// 1. Check IPv6, pass non-IPv6.
+/// 2. Lookup SIIT_CONFIG by ifindex → pod's ghost_ipv6, guest_ipv4.
+/// 3. Verify dst IPv6 matches this pod's Ghost IPv6.
+/// 4. Extract src IPv4 from bytes 12-15 of src IPv6.
+/// 5. Translate: change_proto(IPv4), write IPv4 header, adjust L4 checksum.
+#[classifier]
+pub fn siit_out(mut ctx: TcContext) -> i32 {
+    match try_siit_out(&mut ctx) {
+        Ok(action) => action,
+        Err(_) => TC_ACT_OK, // fail-open
+    }
+}
+
+fn try_siit_out(ctx: &mut TcContext) -> Result<i32, ()> {
+    // 1. Check IPv6 ethertype
+    let etype: u16 = ctx.load(12).map_err(|_| ())?;
+    if etype != ETH_P_IPV6.to_be() {
+        return Ok(TC_ACT_OK);
+    }
+
+    // 2. Read ifindex from __sk_buff
+    let skb = ctx.as_ptr() as *const __sk_buff;
+    let ifindex = unsafe { (*skb).ifindex };
+    if ifindex == 0 {
+        return Ok(TC_ACT_OK);
+    }
+
+    // 3. Lookup SIIT config for this interface
+    let siit_key = SiitKey { ifindex };
+    let config = unsafe { SIIT_CONFIG.get(&siit_key) };
+    let config = match config {
+        Some(v) => v,
+        None => return Ok(TC_ACT_OK), // not SIIT-managed
+    };
+
+    // 4. Read dst IPv6 — verify it matches this pod's Ghost IPv6
+    let d0: u32 = ctx.load(IPV6_DST_ADDR_OFF).map_err(|_| ())?;
+    let d1: u32 = ctx.load(IPV6_DST_ADDR_OFF + 4).map_err(|_| ())?;
+    let d2: u32 = ctx.load(IPV6_DST_ADDR_OFF + 8).map_err(|_| ())?;
+    let d3: u32 = ctx.load(IPV6_DST_ADDR_OFF + 12).map_err(|_| ())?;
+    let dst_v6_words = [d0, d1, d2, d3];
+    let expected = addr_words(&config.ghost_ipv6);
+    if dst_v6_words != expected {
+        return Ok(TC_ACT_OK); // not for this pod — pass through
+    }
+
+    // 5. Read IPv6 header fields
+    let payload_len = u16::from_be(ctx.load::<u16>(EthHdr::LEN + 4).map_err(|_| ())?);
+    let next_hdr: u8 = ctx.load(EthHdr::LEN + 6).map_err(|_| ())?;
+    let hop_limit: u8 = ctx.load(EthHdr::LEN + 7).map_err(|_| ())?;
+
+    // Only TCP/UDP
+    if next_hdr != IPPROTO_TCP && next_hdr != IPPROTO_UDP {
+        return Ok(TC_ACT_OK);
+    }
+
+    // 6. Read src IPv6 for checksum and IPv4 extraction
+    let s0: u32 = ctx.load(IPV6_SRC_ADDR_OFF).map_err(|_| ())?;
+    let s1: u32 = ctx.load(IPV6_SRC_ADDR_OFF + 4).map_err(|_| ())?;
+    let s2: u32 = ctx.load(IPV6_SRC_ADDR_OFF + 8).map_err(|_| ())?;
+    let s3: u32 = ctx.load(IPV6_SRC_ADDR_OFF + 12).map_err(|_| ())?;
+    let src_v6 = [s0, s1, s2, s3];
+
+    // src IPv4 = bytes 12-15 of src IPv6 (works for Ghost and NAT64 64:ff9b::)
+    let src_ipv4 = u32::from_be(s3);
+    let dst_ipv4 = config.guest_ipv4;
+
+    // 7. Change protocol: IPv6 → IPv4 (shrinks L3 header by 20 bytes)
+    ctx.change_proto(ETH_P_IP, 0).map_err(|_| ())?;
+
+    // 8. Write IPv4 header
+    let l3 = EthHdr::LEN;
+    let total_len = payload_len + IPV4_HDR_LEN as u16;
+    ctx.store(l3, &0x45u8, 0).map_err(|_| ())?; // version=4, IHL=5
+    ctx.store(l3 + 1, &0u8, 0).map_err(|_| ())?; // DSCP/ECN
+    ctx.store(l3 + 2, &total_len.to_be(), 0).map_err(|_| ())?;
+    ctx.store(l3 + 4, &0u16, 0).map_err(|_| ())?; // identification
+    ctx.store(l3 + 6, &0x4000u16.to_be(), 0).map_err(|_| ())?; // DF
+    ctx.store(l3 + 8, &hop_limit, 0).map_err(|_| ())?; // TTL
+    ctx.store(l3 + 9, &next_hdr, 0).map_err(|_| ())?; // protocol
+    ctx.store(l3 + 10, &0u16, 0).map_err(|_| ())?; // checksum placeholder
+    let src_raw = src_ipv4.to_be();
+    let dst_raw = dst_ipv4.to_be();
+    ctx.store(l3 + 12, &src_raw, 0).map_err(|_| ())?;
+    ctx.store(l3 + 16, &dst_raw, 0).map_err(|_| ())?;
+
+    // 9. Compute and store IPv4 header checksum
+    let csum = ipv4_hdr_csum(total_len, hop_limit, next_hdr, src_ipv4, dst_ipv4);
+    ctx.store(l3 + 10, &csum.to_be(), 0).map_err(|_| ())?;
+
+    // 10. Adjust L4 checksum (IPv6 pseudo → IPv4 pseudo)
+    let csum_off = EthHdr::LEN + IPV4_HDR_LEN
+        + if next_hdr == IPPROTO_TCP { TCP_CSUM_OFF } else { UDP_CSUM_OFF };
+    csum_6to4(ctx, csum_off, src_v6, dst_v6_words, src_raw, dst_raw)?;
+
+    Ok(TC_ACT_OK)
 }
 
 // ─── NAT64 Translation Programs ────────────────────────────────

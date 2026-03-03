@@ -49,11 +49,12 @@ pub trait NetworkEnforcer: Send {
     async fn remove_tap_rules(&mut self, tap_name: &str) -> Result<()>;
 
     /// Install veth-interface-specific rules (OCI container traffic).
-    /// Attaches TC classifiers (IPv4 + IPv6) to the host-side veth.
+    /// Attaches SIIT translators (IPv4↔IPv6) and IPv6 VPC classifiers to the host-side veth.
     async fn install_veth_rules(
         &mut self,
         veth_name: &str,
         guest_ipv4: &str,
+        ghost_ipv6: &str,
         vpc_id: u16,
     ) -> Result<()>;
 

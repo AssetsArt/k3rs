@@ -17,6 +17,7 @@ enum VpcRequest {
     AttachVeth {
         veth_name: String,
         guest_ipv4: String,
+        ghost_ipv6: String,
         vpc_id: u16,
     },
     DetachVeth { veth_name: String },

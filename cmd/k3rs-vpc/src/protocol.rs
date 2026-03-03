@@ -11,10 +11,11 @@ pub enum VpcRequest {
     Query { pod_id: String },
     GetRoutes { vpc_id: u16 },
     CheckReachability { src_vpc: String, dst_vpc: String },
-    /// Attach TC classifiers (IPv4 + IPv6) to a veth interface for VPC enforcement.
+    /// Attach SIIT translators and IPv6 VPC classifiers to a veth interface.
     AttachVeth {
         veth_name: String,
         guest_ipv4: String,
+        ghost_ipv6: String,
         vpc_id: u16,
     },
     /// Detach TC classifiers from a veth interface.

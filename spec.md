@@ -42,7 +42,7 @@ graph TB
             direction TB
             VPC_SYNC["VPC Sync Loop"]
             GHOST["Ghost IPv6<br/>Allocator"]
-            EBPF["eBPF Enforcer<br/>(TC classifier)"]
+            EBPF["eBPF Enforcer<br/>(TC classifier + SIIT)"]
             NAT64["NAT64<br/>(eBPF)"]
             VPC_STORE["VpcStore<br/>(Own SlateDB)"]
             VPC_SOCK["Unix Socket API"]
@@ -69,7 +69,7 @@ graph TB
         SPROXY <--> PODS
         DNS --> SPROXY
         PODS <--> BRIDGE
-        EBPF -.->|"TC classifier<br/>on veth/TAP"| PODS
+        EBPF -.->|"SIIT + TC classifier<br/>on veth/TAP"| PODS
         NAT64 -.->|"IPv6→IPv4<br/>translation"| BRIDGE
 
         KUBELET -- "allocate/release<br/>(Unix socket)" --> VPC_SOCK
@@ -297,14 +297,15 @@ This specification introduces **VPC (Virtual Private Cloud)** as a first-class r
 
 ```
 Before:  Pod veth → IPv4 only (10.42.0.5)         → eBPF lookup map → VPC ID
-After:   Pod veth → IPv6 primary (fd6b:3372:...)   → eBPF parse header → VPC ID (free)
-                  → IPv4 via NAT64                  → no map lookup needed
+After:   Pod veth → IPv4 (app-facing)              → SIIT translates to IPv6 at veth boundary
+         k3rs0    → IPv6 only (fd6b:3372:...)      → eBPF parse header → VPC ID (free)
+                  → External IPv4 via NAT64         → no map lookup needed
 ```
 
 This enables:
 
 - **No route tables** — Ghost IPv6 is unique across the entire cluster; 1 route per node covers all pods in all VPCs
-- **Overlapping IPv4 CIDRs** across different VPCs (IPv4 is a "local illusion" inside the pod)
+- **Overlapping IPv4 CIDRs** across different VPCs (IPv4 is a "local illusion" inside the pod — SIIT translates to unique Ghost IPv6 at the veth boundary)
 - **Hard VPC isolation** — eBPF extracts VPC ID directly from the IPv6 header (bytes 10-11), no BPF map lookup needed
 - **Stateless routing** — route decisions derived from packet headers alone
 - **IPv4 compatibility** — NAT64/DNS64 at node level provides transparent IPv4 access
@@ -609,21 +610,65 @@ u16 dst_vpc = (ipv6_hdr->daddr[10] << 8) | ipv6_hdr->daddr[11];
 // Same VPC? Allow. Different VPC? Check peerings map.
 ```
 
-**TC classifier programs** are attached to each pod veth (container) or TAP (Firecracker VM) interface. Only **one** BPF HashMap map is needed:
+**Per-pod SIIT (Stateless IP/ICMP Translation)** translates ALL IPv4 from pods to IPv6 at the veth boundary. The bridge (`k3rs0`) sees only IPv6. VPC isolation is implicit in the Ghost IPv6 addresses — overlapping IPv4 CIDRs across VPCs are fully supported because IPv4 never reaches the bridge.
+
+```
+Pod (IPv4 only) → eth0 → [veth pair] → veth-host
+                                           ↓
+                            SIIT ingress: IPv4→IPv6 (siit_in)
+                                           ↓
+                     k3rs0 bridge (IPv6 only) ──→ IPv6 VPC enforcement
+                         ↓                              ↓
+              ┌──────────┴──────────┐       dst veth-host (another pod)
+              │                     │              ↓
+       NAT64 egress          dst veth-host   SIIT egress: IPv6→IPv4 (siit_out)
+       (external IPv4)            ↓                ↓
+              ↓           SIIT egress: IPv6→IPv4   dst Pod receives IPv4
+         phys interface         ↓
+                          dst Pod receives IPv4
+```
+
+**Direction clarification** (host-side veth perspective):
+- **INGRESS** = packets FROM pod TO host (pod sends IPv4 → SIIT translates to IPv6)
+- **EGRESS** = packets FROM host TO pod (bridge delivers IPv6 → SIIT translates to IPv4)
+
+**BPF maps** for veth interfaces:
 
 | Map | Key | Value | Purpose |
 |-----|-----|-------|---------|
-| `peerings` | `(src_vpc: u16, dst_vpc: u16)` | `direction: u8` | Cross-VPC allow rules |
+| `SIIT_CONFIG` | `ifindex: u32` | `(ghost_ipv6, guest_ipv4, vpc_id)` | Per-interface SIIT config |
+| `VPC_PODS` | `(vpc_id: u16, ipv4: u32)` | `ghost_ipv6: [u8; 16]` | Intra-VPC IPv4→Ghost IPv6 resolution |
+| `PEERINGS` | `(src_vpc: u16, dst_vpc: u16)` | `allowed: u32` | Cross-VPC allow rules |
 
-**Classification logic** (per-packet):
+**SIIT ingress (`siit_in`)** — IPv4→IPv6 translation (per-packet):
 
-1. Parse Ethernet header → if not IPv6, pass (allows NAT64 IPv4 traffic)
+1. Check IPv4 ethertype, pass non-IPv4
+2. Read ifindex → lookup `SIIT_CONFIG[ifindex]` for pod's ghost_ipv6, guest_ipv4, vpc_id
+3. Anti-spoof: `src_ipv4 != config.guest_ipv4` → DROP
+4. Resolve dst IPv6: lookup `VPC_PODS[(vpc_id, dst_ipv4)]` → intra-VPC pod's ghost_ipv6, or `64:ff9b::dst_ipv4` for external
+5. `change_proto(ETH_P_IPV6)` → write IPv6 header, adjust L4 checksum
+6. Return `TC_ACT_OK` — packet continues as IPv6 on the bridge
+
+**SIIT egress (`siit_out`)** — IPv6→IPv4 translation (per-packet):
+
+1. Check IPv6 ethertype, pass non-IPv6
+2. Read ifindex → lookup `SIIT_CONFIG[ifindex]`
+3. Verify dst IPv6 matches `config.ghost_ipv6` (not for this pod → pass)
+4. Extract src IPv4 from bytes 12-15 of src IPv6 (works for both Ghost and `64:ff9b::`)
+5. `change_proto(ETH_P_IP)` → write IPv4 header + checksum, adjust L4 checksum
+6. Return `TC_ACT_OK` — pod receives IPv4
+
+**IPv6 VPC enforcement** (`tc_egress_v6`/`tc_ingress_v6`) still runs on the same veth (after SIIT), enforcing isolation on the now-IPv6 traffic:
+
+1. Parse Ethernet header → if not IPv6, pass
 2. Parse IPv6 header → validate Ghost prefix (bytes 0-3 = `fd6b:3372`)
 3. If not Ghost traffic → pass (NDP, external IPv6)
 4. Extract src VPC ID (bytes 10-11 of src addr) and dst VPC ID (bytes 10-11 of dst addr)
 5. Same VPC → **allow** (no map lookup)
-6. Different VPC → check `peerings` map → allow if peered, **drop** otherwise
+6. Different VPC → check `PEERINGS` map → allow if peered, **drop** otherwise
 7. On any parse error → allow (fail-open)
+
+**TAP interfaces** (VMs) retain the original IPv4 classifiers (`tc_egress`/`tc_ingress`) and `VPC_MEMBERSHIP` map — they are NOT on the k3rs0 bridge and use separate iptables NAT.
 
 ```rust
 // k3rs-vpc-ebpf: IPv6-native TC classifier (simplified)
@@ -662,7 +707,7 @@ fn try_classify_v6(ctx: &TcContext) -> Result<i32, ()> {
 
 Programs and maps are **pinned to bpffs** at `/sys/fs/bpf/k3rs/`, surviving daemon crashes. On restart, `k3rs-vpc` re-opens pinned maps and reconciles them against VpcStore state — no traffic interruption.
 
-**Anti-spoofing**: The eBPF classifier validates Ghost prefix and version on every packet. Packets with non-Ghost source addresses targeting Ghost destinations are dropped. Pods cannot forge traffic appearing to come from a different VPC.
+**Anti-spoofing**: SIIT ingress (`siit_in`) enforces source IPv4 validation — a pod can only send packets with its assigned `guest_ipv4` as source. The IPv6 VPC classifier validates Ghost prefix and version on every packet. Packets with non-Ghost source addresses targeting Ghost destinations are dropped. Pods cannot forge traffic appearing to come from a different VPC.
 
 ##### Recovery & Reconciliation
 
@@ -901,7 +946,8 @@ async fn run_pod_lifecycle(pod: Pod, runtime: Arc<ContainerRuntime>, vpc_client:
                 bridge_name: "k3rs0".to_string(),
             };
             // Creates veth pair, moves peer into netns, assigns IPs,
-            // sets default IPv6 route via fe80::1 (bridge gateway)
+            // sets default IPv6 route via fe80::1, IPv4 default route via
+            // 169.254.1.1 (proxy_arp on host-side veth for SIIT translation)
             setup_pod_network(&config).await?;  // non-fatal warning on failure
         }
     }
@@ -998,7 +1044,9 @@ resolves to the backend Pod's Ghost IPv6 **only if the querying Pod is in the sa
 
 #### NAT64/DNS64 — IPv4 Connectivity
 
-Pods use Ghost IPv6 as their primary address but still need access to IPv4 services (external APIs, legacy infra). This is handled transparently at the node level via NAT64 + DNS64.
+Pods use Ghost IPv6 as their primary address but still need access to IPv4 services (external APIs, legacy infra). This is handled transparently at the node level via SIIT + NAT64 + DNS64.
+
+**SIIT (per-pod)** translates pod IPv4 → IPv6 at the veth boundary. For intra-VPC traffic, SIIT resolves the destination pod's Ghost IPv6 directly via the `VPC_PODS` map. For external IPv4, SIIT produces `64:ff9b::dst_ipv4` which the NAT64 on the bridge then translates to real IPv4.
 
 ##### NAT64 (Node-Level, eBPF)
 
@@ -1104,7 +1152,7 @@ VMs already get isolated TAP networks (`172.16.x.0/30`). With IPv6-native Ghost:
 5. Agent calls `k3rs-vpc` → `Allocate(pod_id, "my-vpc")`
 6. `k3rs-vpc` allocates GuestIPv4, constructs Ghost IPv6, updates eBPF maps
 7. Agent injects `K3RS_POD_IP` + `K3RS_POD_IPV6` env vars, creates container (OCI create)
-8. Agent configures dual-stack pod interface via `setup_pod_network()`: veth pair, Ghost IPv6/128 + GuestIPv4/32 on eth0, IPv6 default route via `fe80::1` on `k3rs0` bridge
+8. Agent configures dual-stack pod interface via `setup_pod_network()`: veth pair, Ghost IPv6/128 + GuestIPv4/32 on eth0, IPv6 default route via `fe80::1`, IPv4 default route via `169.254.1.1` (proxy_arp on host-side veth enables SIIT translation)
 9. Agent starts container (OCI start)
 10. Agent reports `ghost_ipv6` and `vpc_name` to server
 
@@ -1123,32 +1171,28 @@ VMs already get isolated TAP networks (`172.16.x.0/30`). With IPv6-native Ghost:
 
 ##### Routing Decision (per-packet, in eBPF)
 
+SIIT (`siit_in`) on the host-side veth translates pod IPv4 → IPv6 before the bridge:
+
 ```rust
-fn route_packet(src_ghost: Ipv6Addr, dst_ipv4: Ipv4Addr) -> Result<Ipv6Addr> {
-    let src_vpc_id = extract_vpc_id(&src_ghost);
-    let src_cluster_id = extract_cluster_id(&src_ghost);
+// siit_in: IPv4→IPv6 at veth boundary (simplified)
+fn translate_ipv4_to_ipv6(ifindex: u32, src_ipv4: u32, dst_ipv4: u32) -> Result<(Ipv6, Ipv6)> {
+    let config = SIIT_CONFIG.get(ifindex)?;  // pod's ghost_ipv6, guest_ipv4, vpc_id
+    if src_ipv4 != config.guest_ipv4 { return Err(Drop); }  // anti-spoof
 
-    // Step 1: Intra-VPC — destination in same VPC CIDR?
-    let src_cidr = get_vpc_cidr(src_vpc_id);
-    if src_cidr.contains(dst_ipv4) {
-        return Ok(construct_ghost_ipv6(prefix, src_cluster_id, src_vpc_id, dst_ipv4));
-    }
-
-    // Step 2: Cross-VPC — is there a peering + matching VPC?
-    for peer_vpc_id in get_peered_vpcs(src_vpc_id) {
-        let peer_cidr = get_vpc_cidr(peer_vpc_id);
-        if peer_cidr.contains(dst_ipv4) {
-            return Ok(construct_ghost_ipv6(prefix, src_cluster_id, peer_vpc_id, dst_ipv4));
-        }
-    }
-
-    // Step 3: No route — drop
-    Err(Error::NoRoute)
+    let src_ipv6 = config.ghost_ipv6;
+    let dst_ipv6 = match VPC_PODS.get((config.vpc_id, dst_ipv4)) {
+        Some(pod) => pod.ghost_ipv6,       // intra-VPC: use dst pod's Ghost IPv6
+        None      => nat64_addr(dst_ipv4), // external: 64:ff9b::dst_ipv4 → NAT64
+    };
+    Ok((src_ipv6, dst_ipv6))
 }
 ```
 
+After translation, IPv6 VPC classifiers enforce isolation on the bridge (same logic as before — VPC ID extracted from bytes 10-11, no map lookup for same-VPC).
+
 ##### Spoofing Prevention
 
+- SIIT ingress (`siit_in`) validates source IPv4 matches pod's assigned `guest_ipv4` — pods cannot send traffic with a spoofed source
 - eBPF validates Ghost IPv6 prefix and version on every packet
 - Packets with non-Ghost source targeting Ghost destinations are dropped
 - Pods cannot forge traffic that appears to come from a different VPC (VPC ID is in the address)
@@ -1184,7 +1228,9 @@ cmd/
 │       ├── sync.rs          # VPC Sync Loop (pull from server)
 │       ├── allocator.rs     # Ghost IPv6 allocator + per-VPC pools
 │       ├── socket.rs        # Unix socket API (NDJSON listener)
-│       ├── ebpf_enforcer.rs # eBPF TC classifier management (Aya)
+│       ├── ebpf_enforcer.rs # eBPF TC classifier + SIIT management (Aya)
+│       ├── noop_enforcer.rs # NoopEnforcer (macOS, log-only)
+│       ├── nftables.rs      # NftManager (nftables CLI backend)
 │       └── enforcer.rs      # NetworkEnforcer trait
 pkg/
 ├── vpc/                     # NEW: Shared VPC library crate
@@ -2959,7 +3005,7 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Agent: veth teardown on pod stop/exit (before VPC release)
 - [x] Agent: skip network setup for VM backends (Firecracker gets `add_ipv6_to_tap()` instead)
 - [x] Non-fatal network setup — agent stays functional if bridge/veth fails (dev mode, rootless, macOS)
-- [ ] Agent: configure IPv4 default route via NAT64 prefix (deferred to Phase 12)
+- [x] IPv4 default route via `169.254.1.1` link-local gateway + `proxy_arp` on host-side veth — enables SIIT translation at veth boundary
 - [ ] Test: pod-to-pod same node via Ghost IPv6
 
 #### Phase 10: eBPF IPv6 Classifier
@@ -2968,8 +3014,8 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Validate Ghost prefix (`fd6b:3372`) — `is_ghost_prefix()` helper
 - [x] Keep `PEERINGS` map for cross-VPC only — IPv6 classifiers use only `PEERINGS`; `VPC_MEMBERSHIP`/`VPC_CIDRS` retained for IPv4 path
 - [x] Anti-spoofing: reject non-Ghost src with Ghost dst
-- [x] Veth interface support: `install_veth_rules` / `remove_veth_rules` on `NetworkEnforcer` trait — attaches TC classifiers (IPv4+IPv6) to host-side veth
-- [x] `AttachVeth` / `DetachVeth` protocol messages + socket dispatch + agent VPC client
+- [x] Veth interface support: `install_veth_rules` / `remove_veth_rules` on `NetworkEnforcer` trait — attaches SIIT + IPv6 classifiers to host-side veth
+- [x] `AttachVeth` / `DetachVeth` protocol messages (with `ghost_ipv6` field) + socket dispatch + agent VPC client
 - [x] Ghost IPv6 constants (`GHOST_PREFIX`, `GHOST_VPC_ID_OFFSET`) in `k3rs-vpc-common`
 
 #### Phase 11: DNS64 Integration
@@ -2986,6 +3032,21 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Stateful connection tracking for return traffic — `NAT64_CONNTRACK` LruHashMap (65536 entries, auto-eviction), key=(protocol, pod_src_port, dst_ipv4, dst_port), value=pod's Ghost IPv6 src. `nat64_ingress` on physical interface matches return IPv4 by reversing ports/IPs for lookup, translates back to IPv6 via `change_proto(ETH_P_IPV6)`, redirects to bridge ingress
 - [x] Userspace support: `install_nat64`/`remove_nat64` on `NetworkEnforcer` trait (default no-op). `EbpfEnforcer` implementation: populates `NAT64_CONFIG` array (index 0) with node IPv4, phys_ifindex, bridge_ifindex; attaches TC classifiers; reads ifindex from sysfs
 - [x] Shared types in `k3rs-vpc-common`: `Nat64Key`, `Nat64Value`, `Nat64Config` structs, `NAT64_PREFIX_U32` constant
+
+#### Phase 12b: Per-Pod SIIT (IPv4↔IPv6 at Veth Boundary)
+- [x] Shared types in `k3rs-vpc-common`: `SiitKey`, `SiitValue`, `VpcPodKey`, `VpcPodValue` structs
+- [x] eBPF `siit_in` TC classifier (veth ingress): IPv4→IPv6 translation — reads ifindex, lookups `SIIT_CONFIG`, anti-spoof src IPv4, resolves dst via `VPC_PODS` (intra-VPC) or `64:ff9b::` (external), `change_proto(ETH_P_IPV6)`, writes IPv6 header, adjusts L4 checksum via `csum_4to6()`
+- [x] eBPF `siit_out` TC classifier (veth egress): IPv6→IPv4 translation — verifies dst matches pod's Ghost IPv6, extracts src IPv4 from bytes 12-15, `change_proto(ETH_P_IP)`, writes IPv4 header + checksum, adjusts L4 checksum via `csum_6to4()`
+- [x] BPF maps: `SIIT_CONFIG` HashMap (1024 entries, ifindex→config), `VPC_PODS` HashMap (4096 entries, (vpc_id, ipv4)→ghost_ipv6)
+- [x] `EbpfEnforcer::attach_tc_siit()` — attaches siit_in (ingress) + tc_ingress_v6 (ingress) + siit_out (egress) + tc_egress_v6 (egress) to host-side veth; no IPv4 classifiers on veth
+- [x] Updated `install_veth_rules` signature: added `ghost_ipv6` parameter across `NetworkEnforcer` trait, `EbpfEnforcer`, `NoopEnforcer`, `NftManager`
+- [x] Updated `install_veth_rules` implementation: populates `SIIT_CONFIG[ifindex]` + `VPC_PODS[(vpc_id, ipv4)]`, calls `attach_tc_siit()`
+- [x] Updated `remove_veth_rules`: cleans both SIIT maps, `veth_to_siit` reverse lookup for (ifindex, ipv4, vpc_id)
+- [x] Updated `AttachVeth` RPC: added `ghost_ipv6` field in protocol.rs, vpc_client.rs, and socket.rs handler
+- [x] IPv4 default route in `setup_pod_network()`: `169.254.1.1/32 dev eth0` + `default via 169.254.1.1` + `proxy_arp=1` on host-side veth
+- [x] Updated `snapshot()`: displays `SIIT_CONFIG` and `VPC_PODS` map entries
+- [x] TAP interfaces (VMs) unchanged — retain IPv4 classifiers, not covered by SIIT
+- [x] SIIT handles TCP/UDP only (same as NAT64); ICMP/ICMPv6 translation not included
 
 #### Phase 13: Cross-Node Mesh
 - [ ] WireGuard tunnel setup between nodes (Ghost IPv6 traffic)

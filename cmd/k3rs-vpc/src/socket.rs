@@ -190,11 +190,12 @@ async fn dispatch(
         VpcRequest::AttachVeth {
             veth_name,
             guest_ipv4,
+            ghost_ipv6,
             vpc_id,
         } => {
             let mut enf = enforcer.lock().await;
             match enf
-                .install_veth_rules(&veth_name, &guest_ipv4, vpc_id)
+                .install_veth_rules(&veth_name, &guest_ipv4, &ghost_ipv6, vpc_id)
                 .await
             {
                 Ok(()) => VpcResponse::Ok,

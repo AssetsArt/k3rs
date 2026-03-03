@@ -6,7 +6,7 @@
 //! TAP setup pattern.
 
 use anyhow::Result;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Network configuration for a single pod.
 pub struct PodNetworkConfig {
@@ -133,6 +133,37 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
         ],
     )
     .await?;
+
+    // 7. IPv4 default route via link-local gateway (SIIT on host-side veth)
+    //    Add 169.254.1.1 as a directly-connected next-hop, then use it as default gw.
+    nsenter_run(
+        pid,
+        &[
+            "ip", "route", "add", "169.254.1.1/32", "dev", "eth0", "scope", "link",
+        ],
+    )
+    .await?;
+    nsenter_run(
+        pid,
+        &[
+            "ip", "route", "add", "default", "via", "169.254.1.1", "dev", "eth0",
+        ],
+    )
+    .await?;
+
+    // 8. Enable proxy_arp on host-side veth so it responds to ARP for 169.254.1.1
+    let proxy_arp_path = format!(
+        "/proc/sys/net/ipv4/conf/{}/proxy_arp",
+        config.veth_host()
+    );
+    if let Err(e) = tokio::fs::write(&proxy_arp_path, "1").await {
+        warn!(
+            "[netns:{}] Failed to enable proxy_arp on {}: {}",
+            &config.pod_id[..8.min(config.pod_id.len())],
+            config.veth_host(),
+            e
+        );
+    }
 
     info!(
         "[netns:{}] Pod network configured: eth0={} + {}",
