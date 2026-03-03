@@ -644,7 +644,24 @@ impl RuntimeBackend for VirtualizationBackend {
                 .clone()
         };
 
+        let boot_start = std::time::Instant::now();
         let pid = self.boot_vm(id, &rootfs_dir).await?;
+        let boot_elapsed = boot_start.elapsed();
+
+        tracing::info!(
+            "[virt] VM {} boot completed in {:?} (pid={:?})",
+            id,
+            boot_elapsed,
+            pid
+        );
+
+        if boot_elapsed > std::time::Duration::from_secs(1) {
+            tracing::warn!(
+                "[virt] VM {} boot time {:?} exceeds 1s target",
+                id,
+                boot_elapsed
+            );
+        }
 
         let mut instances = self.instances.write().await;
         if let Some(inst) = instances.get_mut(id) {

@@ -25,6 +25,7 @@ use pkg_controllers::hpa::HPAController;
 use pkg_controllers::job::JobController;
 use pkg_controllers::node::NodeController;
 use pkg_controllers::replicaset::ReplicaSetController;
+use pkg_controllers::restore_watcher::RestoreWatcher;
 use pkg_controllers::vpc::VpcController;
 use pkg_metrics::MetricsRegistry;
 use pkg_pki::ca::ClusterCA;
@@ -98,6 +99,13 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     // Start leader election
     let election = LeaderElection::new(store.clone(), config.server_id.clone());
     let (_election_handle, leader_rx) = election.start();
+
+    // Start restore epoch watcher (runs on all servers, not just leader)
+    let _restore_watcher = RestoreWatcher::new(
+        store.clone(),
+        state.restore_in_progress.clone(),
+    )
+    .start();
 
     // Start leader-gated controllers
     let ctrl_store = store.clone();

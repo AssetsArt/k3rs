@@ -1,0 +1,14 @@
+[Unit]
+Description=K3rs VPC Daemon — manages VPC state per node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/k3rs-vpc --config /etc/k3rs/vpc-config.yaml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

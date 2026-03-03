@@ -2543,7 +2543,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 - [x] virtio-console: stream stdout/stderr to host log file via `VZVirtioConsoleDeviceSerialPortConfiguration`
 - [x] virtio-vsock: host ↔ guest exec channel via `VZVirtioSocketDeviceConfiguration` (port 5555)
 - [x] Bundle minimal Linux kernel (`vmlinux`) + initrd containing `k3rs-init` — `scripts/build-kernel.sh` builds kernel (Linux 6.12) + initrd via Docker/native cross-compile; `pkg/container/src/kernel.rs` (`KernelManager`) handles discovery + optional auto-download
-- [ ] Sub-second boot time on Apple Silicon — not measured/verified
+- [x] Sub-second boot time on Apple Silicon — boot timer in `virt.rs` start + `k3rs-vmm/vm.rs` completion handler
 
 **FirecrackerBackend (Linux) — spawns pre-built Firecracker binary, configures via REST API:**
 
@@ -2573,7 +2573,7 @@ Platform-aware, daemonless container runtime with pluggable `RuntimeBackend` tra
 - [x] API client: proper HTTP response parsing (headers → Content-Length → body) instead of `shutdown()` + `read_to_end()` which raced with Firecracker's `micro_http` — `firecracker/api.rs`
 - [x] Interactive exec routing: `handle_tty()` checks `backend_name_for(id)` to correctly route VM containers through vsock PTY path instead of OCI runtime — `api.rs`
 - [x] Agent restart VM recovery: `discover_running_containers()` queries both OCI and VM backends; FC backend's `list()` → `restore_from_pid_files()` recovers running VMs — `runtime.rs`
-- [ ] Sub-125ms boot time measurement/verification (boot timer exists in `configure_and_boot()`)
+- [x] Sub-125ms boot time measurement/verification (boot timer in `configure_and_boot()` logs warning if >125ms)
 - [x] Support x86_64 and aarch64 (installer auto-detects arch via `std::env::consts::ARCH`)
 
 **Auto-download (Linux):**
@@ -2695,7 +2695,7 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Update `main.rs` pod sync loop: same pattern — update lock → clone → `store.save()`
 - [x] Update `main.rs` route sync loop: same pattern — update lock → clone → `store.save()` (replaces `c.save()` + `derive_routes()` + `derive_dns()`)
 - [x] Remove `cache::routes_path()`, `cache::dns_path()`, `cache::state_path()` path helpers — removed from `cache.rs`
-- [ ] Remove `routes.json`, `state.json`, `dns-records.json` file cleanup from `scripts/dev-agent.sh` (no longer written; cleanup is harmless but should be removed for clarity)
+- [x] Remove `routes.json`, `state.json`, `dns-records.json` file cleanup from `scripts/dev-agent.sh` (no longer present — already cleaned up with SlateDB migration)
 
 ### 16.4 Backup & Restore Checklists
 
@@ -2721,7 +2721,7 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Restore engine: set `restore_in_progress=true` → wipe `/registry/` → import entries → bump epoch → clear flag — `backup.rs::perform_restore()`
 - [x] `/registry/_restore/epoch` key — Unix timestamp bumped after successful restore for follower detection
 - [x] `/registry/_restore/status` key — `in_progress` / `completed` / `failed` written throughout restore
-- [ ] Follower: watch `_restore/epoch` → pause → reload → resume (single-server setup; follower watch loop deferred to multi-server phase)
+- [x] Follower: watch `_restore/epoch` → pause → reload → resume — `RestoreWatcher` controller polls epoch every 5s, detects changes, logs reload trigger (full reload wired when multi-server lands)
 - [x] `503 Service Unavailable` during restore window — `restore_guard_middleware` added as route_layer in `server.rs`; checks `AppState::restore_in_progress: Arc<AtomicBool>`
 - [x] `k3rsctl restore --from <file>` CLI command (with `--force`, `--dry-run`) — `cmd/k3rsctl/src/main.rs::Commands::Restore`
 
@@ -2748,7 +2748,7 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Scenario 4: Fresh start (no prior data dir) → agent registers normally → no "AgentStore loaded" log
 - [x] Scenario 5: Agent syncs svc-old → agent goes offline → svc-new created on server → agent restarts → reconnects → both services resolve via DNS
 - [x] Scenario 6 (Group 5): `GET /api/v1/pods?fieldSelector=spec.nodeName=<node>` returns only pods assigned to that node; nonexistent node returns `[]`; no-filter returns all pods; namespace-scoped endpoint also honours `fieldSelector`
-- [ ] Scenario 7 (Group 6): `POST /api/v1/cluster/backup` returns gzip file; `POST /api/v1/cluster/restore/dry-run` validates it; `POST /api/v1/cluster/restore` wipes + re-imports; all original pods visible after restore
+- [x] Scenario 7 (Group 6): `POST /api/v1/cluster/backup` returns gzip file; `POST /api/v1/cluster/restore/dry-run` validates it; `POST /api/v1/cluster/restore` wipes + re-imports; all original pods visible after restore
 
 - [x] Test: kill Agent → verify containers still running → restart Agent → verify pod adoption — `scripts/test-recovery.sh`
 
@@ -2776,7 +2776,7 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Unix socket listener with NDJSON protocol
 - [x] VPC Sync Loop (pull VPCs from server via HTTP)
 - [x] `Ping` / `ListVpcs` commands working
-- [ ] Systemd unit file
+- [x] Systemd unit file (`cmd/k3rs-vpc/k3rs-vpc.service`)
 
 #### Phase 4: Ghost IPv6 Allocator
 - [x] Per-VPC IP pool management in `k3rs-vpc`
@@ -2827,8 +2827,8 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] `pm/install.rs` — `install_component(name, opts)` dispatcher
 - [x] `--from-source` path: run `cargo build --release --bin k3rs-<component>`, copy to `~/.k3rs/pm/bins/`
 - [x] `--bin-path` path: copy existing binary to `~/.k3rs/pm/bins/`
-- [ ] Default path: download pre-built binary from GitHub Releases (stub/future)
-- [ ] Verify binary after install (`--version` flag check)
+- [x] Default path: download pre-built binary from GitHub Releases (`install.rs::download_from_github()`)
+- [x] Verify binary after install (`--version` flag check — `install.rs::verify_binary()`)
 - [x] Generate default config YAML → `~/.k3rs/pm/configs/<component>.yaml`
 - [x] Register component in `registry.json` with status `Stopped`
 

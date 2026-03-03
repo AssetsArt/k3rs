@@ -79,11 +79,12 @@ fn install_one(component: &ComponentName, from_source: bool, bin_path: Option<&s
         }
         println!("  Installed {} -> {}", built.display(), dest.display());
     } else {
-        bail!(
-            "no install method specified for {}. Use --from-source or --bin-path.",
-            key
-        );
+        // Default: download pre-built binary from GitHub Releases
+        download_from_github(component, &dest)?;
     }
+
+    // Verify binary runs (--version check)
+    verify_binary(&dest, component)?;
 
     // Generate a default config
     generate_default_config(component)?;
@@ -115,6 +116,114 @@ fn install_one(component: &ComponentName, from_source: bool, bin_path: Option<&s
 
     println!("  {} registered (status: stopped)", component.bin_name());
     Ok(())
+}
+
+const GITHUB_REPO: &str = "AssetsArt/k3rs";
+
+/// Download a pre-built binary from GitHub Releases.
+///
+/// Fetches the latest release tag, then downloads the binary for the current
+/// architecture from `https://github.com/{REPO}/releases/download/{tag}/{bin}-{arch}`.
+fn download_from_github(component: &ComponentName, dest: &Path) -> Result<()> {
+    let bin = component.bin_name();
+    let arch = std::env::consts::ARCH; // "x86_64" or "aarch64"
+    let os = std::env::consts::OS; // "linux" or "macos"
+
+    // Fetch latest release tag via GitHub API
+    println!("  Fetching latest release from github.com/{}...", GITHUB_REPO);
+    let tag_output = Command::new("curl")
+        .args([
+            "-sfL",
+            &format!(
+                "https://api.github.com/repos/{}/releases/latest",
+                GITHUB_REPO
+            ),
+        ])
+        .output()
+        .context("failed to query GitHub API (is curl installed?)")?;
+
+    if !tag_output.status.success() {
+        bail!(
+            "failed to fetch latest release from GitHub (HTTP error). \
+             Use --from-source or --bin-path instead."
+        );
+    }
+
+    let tag_json: serde_json::Value = serde_json::from_slice(&tag_output.stdout)
+        .context("failed to parse GitHub release JSON")?;
+    let tag = tag_json["tag_name"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("no tag_name in GitHub release response"))?;
+
+    let asset_name = format!("{}-{}-{}", bin, os, arch);
+    let url = format!(
+        "https://github.com/{}/releases/download/{}/{}",
+        GITHUB_REPO, tag, asset_name
+    );
+
+    println!("  Downloading {} ({})...", asset_name, tag);
+    let dl_status = Command::new("curl")
+        .args(["-sfL", "-o", &dest.to_string_lossy(), &url])
+        .status()
+        .context("failed to download binary (is curl installed?)")?;
+
+    if !dl_status.success() {
+        bail!(
+            "download failed for {}. Binary may not be available for {}-{}. \
+             Use --from-source to build locally.",
+            url,
+            os,
+            arch
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dest, fs::Permissions::from_mode(0o755))?;
+    }
+
+    println!("  Downloaded {} -> {}", asset_name, dest.display());
+    Ok(())
+}
+
+/// Verify a binary works by running `<binary> --version`.
+fn verify_binary(bin: &Path, component: &ComponentName) -> Result<()> {
+    let output = Command::new(bin)
+        .arg("--version")
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let version = String::from_utf8_lossy(&out.stdout);
+            let version = version.trim();
+            if version.is_empty() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                println!("  Verified: {} ({})", component.bin_name(), stderr.trim());
+            } else {
+                println!("  Verified: {}", version);
+            }
+            Ok(())
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            eprintln!(
+                "  Warning: {} --version exited with {:?}: {}",
+                component.bin_name(),
+                out.status.code(),
+                stderr.trim()
+            );
+            Ok(()) // non-fatal — binary may not support --version
+        }
+        Err(e) => {
+            eprintln!(
+                "  Warning: could not verify {}: {}",
+                component.bin_name(),
+                e
+            );
+            Ok(()) // non-fatal
+        }
+    }
 }
 
 /// Walk up from CWD to find the workspace root (directory with `[workspace]` in Cargo.toml).

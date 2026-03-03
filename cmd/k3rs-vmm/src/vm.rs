@@ -26,11 +26,16 @@ fn cleanup_exit(code: i32) -> ! {
 /// Start a VM on the main thread using a completion handler.
 pub fn start_vm(vm: Arc<MainThreadBound<Retained<VZVirtualMachine>>>) {
     run_on_main(|marker| {
+        let boot_start = std::time::Instant::now();
         info!("starting vm");
         let vm = vm.get(marker);
-        let block = &StackBlock::new(|err: *mut NSError| {
+        let block = &StackBlock::new(move |err: *mut NSError| {
+            let boot_elapsed = boot_start.elapsed();
             if err.is_null() {
-                info!("vm started successfully");
+                info!("vm started successfully in {:?}", boot_elapsed);
+                if boot_elapsed > Duration::from_secs(1) {
+                    error!("vm boot time {:?} exceeds 1s target", boot_elapsed);
+                }
             } else {
                 error!("vm failed to start, err={}", unsafe {
                     (*err).localizedDescription()

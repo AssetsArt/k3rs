@@ -6,6 +6,7 @@
 # --------------
 #   Group 1 (ALSC / AgentStore) + Group 2 (backoff) — scenarios 1-5
 #   Group 5 (API Compliance)                          — scenario 6
+#   Group 6 (Backup & Restore)                        — scenario 7
 #
 # Scenarios
 # ---------
@@ -15,6 +16,7 @@
 #   4. Fresh start      — No prior cache; normal boot path
 #   5. Stale cache      — Reconnect after offline; server-wins full re-sync
 #   6. fieldSelector    — GET /api/v1/pods?fieldSelector=spec.nodeName=<name>
+#   7. Backup/Restore   — backup → dry-run → restore → verify pods visible
 #
 # Requirements
 # ------------
@@ -561,6 +563,109 @@ JSON
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Scenario 7: Backup → Restore dry-run → Restore → verify pods visible
+# ─────────────────────────────────────────────────────────────────────────────
+scenario_7_backup_restore() {
+    log "━━━ Scenario 7: Backup → dry-run → restore → verify ━━━"
+    local dir="${BASE_DATA}/s7"
+    rm -rf "$dir"; mkdir -p "$dir"
+
+    local srv_pid agent_pid
+    srv_pid=$(start_server "${dir}/server-data" "${dir}/server.log")
+    sleep 2
+
+    agent_pid=$(start_agent "${dir}/agent-data" "${dir}/agent.log")
+    if ! wait_for_log "${dir}/agent.log" "Successfully registered" 20; then
+        fail "S7: Agent failed to register (prerequisite)"
+        kill_pid "$agent_pid"; kill_pid "$srv_pid"; return
+    fi
+
+    # Create test pods
+    curl -sf -X POST "${SERVER_URL}/api/v1/namespaces/default/pods" \
+        -H "Content-Type: application/json" -H "$AUTH" \
+        -d "{\"id\":\"\",\"name\":\"backup-pod-a\",\"namespace\":\"default\",\"spec\":{\"containers\":[{\"name\":\"c\",\"image\":\"nginx:latest\",\"command\":[],\"args\":[],\"env\":{}}]},\"status\":\"Pending\",\"created_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > /dev/null
+
+    curl -sf -X POST "${SERVER_URL}/api/v1/namespaces/default/pods" \
+        -H "Content-Type: application/json" -H "$AUTH" \
+        -d "{\"id\":\"\",\"name\":\"backup-pod-b\",\"namespace\":\"default\",\"spec\":{\"containers\":[{\"name\":\"c\",\"image\":\"alpine:latest\",\"command\":[],\"args\":[],\"env\":{}}]},\"status\":\"Pending\",\"created_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > /dev/null
+
+    sleep 1
+
+    # ── Test 1: Create backup (POST /api/v1/cluster/backup) ─────────────
+    local backup_file="${dir}/test-backup.k3rs-backup.json.gz"
+    local http_code
+    http_code=$(curl -s -o "$backup_file" -w "%{http_code}" \
+        -X POST "${SERVER_URL}/api/v1/cluster/backup" -H "$AUTH")
+
+    if [ "$http_code" = "200" ] && [ -s "$backup_file" ]; then
+        pass "S7: POST /api/v1/cluster/backup returned 200 with gzip file"
+    else
+        fail "S7: Backup request failed (HTTP $http_code)"
+        kill_pid "$agent_pid"; kill_pid "$srv_pid"; return
+    fi
+
+    # ── Test 2: Dry-run restore validates the backup ────────────────────
+    local dry_run_resp
+    dry_run_resp=$(curl -sf -X POST "${SERVER_URL}/api/v1/cluster/restore/dry-run" \
+        -H "Content-Type: application/octet-stream" -H "$AUTH" \
+        --data-binary "@${backup_file}")
+
+    if echo "$dry_run_resp" | grep -q '"dry_run":true'; then
+        pass "S7: POST /api/v1/cluster/restore/dry-run validates backup"
+    else
+        fail "S7: Dry-run restore failed (response: $dry_run_resp)"
+        kill_pid "$agent_pid"; kill_pid "$srv_pid"; return
+    fi
+
+    if echo "$dry_run_resp" | grep -q '"would_restore"'; then
+        local would_restore
+        would_restore=$(echo "$dry_run_resp" | grep -o '"would_restore":[0-9]*' | cut -d: -f2)
+        if [ "$would_restore" -gt 0 ]; then
+            pass "S7: Dry-run reports $would_restore entries to restore"
+        else
+            fail "S7: Dry-run reports 0 entries to restore"
+        fi
+    fi
+
+    # ── Test 3: Live restore wipes + re-imports ─────────────────────────
+    local restore_resp
+    restore_resp=$(curl -sf -X POST "${SERVER_URL}/api/v1/cluster/restore" \
+        -H "Content-Type: application/octet-stream" -H "$AUTH" \
+        --data-binary "@${backup_file}")
+
+    if echo "$restore_resp" | grep -q '"status":"completed"'; then
+        pass "S7: POST /api/v1/cluster/restore completed successfully"
+    else
+        fail "S7: Live restore failed (response: $restore_resp)"
+        kill_pid "$agent_pid"; kill_pid "$srv_pid"; return
+    fi
+
+    if echo "$restore_resp" | grep -q '"imported"'; then
+        local imported
+        imported=$(echo "$restore_resp" | grep -o '"imported":[0-9]*' | cut -d: -f2)
+        if [ "$imported" -gt 0 ]; then
+            pass "S7: Restore imported $imported entries"
+        else
+            fail "S7: Restore imported 0 entries"
+        fi
+    fi
+
+    # ── Test 4: All original pods visible after restore ─────────────────
+    sleep 1
+    local pods
+    pods=$(curl -sf "${SERVER_URL}/api/v1/pods" -H "$AUTH")
+
+    if echo "$pods" | grep -q "backup-pod-a" && echo "$pods" | grep -q "backup-pod-b"; then
+        pass "S7: Both pods visible after restore (backup-pod-a + backup-pod-b)"
+    else
+        fail "S7: Pods missing after restore (got: $pods)"
+    fi
+
+    kill_pid "$agent_pid"; kill_pid "$srv_pid"
+    log "Scenario 7 done"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 main() {
@@ -584,6 +689,7 @@ main() {
     scenario_3_both_restart;          echo ""
     scenario_5_stale_resync;          echo ""
     scenario_6_field_selector;        echo ""
+    scenario_7_backup_restore;        echo ""
 
     echo "╔══════════════════════════════════════════════════════════════╗"
     printf "║   Results: %-5d passed  %-5d failed%21s║\n" "$PASSED" "$FAILED" ""
