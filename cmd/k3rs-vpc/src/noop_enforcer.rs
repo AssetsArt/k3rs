@@ -64,9 +64,10 @@ impl NetworkEnforcer for NoopEnforcer {
         &mut self,
         tap_name: &str,
         guest_ipv4: &str,
+        ghost_ipv6: &str,
         vpc_id: u16,
     ) -> Result<()> {
-        debug!(tap_name, guest_ipv4, vpc_id, "noop: install_tap_rules");
+        debug!(tap_name, guest_ipv4, ghost_ipv6, vpc_id, "noop: install_tap_rules");
         Ok(())
     }
 

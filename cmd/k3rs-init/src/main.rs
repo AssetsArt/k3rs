@@ -35,6 +35,7 @@ mod oci_spec;
 #[macro_use]
 mod logging;
 mod container;
+mod ebpf;
 mod filesystem;
 mod networking;
 mod signals;
@@ -110,6 +111,11 @@ fn linux_main() {
     // 3. Setup networking
     if let Err(e) = networking::setup_networking() {
         log_error!("failed to setup networking: {}", e);
+    }
+
+    // 3b. Setup eBPF SIIT translation (if VPC params present)
+    if let Err(e) = ebpf::setup_ebpf() {
+        log_error!("failed to setup eBPF SIIT: {}", e);
     }
 
     // 4. Install signal handlers

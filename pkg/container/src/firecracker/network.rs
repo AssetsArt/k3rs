@@ -9,6 +9,10 @@ use tracing::{info, warn};
 /// Manages TAP devices and iptables NAT for Firecracker networking.
 pub struct FcNetworkManager;
 
+/// Well-known MAC address for the host TAP side.
+/// Matches the static ARP entry configured by k3rs-init in the guest.
+pub const TAP_WELL_KNOWN_MAC: &str = "02:fc:00:00:00:01";
+
 impl FcNetworkManager {
     /// Create and configure a TAP device for a VM.
     ///
@@ -65,6 +69,65 @@ impl FcNetworkManager {
         info!(
             "[fc-net] TAP {} created (host: {}, guest: 172.16.{}.2)",
             tap_name, host_ip, vm_index
+        );
+        Ok(tap_name)
+    }
+
+    /// Create and configure a TAP device for a VPC VM (pure IPv6 link).
+    ///
+    /// Unlike `setup_tap`, this does NOT assign an IPv4 address to the host side.
+    /// The TAP carries only IPv6 — the VM does its own SIIT translation.
+    /// Sets the well-known MAC so the guest's static ARP works.
+    pub async fn setup_tap_vpc(id: &str) -> Result<String> {
+        let short_id = &id[..8.min(id.len())];
+        let tap_name = format!("tap-{}", short_id);
+
+        // Create TAP device
+        let output = tokio::process::Command::new("ip")
+            .args(["tuntap", "add", &tap_name, "mode", "tap"])
+            .output()
+            .await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("File exists") {
+                anyhow::bail!(
+                    "[fc-net] Failed to create TAP {}: {}",
+                    tap_name,
+                    stderr.trim()
+                );
+            }
+        }
+
+        // Set well-known MAC address (matches guest static ARP)
+        let output = tokio::process::Command::new("ip")
+            .args([
+                "link", "set", &tap_name, "address", TAP_WELL_KNOWN_MAC,
+            ])
+            .output()
+            .await?;
+        if !output.status.success() {
+            warn!(
+                "[fc-net] failed to set MAC on {}: {}",
+                tap_name,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        // Bring up (no IPv4 address — pure IPv6 link)
+        let output = tokio::process::Command::new("ip")
+            .args(["link", "set", &tap_name, "up"])
+            .output()
+            .await?;
+        if !output.status.success() {
+            warn!(
+                "[fc-net] ip link set up warning: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        info!(
+            "[fc-net] TAP {} created (VPC mode, no host IPv4, MAC={})",
+            tap_name, TAP_WELL_KNOWN_MAC
         );
         Ok(tap_name)
     }

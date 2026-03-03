@@ -251,6 +251,7 @@ impl GhostAllocator {
                 ghost_ipv6: ghost_ipv6.to_string(),
                 vpc_id: pool.vpc_id,
                 allocated_at: now,
+                interface_type: "netkit".to_string(),
             })
             .await?;
 

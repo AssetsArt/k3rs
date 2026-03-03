@@ -22,6 +22,15 @@ pub enum VpcRequest {
     },
     /// Detach TC classifiers from a netkit interface.
     DetachNetkit { nk_name: String },
+    /// Attach tap_guard + IPv6 classifiers on host-side TAP for a VM.
+    AttachTap {
+        tap_name: String,
+        guest_ipv4: String,
+        ghost_ipv6: String,
+        vpc_id: u16,
+    },
+    /// Detach TC classifiers from a TAP interface.
+    DetachTap { tap_name: String },
     ListVpcs,
     Ping,
 }

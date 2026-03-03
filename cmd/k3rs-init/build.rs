@@ -12,9 +12,6 @@ fn main() {
 }
 
 /// Build the eBPF programs using cargo +nightly directly.
-///
-/// aya-build's `build_ebpf()` uses `--package` which doesn't work for
-/// workspace-excluded crates. We use `--manifest-path` instead.
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
 fn build_ebpf(ebpf_crate: &std::path::Path) {
     use std::process::Command;

@@ -32,6 +32,14 @@ pub struct StoredAllocation {
     pub ghost_ipv6: String,
     pub vpc_id: u16,
     pub allocated_at: DateTime<Utc>,
+    /// Interface type: "netkit" for OCI containers, "tap" for VMs.
+    /// Defaults to "netkit" for backwards compatibility with existing allocations.
+    #[serde(default = "default_interface_type")]
+    pub interface_type: String,
+}
+
+fn default_interface_type() -> String {
+    "netkit".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

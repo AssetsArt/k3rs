@@ -34,9 +34,6 @@ aya-log = { workspace = true }
 k3rs-vpc-common = { path = "../k3rs-vpc-common" }
 libc = "0.2"
 
-[build-dependencies]
-aya-build = { version = "0.1", optional = true }
-
 [features]
 default = []
-ebpf = ["aya-build"]
+ebpf = []

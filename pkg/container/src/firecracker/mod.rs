@@ -53,6 +53,17 @@ use tokio::sync::RwLock;
 use pkg_constants::runtime::{DEFAULT_CPU_COUNT, DEFAULT_MEMORY_MB, FC_GUEST_CID};
 use pkg_constants::vm::VSOCK_EXEC_PORT;
 
+/// VPC boot parameters passed through to the guest kernel cmdline.
+/// When present, the VM does its own SIIT translation and the host TAP is pure IPv6.
+#[derive(Debug, Clone)]
+pub struct VpcBootParams {
+    pub guest_ipv4: String,
+    pub ghost_ipv6: String,
+    pub vpc_id: u16,
+    pub vpc_cidr: String,
+    pub gw_mac: String,
+}
+
 /// Per-VM instance state tracking.
 #[derive(Debug, Clone)]
 struct FcInstance {
@@ -398,6 +409,7 @@ impl FirecrackerBackend {
         rootfs_mode: &FcRootfsMode,
         guest_cid: u32,
         tap_name: Option<&str>,
+        vpc_params: Option<&VpcBootParams>,
     ) -> Result<()> {
         let api = FcApiClient::new(&self.api_socket_path(id).to_string_lossy());
 
@@ -406,9 +418,15 @@ impl FirecrackerBackend {
             .await?;
 
         // 2. Boot source — ext4 root device via virtio-blk.
-        // Includes kernel ip= parameter for TAP networking when a TAP is attached.
-        let ip_cfg = if let Some(tap) = tap_name {
-            let _ = tap; // used only to decide whether to include ip=
+        // When VPC params are present, k3rs-init configures networking from cmdline
+        // params instead of kernel ip=. The VM does its own SIIT translation.
+        let extra_args = if let Some(vpc) = vpc_params {
+            format!(
+                " k3rs.ipv4={} k3rs.ipv6={} k3rs.vpc_id={} k3rs.vpc_cidr={} k3rs.gw_mac={}",
+                vpc.guest_ipv4, vpc.ghost_ipv6, vpc.vpc_id, vpc.vpc_cidr, vpc.gw_mac
+            )
+        } else if tap_name.is_some() {
+            // Legacy fallback: use kernel ip= for VMs without VPC
             let guest = network::FcNetworkManager::guest_ip(guest_cid);
             let gw = network::FcNetworkManager::host_ip(guest_cid);
             format!(" ip={}::{}:255.255.255.252::eth0:off", guest, gw)
@@ -418,7 +436,7 @@ impl FirecrackerBackend {
 
         let boot_args = format!(
             "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/sbin/k3rs-init{}",
-            ip_cfg,
+            extra_args,
         );
 
         api.set_boot_source(
@@ -767,7 +785,7 @@ impl RuntimeBackend for FirecrackerBackend {
 
         // 3. Configure via REST API and boot
         if let Err(e) = self
-            .configure_and_boot(id, &rootfs_mode, guest_cid, tap_name.as_deref())
+            .configure_and_boot(id, &rootfs_mode, guest_cid, tap_name.as_deref(), None)
             .await
         {
             // Check if Firecracker is still alive for better diagnostics

@@ -41,6 +41,10 @@ static MY_GHOST_IPV6: [u8; 16] = [0u8; 16];
 static MY_GUEST_IPV4: u32 = 0;
 #[no_mangle]
 static MY_VPC_ID: u16 = 0;
+#[no_mangle]
+static MY_VPC_NETWORK: u32 = 0; // VPC network in host byte order (e.g. 0x0a000100 for 10.0.1.0)
+#[no_mangle]
+static MY_VPC_MASK: u32 = 0; // VPC mask in host byte order (e.g. 0xffffff00 for /24)
 
 /// BPF HashMap: IPv4 address → VPC membership (pinned, shared across per-pod instances).
 #[map]
@@ -348,7 +352,24 @@ fn try_siit_in(ctx: &mut TcContext) -> Result<i32, ()> {
         };
         match unsafe { VPC_PODS.get(&vpc_key) } {
             Some(pod) => pod.ghost_ipv6,
-            None => nat64_addr(dst_ip), // external: 64:ff9b::dst_ipv4
+            None => {
+                // Formula fallback: if dst is within VPC CIDR, compute Ghost IPv6
+                // from this pod's prefix (bytes 0-11) + dst IPv4 (bytes 12-15).
+                // Used by VMs where VPC_PODS is empty (separate kernel).
+                let vpc_network = unsafe { core::ptr::read_volatile(&MY_VPC_NETWORK) };
+                let vpc_mask = unsafe { core::ptr::read_volatile(&MY_VPC_MASK) };
+                if vpc_network != 0 && (dst_ip & vpc_mask) == (vpc_network & vpc_mask) {
+                    let dst_bytes = dst_ip.to_be_bytes();
+                    let mut addr = ghost_ipv6;
+                    addr[12] = dst_bytes[0];
+                    addr[13] = dst_bytes[1];
+                    addr[14] = dst_bytes[2];
+                    addr[15] = dst_bytes[3];
+                    addr
+                } else {
+                    nat64_addr(dst_ip) // external: 64:ff9b::dst_ipv4
+                }
+            }
         }
     };
 
@@ -487,6 +508,52 @@ fn try_siit_out(ctx: &mut TcContext) -> Result<i32, ()> {
     let csum_off = EthHdr::LEN + IPV4_HDR_LEN
         + if next_hdr == IPPROTO_TCP { TCP_CSUM_OFF } else { UDP_CSUM_OFF };
     csum_6to4(ctx, csum_off, src_v6, dst_v6_words, src_raw, dst_raw)?;
+
+    Ok(TC_ACT_OK)
+}
+
+// ─── TAP Guard (anti-spoofing for host-side TAP ingress) ────────
+
+/// Anti-spoofing classifier for host-side TAP ingress (VM → host).
+/// Validates that only IPv6 traffic exits the VM, and that Ghost-prefixed
+/// source addresses match this VM's Ghost IPv6.
+///
+/// 1. Non-IPv6 → DROP (VM should be doing SIIT, only IPv6 exits)
+/// 2. Ghost prefix source → validate src == MY_GHOST_IPV6 → mismatch = DROP
+/// 3. Non-Ghost source (e.g. fe80:: for NDP) → PASS
+#[classifier]
+pub fn tap_guard(ctx: TcContext) -> i32 {
+    match try_tap_guard(&ctx) {
+        Ok(action) => action,
+        Err(_) => TC_ACT_OK, // fail-open
+    }
+}
+
+fn try_tap_guard(ctx: &TcContext) -> Result<i32, ()> {
+    // 1. Non-IPv6 → DROP
+    let etype: u16 = ctx.load(12).map_err(|_| ())?;
+    if etype != ETH_P_IPV6.to_be() {
+        return Ok(TC_ACT_SHOT);
+    }
+
+    // 2. Check if source has Ghost prefix
+    if !is_ghost_prefix(ctx, IPV6_SRC_ADDR_OFF)? {
+        // Non-Ghost source (e.g. fe80:: link-local for NDP) → pass
+        return Ok(TC_ACT_OK);
+    }
+
+    // 3. Ghost source → validate it matches this VM's Ghost IPv6
+    let my_ghost = unsafe { core::ptr::read_volatile(&MY_GHOST_IPV6) };
+    let expected = addr_words(&my_ghost);
+
+    let s0: u32 = ctx.load(IPV6_SRC_ADDR_OFF).map_err(|_| ())?;
+    let s1: u32 = ctx.load(IPV6_SRC_ADDR_OFF + 4).map_err(|_| ())?;
+    let s2: u32 = ctx.load(IPV6_SRC_ADDR_OFF + 8).map_err(|_| ())?;
+    let s3: u32 = ctx.load(IPV6_SRC_ADDR_OFF + 12).map_err(|_| ())?;
+
+    if [s0, s1, s2, s3] != expected {
+        return Ok(TC_ACT_SHOT); // spoofed Ghost source
+    }
 
     Ok(TC_ACT_OK)
 }

@@ -22,6 +22,13 @@ enum VpcRequest {
         container_pid: u32,
     },
     DetachNetkit { nk_name: String },
+    AttachTap {
+        tap_name: String,
+        guest_ipv4: String,
+        ghost_ipv6: String,
+        vpc_id: u16,
+    },
+    DetachTap { tap_name: String },
     ListVpcs,
     Ping,
 }
@@ -211,6 +218,54 @@ impl VpcClient {
             )),
             Ok(other) => Err(anyhow::anyhow!(
                 "Unexpected VPC response to CheckReachability: {:?}",
+                other
+            )),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Attach tap_guard + IPv6 classifiers on a host-side TAP for a VM.
+    pub async fn attach_tap(
+        &self,
+        tap_name: &str,
+        guest_ipv4: &str,
+        ghost_ipv6: &str,
+        vpc_id: u16,
+    ) -> anyhow::Result<()> {
+        let req = VpcRequest::AttachTap {
+            tap_name: tap_name.to_string(),
+            guest_ipv4: guest_ipv4.to_string(),
+            ghost_ipv6: ghost_ipv6.to_string(),
+            vpc_id,
+        };
+
+        match self.request(&req).await {
+            Ok(VpcResponse::Ok) => Ok(()),
+            Ok(VpcResponse::Error { code, message }) => {
+                Err(anyhow::anyhow!("VPC attach_tap error [{}]: {}", code, message))
+            }
+            Ok(other) => Err(anyhow::anyhow!(
+                "Unexpected VPC response to AttachTap: {:?}",
+                other
+            )),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Detach TC classifiers from a TAP interface.
+    #[allow(dead_code)]
+    pub async fn detach_tap(&self, tap_name: &str) -> anyhow::Result<()> {
+        let req = VpcRequest::DetachTap {
+            tap_name: tap_name.to_string(),
+        };
+
+        match self.request(&req).await {
+            Ok(VpcResponse::Ok) => Ok(()),
+            Ok(VpcResponse::Error { code, message }) => {
+                Err(anyhow::anyhow!("VPC detach_tap error [{}]: {}", code, message))
+            }
+            Ok(other) => Err(anyhow::anyhow!(
+                "Unexpected VPC response to DetachTap: {:?}",
                 other
             )),
             Err(e) => Err(e),

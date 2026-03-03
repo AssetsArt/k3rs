@@ -222,6 +222,34 @@ async fn dispatch(
                 },
             }
         }
+        VpcRequest::AttachTap {
+            tap_name,
+            guest_ipv4,
+            ghost_ipv6,
+            vpc_id,
+        } => {
+            let mut enf = enforcer.lock().await;
+            match enf
+                .install_tap_rules(&tap_name, &guest_ipv4, &ghost_ipv6, vpc_id)
+                .await
+            {
+                Ok(()) => VpcResponse::Ok,
+                Err(e) => VpcResponse::Error {
+                    code: "attach_tap_error".to_string(),
+                    message: format!("Failed to attach TC to TAP {}: {}", tap_name, e),
+                },
+            }
+        }
+        VpcRequest::DetachTap { tap_name } => {
+            let mut enf = enforcer.lock().await;
+            match enf.remove_tap_rules(&tap_name).await {
+                Ok(()) => VpcResponse::Ok,
+                Err(e) => VpcResponse::Error {
+                    code: "detach_tap_error".to_string(),
+                    message: format!("Failed to detach TC from TAP {}: {}", tap_name, e),
+                },
+            }
+        }
         VpcRequest::CheckReachability { src_vpc, dst_vpc } => {
             // Same VPC is always reachable
             if src_vpc == dst_vpc {

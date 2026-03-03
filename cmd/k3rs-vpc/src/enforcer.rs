@@ -37,10 +37,13 @@ pub trait NetworkEnforcer: Send {
     async fn remove_pod_rules(&mut self, pod_id: &str) -> Result<()>;
 
     /// Install TAP-interface-specific rules (VM traffic).
+    /// Attaches `tap_guard` (anti-spoofing) on TAP ingress and IPv6 classifiers
+    /// on TAP egress+ingress. No IPv4 classifiers — the VM does its own SIIT.
     async fn install_tap_rules(
         &mut self,
         tap_name: &str,
         guest_ipv4: &str,
+        ghost_ipv6: &str,
         vpc_id: u16,
     ) -> Result<()>;
 
@@ -112,6 +115,7 @@ pub trait NetworkEnforcer: Send {
         }
 
         for alloc in allocations {
+            // Install pod rules (VPC_MEMBERSHIP) for all allocation types
             if let Err(e) = self
                 .install_pod_rules(&alloc.pod_id, &alloc.guest_ipv4, alloc.vpc_id)
                 .await
@@ -123,6 +127,32 @@ pub trait NetworkEnforcer: Send {
                     alloc.vpc_name,
                     e
                 );
+            }
+
+            // TAP allocations also need install_tap_rules for the guard + VPC_PODS.
+            // Note: netkit rules are not rebuilt here because they require container_pid
+            // (the pod must be running), and the agent re-attaches on pod start.
+            if alloc.interface_type == "tap" {
+                // TAP name is derived from pod_id (same convention as FcNetworkManager)
+                let short_id = &alloc.pod_id[..8.min(alloc.pod_id.len())];
+                let tap_name = format!("tap-{}", short_id);
+                if let Err(e) = self
+                    .install_tap_rules(
+                        &tap_name,
+                        &alloc.guest_ipv4,
+                        &alloc.ghost_ipv6,
+                        alloc.vpc_id,
+                    )
+                    .await
+                {
+                    warn!(
+                        "{}: failed to install TAP rules for {} (tap={}): {}",
+                        self.name(),
+                        alloc.pod_id,
+                        tap_name,
+                        e
+                    );
+                }
             }
         }
 

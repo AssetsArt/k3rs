@@ -223,20 +223,24 @@ impl NetworkEnforcer for EbpfEnforcer {
         &mut self,
         tap_name: &str,
         guest_ipv4: &str,
+        ghost_ipv6: &str,
         vpc_id: u16,
     ) -> Result<()> {
         let addr: Ipv4Addr = guest_ipv4.parse().context("invalid tap IPv4")?;
         let ip_host = u32::from(addr);
 
-        // 1. Insert into VPC_PODS (VPC-scoped key for same-VPC checks in per-pod tc_egress/tc_ingress)
-        //    TAP pods don't use SIIT, so ghost_ipv6 is a dummy value.
+        let ipv6_addr: Ipv6Addr = ghost_ipv6.parse().context("invalid tap Ghost IPv6")?;
+        let ipv6_bytes: [u8; 16] = ipv6_addr.octets();
+
+        // 1. Insert into VPC_PODS with real ghost_ipv6 (OCI pods on the same host
+        //    need VPC_PODS for intra-VPC routing to this VM).
         let vpc_pod_key = VpcPodKey {
             vpc_id,
             _pad: 0,
             ipv4_addr: ip_host,
         };
         let vpc_pod_value = VpcPodValue {
-            ghost_ipv6: [0u8; 16],
+            ghost_ipv6: ipv6_bytes,
         };
         {
             let mut map: BpfHashMap<&mut aya::maps::MapData, VpcPodKey, VpcPodValue> =
@@ -248,8 +252,9 @@ impl NetworkEnforcer for EbpfEnforcer {
             map.insert(vpc_pod_key, vpc_pod_value, 0)?;
         }
 
-        // 2. Load per-TAP Ebpf with .rodata globals baked in
+        // 2. Load per-TAP Ebpf with .rodata globals for tap_guard anti-spoofing
         let mut tap_ebpf = EbpfLoader::new()
+            .set_global("MY_GHOST_IPV6", &ipv6_bytes, true)
             .set_global("MY_GUEST_IPV4", &ip_host, true)
             .set_global("MY_VPC_ID", &vpc_id, true)
             .map_pin_path(BPFFS_PIN_DIR)
@@ -264,24 +269,16 @@ impl NetworkEnforcer for EbpfEnforcer {
             }
         }
 
-        // 4. From per-TAP instance: load + attach tc_egress (egress) and tc_ingress (ingress)
-        let egress: &mut SchedClassifier = tap_ebpf
-            .program_mut("tc_egress")
-            .context("tc_egress program not found in per-TAP instance")?
+        // 4. From per-TAP instance: load + attach tap_guard on ingress (VM → host)
+        //    No IPv4 classifiers — the VM does its own SIIT translation.
+        let guard: &mut SchedClassifier = tap_ebpf
+            .program_mut("tap_guard")
+            .context("tap_guard program not found in per-TAP instance")?
             .try_into()?;
-        egress.load()?;
-        egress
-            .attach(tap_name, TcAttachType::Egress)
-            .with_context(|| format!("failed to attach tc_egress to {}", tap_name))?;
-
-        let ingress: &mut SchedClassifier = tap_ebpf
-            .program_mut("tc_ingress")
-            .context("tc_ingress program not found in per-TAP instance")?
-            .try_into()?;
-        ingress.load()?;
-        ingress
+        guard.load()?;
+        guard
             .attach(tap_name, TcAttachType::Ingress)
-            .with_context(|| format!("failed to attach tc_ingress to {}", tap_name))?;
+            .with_context(|| format!("failed to attach tap_guard to {}", tap_name))?;
 
         // 5. From main instance: attach IPv6 VPC classifiers (already loaded, shared)
         let ingress_v6: &mut SchedClassifier = self
@@ -310,8 +307,8 @@ impl NetworkEnforcer for EbpfEnforcer {
             .insert(tap_name.to_string(), (ip_host, vpc_id));
 
         debug!(
-            "ebpf: installed per-TAP rules for tap={} ipv4={} vpc_id={}",
-            tap_name, guest_ipv4, vpc_id
+            "ebpf: installed per-TAP rules (guard + IPv6) for tap={} ipv4={} ipv6={} vpc_id={}",
+            tap_name, guest_ipv4, ghost_ipv6, vpc_id
         );
         Ok(())
     }
