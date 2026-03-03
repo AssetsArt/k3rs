@@ -37,32 +37,62 @@ graph TB
         API --> PKI
     end
 
-    subgraph agent["k3rs-agent (Data Plane)"]
-        direction TB
-        KUBELET["Pod Sync Loop<br/>(Kubelet equivalent)"]
-        RUNTIME["Container Runtime<br/>(Virtualization / OCI)"]
-        SPROXY["Service Proxy<br/>(Pingora)"]
-        TUNNEL["Tunnel Proxy<br/>(Pingora)"]
-        DNS["DNS Server<br/>(svc.cluster.local)"]
-        CNI["CNI<br/>(Pod Networking)"]
+    subgraph node["Node"]
+        subgraph vpc_daemon["k3rs-vpc (VPC Daemon)"]
+            direction TB
+            VPC_SYNC["VPC Sync Loop"]
+            GHOST["Ghost IPv6<br/>Allocator"]
+            EBPF["eBPF Enforcer<br/>(TC classifier)"]
+            NAT64["NAT64<br/>(eBPF)"]
+            VPC_STORE["VpcStore<br/>(Own SlateDB)"]
+            VPC_SOCK["Unix Socket API"]
+
+            VPC_SYNC --> VPC_STORE
+            GHOST --> VPC_STORE
+            VPC_SOCK --> GHOST
+        end
+
+        subgraph agent["k3rs-agent (Data Plane)"]
+            direction TB
+            KUBELET["Pod Sync Loop<br/>(Kubelet equivalent)"]
+            RUNTIME["Container Runtime<br/>(Virtualization / OCI)"]
+            SPROXY["Service Proxy<br/>(Pingora)"]
+            TUNNEL["Tunnel Proxy<br/>(Pingora)"]
+            DNS["DNS Server<br/>(DNS64 + svc.cluster.local)"]
+        end
+
+        BRIDGE["k3rs-bridge<br/>(Ghost IPv6)"]
+        PODS["Pods<br/>(Ghost IPv6 + GuestIPv4)"]
 
         KUBELET --> RUNTIME
         RUNTIME --> PODS
         SPROXY <--> PODS
         DNS --> SPROXY
-        CNI --> PODS
-    end
+        PODS <--> BRIDGE
+        EBPF -.->|"TC classifier<br/>on veth/TAP"| PODS
+        NAT64 -.->|"IPv6→IPv4<br/>translation"| BRIDGE
 
-    PODS["Pods"]
+        KUBELET -- "allocate/release<br/>(Unix socket)" --> VPC_SOCK
+        SPROXY -- "query routes<br/>(Unix socket)" --> VPC_SOCK
+        DNS -- "query VPC scope<br/>(Unix socket)" --> VPC_SOCK
+    end
 
     CLI["k3rsctl (CLI)"] --> API
     UI["k3rs-ui (Dioxus)"] --> API
     TUNNEL <--> API
     KUBELET <--> API
+    VPC_SYNC -- "pull VPCs + peerings<br/>(HTTP)" --> API
+
+    WG["WireGuard Mesh<br/>(cross-node)"]
+    BRIDGE <--> WG
 
     style server fill:#1a1a2e,stroke:#e94560,stroke-width:2px,color:#fff
     style agent fill:#16213e,stroke:#0f3460,stroke-width:2px,color:#fff
+    style vpc_daemon fill:#2d1b4e,stroke:#8b5cf6,stroke-width:2px,color:#fff
+    style node fill:#0d1117,stroke:#30363d,stroke-width:1px,color:#fff
     style PODS fill:#533483,stroke:#e94560,color:#fff
+    style BRIDGE fill:#1a472a,stroke:#2ea043,color:#fff
+    style WG fill:#1a472a,stroke:#2ea043,color:#fff
 ```
 
 ### 3.1 Server Components (Control Plane)
@@ -79,11 +109,19 @@ The agent binary runs on worker nodes and executes workloads:
 - **Tunnel Proxy (powered by Pingora)**: Maintains a persistent, secure reverse tunnel back to the Server (similar to K3s). Pingora's connection pooling and multiplexing capabilities make it ideal for managing these reverse tunnels dynamically without dropping packets.
 - **Pod Sync Loop (Kubelet equivalent)**: Watches for Scheduled pods, pulls images, creates and starts containers, monitors health, and reports status back to the Server API.
 - **Container Runtime Integrator**: Platform-aware container runtime with pluggable backends — Virtualization.framework microVM on macOS (Firecracker-like lightweight Linux VMs), OCI runtimes (`youki`/`crun`) with auto-download from GitHub Releases on Linux. Pulls OCI images via `oci-client`, extracts rootfs layers, boots minimal Linux VMs or OCI containers, and manages full container lifecycle including exec.
-- **Service Proxy (powered by Pingora)**: Replaces `kube-proxy`. Uses Pingora to dynamically manage advanced L4/L7 load balancing for services running on the node, routing traffic seamlessly to the correct local or remote Pods.
-- **DNS Server**: Lightweight embedded DNS resolver for `<service>.<namespace>.svc.cluster.local` resolution.
-- **Overlay Networking (CNI)**: Manages pod-to-pod networking and IP allocation (similar to Flannel or Cilium).
+- **Service Proxy (powered by Pingora)**: Replaces `kube-proxy`. Uses Pingora to dynamically manage advanced L4/L7 load balancing for services running on the node, routing traffic to the correct local or remote Pods via Ghost IPv6.
+- **DNS Server (DNS64)**: Lightweight embedded DNS resolver for `<service>.<namespace>.svc.cluster.local` resolution. Returns AAAA records (Ghost IPv6) for internal services. Synthesizes AAAA records from A records via DNS64 for external IPv4-only domains.
 
-### 3.3 CLI Tool (`k3rsctl`)
+### 3.3 VPC Daemon (`k3rs-vpc`)
+A standalone per-node daemon managing all VPC networking independently from the Agent:
+- **Ghost IPv6 Allocator**: Allocates `(GuestIPv4, Ghost IPv6)` pairs per pod. Ghost IPv6 is the real routable address assigned to the pod interface.
+- **eBPF Enforcer**: TC classifier programs on pod veth/TAP interfaces. Extracts VPC ID directly from IPv6 header (bytes 10-11) — no BPF map lookup for same-VPC traffic. Only the `peerings` map is used for cross-VPC decisions.
+- **NAT64**: eBPF-based IPv6→IPv4 translation at node level. Pods reach external IPv4 services via well-known prefix `64:ff9b::/96`.
+- **VPC Sync Loop**: Pulls VPC definitions and peerings from the server every 10s.
+- **VpcStore (Own SlateDB)**: Independent state store for VPC allocations, crash recovery.
+- **Unix Socket API**: NDJSON protocol at `/run/k3rs-vpc.sock` — Agent delegates all network decisions here.
+
+### 3.4 CLI Tool (`k3rsctl`)
 A command-line interface for cluster management:
 - **Cluster Operations**: `k3rsctl cluster info`, `k3rsctl node list`, `k3rsctl node drain <node>`
 - **Workload Management**: `k3rsctl apply -f <manifest>`, `k3rsctl get pods`, `k3rsctl logs <pod>`
@@ -92,7 +130,7 @@ A command-line interface for cluster management:
 - **Configuration**: `k3rsctl config set-context`, kubeconfig-compatible credential management
 - Communicates with the API Server via gRPC/REST with token-based authentication.
 
-### 3.4 Management UI (`k3rs-ui`) — powered by [Dioxus 0.7](https://dioxuslabs.com/learn/0.7/)
+### 3.5 Management UI (`k3rs-ui`) — powered by [Dioxus 0.7](https://dioxuslabs.com/learn/0.7/)
 A web-based management dashboard built with [Dioxus](https://dioxuslabs.com/learn/0.7/), a Rust-native fullstack UI framework:
 - **Dashboard**: Real-time cluster overview — node count, pod status, resource utilization, and recent events.
 - **Node Management**: View nodes, status, labels, taints. Drain/cordon operations.
@@ -290,57 +328,7 @@ This enables:
 
 #### Architecture
 
-```mermaid
-graph TB
-    subgraph server["k3rs-server (Control Plane)"]
-        API["API Server"]
-        VPC_CTRL["VPC Controller"]
-        DB["StateStore (SlateDB)"]
-        API <--> DB
-        VPC_CTRL <--> DB
-    end
-
-    subgraph node["Node"]
-        subgraph vpc_daemon["k3rs-vpc (VPC Daemon)"]
-            direction TB
-            VPC_SYNC["VPC Sync Loop"]
-            GHOST["Ghost IPv6 Allocator"]
-            ROUTE["Routing Engine"]
-            EBPF["eBPF Enforcer"]
-            VPC_STORE["VpcStore (Own SlateDB)"]
-            VPC_SOCK["Unix Socket API"]
-
-            VPC_SYNC --> VPC_STORE
-            GHOST --> VPC_STORE
-            ROUTE --> EBPF
-            VPC_SOCK --> GHOST
-            VPC_SOCK --> ROUTE
-        end
-
-        subgraph agent["k3rs-agent"]
-            POD_SYNC["Pod Sync Loop"]
-            RUNTIME["Container Runtime"]
-            SPROXY["Service Proxy (Pingora)"]
-            DNS_SRV["DNS Server"]
-        end
-
-        PODS["Pods / VMs"]
-
-        POD_SYNC -- "allocate/release\n(Unix socket)" --> VPC_SOCK
-        SPROXY -- "query routes\n(Unix socket)" --> VPC_SOCK
-        DNS_SRV -- "query VPC scope\n(Unix socket)" --> VPC_SOCK
-        RUNTIME --> PODS
-        EBPF --> PODS
-    end
-
-    VPC_SYNC -- "pull VPCs + peerings\n(HTTP)" --> API
-    POD_SYNC -- "pull pods\n(HTTP)" --> API
-
-    style vpc_daemon fill:#2d1b4e,stroke:#8b5cf6,stroke-width:2px,color:#fff
-    style agent fill:#16213e,stroke:#0f3460,stroke-width:2px,color:#fff
-    style server fill:#1a1a2e,stroke:#e94560,stroke-width:2px,color:#fff
-    style PODS fill:#533483,stroke:#e94560,color:#fff
-```
+See the [main architecture diagram](#3-architecture-structure) for the full system view including `k3rs-vpc`, eBPF enforcer, NAT64, k3rs-bridge, and WireGuard mesh.
 
 **Three independent processes per node:**
 
