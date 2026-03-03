@@ -250,31 +250,43 @@ UUIDs are stored as `.id` fields for internal reference only.
 
 #### Overview
 
-K3rs currently uses a **single flat overlay network** (`10.42.0.0/16`) where every Pod and VM gets a unique IPv4 address. This works for simple deployments but offers no network isolation between workloads.
+K3rs uses an **IPv6-native pod networking** model powered by **Ghost IPv6** — a deterministic addressing scheme where the IPv6 address itself encodes `(ClusterID, VpcID, GuestIPv4)`. Unlike traditional CNI approaches where pods only get IPv4 and require overlay routing (VXLAN, Geneve, host routes), Ghost IPv6 is assigned as the **real routable address** on every pod interface.
 
-This specification introduces **VPC (Virtual Private Cloud)** as a first-class resource in K3rs, powered by a **Ghost IPv6** addressing scheme adapted from Sync7 and a **standalone `k3rs-vpc` daemon** that manages all VPC networking independently from the Agent. The core idea:
+This specification introduces **VPC (Virtual Private Cloud)** as a first-class resource in K3rs, powered by Ghost IPv6 and a **standalone `k3rs-vpc` daemon** that manages all VPC networking independently from the Agent. The core idea:
 
-> **IPv4 inside the Pod/VM is a local illusion.**
-> All internal routing, isolation, and forwarding decisions operate on **Ghost IPv6**.
+> **Ghost IPv6 is the real routable address on the pod interface.**
+> Pod-to-pod traffic uses IPv6 natively. IPv4 is available via NAT64/DNS64.
 
-A Ghost IPv6 address deterministically encodes `(ClusterID, VpcID, GuestIPv4)`, enabling:
+```
+Before:  Pod veth → IPv4 only (10.42.0.5)         → eBPF lookup map → VPC ID
+After:   Pod veth → IPv6 primary (fd6b:3372:...)   → eBPF parse header → VPC ID (free)
+                  → IPv4 via NAT64                  → no map lookup needed
+```
 
-- **Overlapping IPv4 CIDRs** across different VPCs
-- **Hard VPC isolation** without Linux network namespaces per VPC
+This enables:
+
+- **No route tables** — Ghost IPv6 is unique across the entire cluster; 1 route per node covers all pods in all VPCs
+- **Overlapping IPv4 CIDRs** across different VPCs (IPv4 is a "local illusion" inside the pod)
+- **Hard VPC isolation** — eBPF extracts VPC ID directly from the IPv6 header (bytes 10-11), no BPF map lookup needed
 - **Stateless routing** — route decisions derived from packet headers alone
+- **IPv4 compatibility** — NAT64/DNS64 at node level provides transparent IPv4 access
 - Pods, Deployments, and VMs bound to a specific VPC
 
 #### Design Goals
 
 1. **VPC as a first-class resource** — create, delete, list VPCs via API
 2. **Standalone VPC daemon** — `k3rs-vpc` runs as an independent process per node with its own state
-3. **Workload binding** — Pods, Deployments, and VMs declare their VPC in spec
-4. **Overlapping CIDRs** — different VPCs may use the same IPv4 range (e.g., both use `10.0.0.0/24`)
-5. **Hard isolation by default** — Pods in different VPCs cannot communicate unless explicitly peered
-6. **Ghost IPv6 as true identity** — the only routable address in the data plane
-7. **Fail-static** — existing VPC connectivity survives Agent/Server/VPC daemon restarts independently
-8. **Backward compatible** — a `default` VPC preserves current flat-network behavior
-9. **Agent decoupling** — Agent knows nothing about networking internals; it delegates to `k3rs-vpc`
+3. **IPv6-native pod networking** — Ghost IPv6 assigned as real routable address on pod interface; pod-to-pod traffic is IPv6
+4. **No route tables** — 1 route per node (Ghost prefix) instead of N routes per pod CIDR
+5. **Workload binding** — Pods, Deployments, and VMs declare their VPC in spec
+6. **Overlapping CIDRs** — different VPCs may use the same IPv4 range (e.g., both use `10.0.0.0/24`)
+7. **Hard isolation by default** — Pods in different VPCs cannot communicate unless explicitly peered
+8. **eBPF-only enforcement** — VPC ID extracted from IPv6 header inline; no BPF map lookup for same-VPC traffic
+9. **IPv4 via NAT64/DNS64** — transparent IPv4 connectivity at node level
+10. **Ghost IPv6 as true identity** — the only routable address in the data plane
+11. **Fail-static** — existing VPC connectivity survives Agent/Server/VPC daemon restarts independently
+12. **Backward compatible** — a `default` VPC preserves current flat-network behavior; apps binding `0.0.0.0` still work
+13. **Agent decoupling** — Agent knows nothing about networking internals; it delegates to `k3rs-vpc`
 
 #### Architecture
 
@@ -294,13 +306,13 @@ graph TB
             VPC_SYNC["VPC Sync Loop"]
             GHOST["Ghost IPv6 Allocator"]
             ROUTE["Routing Engine"]
-            NFT["nftables / eBPF Enforcer"]
+            EBPF["eBPF Enforcer"]
             VPC_STORE["VpcStore (Own SlateDB)"]
             VPC_SOCK["Unix Socket API"]
 
             VPC_SYNC --> VPC_STORE
             GHOST --> VPC_STORE
-            ROUTE --> NFT
+            ROUTE --> EBPF
             VPC_SOCK --> GHOST
             VPC_SOCK --> ROUTE
         end
@@ -318,7 +330,7 @@ graph TB
         SPROXY -- "query routes\n(Unix socket)" --> VPC_SOCK
         DNS_SRV -- "query VPC scope\n(Unix socket)" --> VPC_SOCK
         RUNTIME --> PODS
-        NFT --> PODS
+        EBPF --> PODS
     end
 
     VPC_SYNC -- "pull VPCs + peerings\n(HTTP)" --> API
@@ -335,7 +347,7 @@ graph TB
 | Process | Responsibility | State | Crash Impact |
 |---------|---------------|-------|-------------|
 | `k3rs-server` | VPC CRUD, VpcID allocation, cluster state | Server SlateDB | No new VPCs; existing traffic unaffected |
-| `k3rs-vpc` | Ghost IPv6 allocation, routing, isolation enforcement | Own SlateDB (`vpc-state.db`) | nftables rules persist; allocations recover from own DB |
+| `k3rs-vpc` | Ghost IPv6 allocation, routing, isolation enforcement | Own SlateDB (`vpc-state.db`) | eBPF programs/maps persist in kernel; allocations recover from own DB |
 | `k3rs-agent` | Pod lifecycle, Service Proxy, DNS | Agent SlateDB (`agent-state.db`) | Pods keep running; VPC enforcement unaffected |
 
 #### Terminology
@@ -437,7 +449,7 @@ k3rs-vpc \
 
 1. Open VpcStore (SlateDB at `<data-dir>/vpc-state.db`)
 2. Load cached VPCs, allocations, peerings from VpcStore
-3. Apply cached nftables rules (fail-static: networking works immediately)
+3. Re-open pinned eBPF programs/maps (fail-static: enforcement persists in kernel)
 4. Start Unix socket listener at `/run/k3rs-vpc.sock`
 5. Begin VPC Sync Loop (pull VPCs from server)
 6. Ready to serve Agent requests
@@ -453,7 +465,6 @@ k3rs-vpc \
 /vpc/definitions/<vpc-name>                  → Vpc (vpc_id, cidr, status)
 /vpc/allocations/<vpc-name>/<pod-id>         → Allocation (guest_ipv4, ghost_ipv6)
 /vpc/peerings/<peering-name>                 → VpcPeering (vpc_a, vpc_b, direction)
-/vpc/nftables-snapshot                       → Serialized nftables ruleset (for crash recovery)
 ```
 
 **Why own SlateDB?**
@@ -550,7 +561,7 @@ Every 10s:
   1. GET /api/v1/vpcs         → update local VPC definitions
   2. GET /api/v1/vpc-peerings → update local peering rules
   3. Diff against VpcStore    → add new VPCs, remove deleted ones
-  4. Update nftables rules    → apply isolation changes
+  4. Update eBPF maps         → apply isolation changes
   5. Persist to VpcStore      → crash-safe state
 ```
 
@@ -593,82 +604,89 @@ struct Allocation {
 3. Allocates next available GuestIPv4 from pool (idempotent — same pod_id returns same IP)
 4. Constructs Ghost IPv6 from `(platform_prefix, cluster_id, vpc_id, guest_ipv4)`
 5. Persists allocation to VpcStore (crash-safe)
-6. Installs nftables rule allowing this Ghost IPv6
+6. Updates eBPF peerings map if needed
 7. Returns `Allocated { guest_ipv4, ghost_ipv6, vpc_id }` to Agent
 
-##### Data Plane Enforcement (nftables)
+##### Data Plane Enforcement (eBPF, IPv6-Native)
 
-`k3rs-vpc` manages all nftables rules for VPC isolation. The Agent never touches nftables.
+`k3rs-vpc` enforces VPC isolation via eBPF using [Aya](https://aya-rs.dev/) (pure Rust eBPF toolchain). A `NetworkEnforcer` trait abstracts backends: `EbpfEnforcer` (Linux) and `NoopEnforcer` (macOS — log-only, no isolation).
 
-**Rule Structure**:
+**Key advantage of IPv6-native enforcement**: With Ghost IPv6 as the real pod address, the eBPF classifier extracts VPC ID directly from the IPv6 header (bytes 10-11) — **no BPF map lookup needed** for same-VPC traffic decisions. This eliminates the `vpc_membership` and `vpc_cidrs` maps entirely.
 
-```
-table inet k3rs_vpc {
-    # Per-VPC chains
-    chain vpc_<vpc_id>_ingress {
-        # Allow intra-VPC traffic
-        ip saddr <vpc_cidr> ip daddr <vpc_cidr> accept
-
-        # Allow from peered VPCs
-        ip saddr <peer_cidr> accept   # (only if peering exists)
-
-        # Default deny
-        drop
-    }
-
-    chain vpc_<vpc_id>_egress {
-        # Allow intra-VPC traffic
-        ip saddr <vpc_cidr> ip daddr <vpc_cidr> accept
-
-        # Allow to peered VPCs
-        ip daddr <peer_cidr> accept   # (only if peering exists)
-
-        # Default deny cross-VPC
-        drop
-    }
-
-    # Main forwarding chain
-    chain forward {
-        type filter hook forward priority 0; policy drop;
-
-        # Per-pod rules (installed on allocation)
-        ip saddr <pod_ipv4> jump vpc_<vpc_id>_egress
-        ip daddr <pod_ipv4> jump vpc_<vpc_id>_ingress
-    }
-
-    # Anti-spoofing
-    chain input_validation {
-        # Pod can only send from its assigned IP
-        # Installed per-pod on allocation
-    }
-}
+```c
+// IPv6-native: VPC ID is embedded in the address
+// bytes 10-11 of IPv6 src/dst = VpcID — O(1) true constant time
+u16 src_vpc = (ipv6_hdr->saddr[10] << 8) | ipv6_hdr->saddr[11];
+u16 dst_vpc = (ipv6_hdr->daddr[10] << 8) | ipv6_hdr->daddr[11];
+// Same VPC? Allow. Different VPC? Check peerings map.
 ```
 
-**eBPF enforcement (Linux primary)**. The primary enforcement backend on Linux uses eBPF via [Aya](https://aya-rs.dev/) (pure Rust eBPF toolchain). A `NetworkEnforcer` trait abstracts backends: `EbpfEnforcer` (primary), `NftEnforcer` (fallback for kernels without BPF support), and `NoopEnforcer` (macOS — log-only, no isolation). At startup, `k3rs-vpc` probes for eBPF support and falls back automatically.
-
-**TC classifier programs** are attached to each pod veth (container) or TAP (Firecracker VM) interface. Three BPF HashMap maps drive policy decisions:
+**TC classifier programs** are attached to each pod veth (container) or TAP (Firecracker VM) interface. Only **one** BPF HashMap map is needed:
 
 | Map | Key | Value | Purpose |
 |-----|-----|-------|---------|
-| `vpc_membership` | `pod_ip: u32` | `vpc_id: u16` | Identify source/dest VPC |
-| `vpc_cidrs` | `vpc_id: u16` | `cidr: (u32, u8)` | VPC address range validation |
 | `peerings` | `(src_vpc: u16, dst_vpc: u16)` | `direction: u8` | Cross-VPC allow rules |
+
+**Classification logic** (per-packet):
+
+1. Parse Ethernet header → if not IPv6, pass (allows NAT64 IPv4 traffic)
+2. Parse IPv6 header → validate Ghost prefix (bytes 0-3 = `fd6b:3372`)
+3. If not Ghost traffic → pass (NDP, external IPv6)
+4. Extract src VPC ID (bytes 10-11 of src addr) and dst VPC ID (bytes 10-11 of dst addr)
+5. Same VPC → **allow** (no map lookup)
+6. Different VPC → check `peerings` map → allow if peered, **drop** otherwise
+7. On any parse error → allow (fail-open)
+
+```rust
+// k3rs-vpc-ebpf: IPv6-native TC classifier (simplified)
+fn try_classify_v6(ctx: &TcContext) -> Result<i32, ()> {
+    let eth_hdr: EthHdr = ctx.load(0).map_err(|_| ())?;
+    if eth_hdr.ether_type != EtherType::Ipv6 {
+        return Ok(TC_ACT_OK);  // pass IPv4 (NAT64 traffic)
+    }
+
+    let ipv6_hdr: Ipv6Hdr = ctx.load(EthHdr::LEN).map_err(|_| ())?;
+    let src = ipv6_hdr.src_addr();
+    let dst = ipv6_hdr.dst_addr();
+
+    // Validate Ghost prefix
+    let src_prefix = u32::from_be_bytes([src[0], src[1], src[2], src[3]]);
+    let dst_prefix = u32::from_be_bytes([dst[0], dst[1], dst[2], dst[3]]);
+    if src_prefix != PLATFORM_PREFIX || dst_prefix != PLATFORM_PREFIX {
+        return Ok(TC_ACT_OK);  // not Ghost traffic
+    }
+
+    // Extract VPC ID directly from address bytes 10-11
+    let src_vpc = u16::from_be_bytes([src[10], src[11]]);
+    let dst_vpc = u16::from_be_bytes([dst[10], dst[11]]);
+
+    if src_vpc == dst_vpc { return Ok(TC_ACT_OK); }  // same VPC → allow
+
+    // Cross-VPC: check peering map
+    let key = PeeringKey { src_vpc_id: src_vpc, dst_vpc_id: dst_vpc };
+    if let Some(p) = unsafe { PEERINGS.get(&key) } {
+        if p.allowed != 0 { return Ok(TC_ACT_OK); }
+    }
+
+    Ok(TC_ACT_SHOT)  // different VPC, no peering → drop
+}
+```
 
 Programs and maps are **pinned to bpffs** at `/sys/fs/bpf/k3rs/`, surviving daemon crashes. On restart, `k3rs-vpc` re-opens pinned maps and reconciles them against VpcStore state — no traffic interruption.
 
-**nftables fallback**. On older kernels or when eBPF is unavailable, `NftEnforcer` wraps the existing `NftManager` logic (per-VPC chains, per-pod rules, anti-spoofing). The serialized nftables snapshot at `/vpc/nftables-snapshot` provides instant recovery before the full rebuild completes.
+**Anti-spoofing**: The eBPF classifier validates Ghost prefix and version on every packet. Packets with non-Ghost source addresses targeting Ghost destinations are dropped. Pods cannot forge traffic appearing to come from a different VPC.
 
 ##### Recovery & Reconciliation
 
 On `k3rs-vpc` restart:
 
 1. **Load VpcStore** — all VPCs, allocations, peerings restored instantly
-2. **Re-open pinned BPF maps** (eBPF) or **rebuild nftables** (fallback) — enforcement rules survive in kernel
+2. **Re-open pinned BPF maps** — enforcement rules survive in kernel (programs/maps pinned to bpffs)
 3. **Reconcile with server** — pull latest VPCs/peerings, diff and apply changes
-4. **Adopt existing allocations** — pods are still running, their IPs haven't changed
+4. **Adopt existing allocations** — pods are still running, their Ghost IPv6 addresses haven't changed
 5. **Resume Unix socket listener** — Agent reconnects automatically
 
-**Key invariant**: `k3rs-vpc` crash does NOT affect running pods. eBPF programs/maps (or nftables rules) persist in kernel. Only new allocations are blocked until the daemon restarts.
+**Key invariant**: `k3rs-vpc` crash does NOT affect running pods. eBPF programs/maps persist in kernel. Only new allocations are blocked until the daemon restarts.
 
 #### VPC Resource Model
 
@@ -825,11 +843,12 @@ Agent (Pod Sync Loop)                          k3rs-vpc
        │                                          │  3. Allocate GuestIPv4
        │                                          │  4. Construct Ghost IPv6
        │                                          │  5. Persist to VpcStore
-       │                                          │  6. Install nftables rules
+       │                                          │  6. Update eBPF maps if needed
        │◄──── Allocated(10.0.0.5, fd00:..., 3) ──│
        │                                          │
-       │  7. Configure container with             │
-       │     GuestIPv4 = 10.0.0.5                 │
+       │  7. Setup dual-stack pod interface:      │
+       │     - Ghost IPv6 (primary, routable)     │
+       │     - GuestIPv4 (local compat)           │
        │  8. Update pod.ghost_ipv6                │
        │  9. Report status to server              │
        │                                          │
@@ -843,7 +862,7 @@ Agent                                          k3rs-vpc
        │  1. Pod terminated                        │
        │                                          │
        ├──────── Release(pod-xyz, production) ────►│
-       │                                          │  2. Remove nftables rules
+       │                                          │  2. Clean up eBPF state
        │                                          │  3. Release GuestIPv4 to pool
        │                                          │  4. Mark allocation as released
        │                                          │     in VpcStore
@@ -863,12 +882,25 @@ async fn create_pod(&self, pod: &Pod) -> Result<()> {
     // Delegate to k3rs-vpc
     let alloc = self.vpc_client.allocate(&pod.id, vpc_name).await?;
 
-    // Configure container with GuestIPv4 only — pod never sees Ghost IPv6
+    // Setup dual-stack pod interface
+    let (pod_veth, host_veth) = create_veth_pair(&pod.id)?;
+
+    // Ghost IPv6 as primary routable address
+    ip_addr_add(&pod_veth, &alloc.ghost_ipv6, "/128")?;
+    // GuestIPv4 for backward compat (apps binding 0.0.0.0)
+    ip_addr_add(&pod_veth, &alloc.guest_ipv4, "/32")?;
+    // IPv6 default route via bridge, IPv4 via NAT64
+    ip_route_add(&pod_veth, "::/0", &host_veth_ll)?;
+    ip_route_add(&pod_veth, "0.0.0.0/0", &nat64_gw)?;
+    // Attach to k3rs-bridge
+    bridge_add(&host_veth, "k3rs-bridge")?;
+
     self.runtime.create_container(
         &pod.id,
         &pod.spec.containers[0].image,
         &pod.spec.containers[0].command,
-        &[("K3RS_POD_IP", &alloc.guest_ipv4)],
+        &[("K3RS_POD_IP", &alloc.guest_ipv4),
+          ("K3RS_POD_IPV6", &alloc.ghost_ipv6)],
     ).await?;
 
     // Update pod record with Ghost IPv6
@@ -886,15 +918,16 @@ async fn create_pod(&self, pod: &Pod) -> Result<()> {
 
 | Source → Destination | Behavior | Enforced By |
 |---------------------|----------|-------------|
-| Same VPC | **ALLOWED** — free communication | nftables (k3rs-vpc) |
-| Different VPCs (no peering) | **DENIED** — packets dropped | nftables (k3rs-vpc) |
-| Different VPCs (peered) | **ALLOWED** — explicit peering required | nftables (k3rs-vpc) |
+| Same VPC | **ALLOWED** — free communication | eBPF TC classifier (inline VPC ID check) |
+| Different VPCs (no peering) | **DENIED** — packets dropped | eBPF TC classifier (peerings map) |
+| Different VPCs (peered) | **ALLOWED** — explicit peering required | eBPF TC classifier (peerings map) |
 
 ##### Default Behavior
 
-- **Intra-VPC**: All Pods within the same VPC can reach each other on their GuestIPv4 addresses. No policy needed.
-- **Cross-VPC**: Blocked by default. `k3rs-vpc` enforces isolation via nftables rules.
-- **External traffic**: Ingress and egress to/from the cluster are handled by Ingress Proxy. `k3rs-vpc` allows external-bound traffic via configurable egress rules.
+- **Intra-VPC**: All Pods within the same VPC can reach each other on their Ghost IPv6 addresses. eBPF checks VPC ID from IPv6 header — no map lookup.
+- **Cross-VPC**: Blocked by default. eBPF drops packets where src VPC ID ≠ dst VPC ID unless a peering entry exists.
+- **External IPv4**: Pods reach external IPv4 services via NAT64 at node level. DNS64 synthesizes AAAA records for IPv4-only domains.
+- **External traffic**: Ingress and egress to/from the cluster are handled by Ingress Proxy.
 
 ##### VPC Peering (Optional)
 
@@ -919,7 +952,7 @@ enum PeeringStatus {
 }
 ```
 
-When peering is created on the server, `k3rs-vpc` picks it up via VPC Sync Loop and installs cross-VPC nftables accept rules.
+When peering is created on the server, `k3rs-vpc` picks it up via VPC Sync Loop and installs cross-VPC entries in the eBPF `peerings` map.
 
 #### Service Proxy & DNS Changes
 
@@ -945,23 +978,103 @@ struct Service {
 
 ##### DNS Changes
 
-DNS resolution becomes VPC-scoped:
+DNS resolution becomes VPC-scoped and returns **AAAA records** (Ghost IPv6):
 
 ```
-<service>.<namespace>.svc.cluster.local
+# Internal service (same VPC):
+my-svc.default.svc.cluster.local → AAAA fd6b:3372:...:0001:0a00:0005
+                                         (Ghost IPv6 of backend pod)
+
+# External domain (DNS64 synthesis):
+api.stripe.com → AAAA 64:ff9b::...      (synthesized from A record)
 ```
 
-resolves to the Service's ClusterIP **only if the querying Pod is in the same VPC** as the Service.
+resolves to the backend Pod's Ghost IPv6 **only if the querying Pod is in the same VPC** as the Service.
 
 **Implementation**: The DNS server queries `k3rs-vpc` via Unix socket to determine the source Pod's VPC, then filters resolution accordingly.
 
+#### NAT64/DNS64 — IPv4 Connectivity
+
+Pods use Ghost IPv6 as their primary address but still need access to IPv4 services (external APIs, legacy infra). This is handled transparently at the node level via NAT64 + DNS64.
+
+##### NAT64 (Node-Level, eBPF)
+
+```
+Pod (IPv6-native)
+  │  dst = 64:ff9b::93.184.216.34  (NAT64 well-known prefix + IPv4)
+  ▼
+k3rs-nat64 (node-level eBPF)
+  │  SNAT: Ghost IPv6 → node IPv4
+  │  DNAT: 64:ff9b::x → actual IPv4
+  ▼
+External IPv4 (93.184.216.34)
+```
+
+**Well-known NAT64 prefix**: `64:ff9b::/96` (RFC 6052). Pod targeting `93.184.216.34` sends packet to `64:ff9b::5db8:d822` → node-level eBPF NAT64 translates IPv6→IPv4 outbound.
+
+##### DNS64 (Embedded in k3rs-dns)
+
+When a pod queries DNS for a domain that has only A records (IPv4), the DNS server synthesizes a AAAA record:
+
+```
+Pod → DNS: api.example.com AAAA?
+  │
+k3rs-dns (DNS64)
+  ├─ upstream has AAAA? → return real AAAA
+  └─ upstream has only A (93.184.216.34)?
+     → synthesize AAAA: 64:ff9b::5db8:d822
+     → Pod sends to synthesized AAAA → NAT64 translates
+```
+
+Apps don't need any changes — DNS64 + NAT64 make IPv4 fully transparent.
+
+##### Intra-Cluster Services
+
+For cluster-internal services, DNS returns Ghost IPv6 of backend pods directly (not ClusterIP). Service Proxy (Pingora) listens on Ghost IPv6 and routes to backend pod Ghost IPv6 addresses. ClusterIP is a virtual concept in the DNS layer only.
+
+#### Cross-Node Connectivity
+
+##### Node Mesh
+
+Each node has a bridge `k3rs-bridge` with a Ghost IPv6 subnet:
+
+```
+Node-1: k3rs-bridge fd6b:3372:1000:0000:0001::/80
+Node-2: k3rs-bridge fd6b:3372:1000:0000:0002::/80
+```
+
+Cross-node options:
+
+| Method | Pros | Cons | Use Case |
+|--------|------|------|----------|
+| **WireGuard tunnel** | Encrypted, simple | Slight overhead | Production, multi-site |
+| **Direct L3 routing** | Zero overhead | Requires L2 adjacency or BGP | Same rack / datacenter |
+| **VXLAN/Geneve** | Works over any L3 | Encap overhead | Legacy infra |
+
+##### Route Simplicity
+
+```bash
+# Node-1 routing table (everything needed):
+fd6b:3372::/32 dev wg-k3rs          # all Ghost traffic via WireGuard
+64:ff9b::/96   dev nat64            # NAT64 prefix
+::/0           via <default-gw>     # external IPv6
+
+# Compare with IPv4 overlay (N entries needed):
+# 10.42.0.0/24 via 192.168.1.10   (node-2 pods)
+# 10.42.1.0/24 via 192.168.1.11   (node-3 pods)
+# ... per-node route entry
+```
+
+IPv6: **1 route** covers all pods on all nodes in all VPCs.
+IPv4 overlay: **N routes** (N = number of nodes × VPCs).
+
 #### Firecracker VM Integration
 
-VMs already get isolated TAP networks (`172.16.x.0/30`). With Ghost IPv6:
+VMs already get isolated TAP networks (`172.16.x.0/30`). With IPv6-native Ghost:
 
-1. **TAP setup unchanged** — the VM still sees its GuestIPv4 on the TAP interface
-2. **Ghost IPv6 assigned by k3rs-vpc** — Agent calls `Allocate` before VM boot; `k3rs-vpc` returns the GuestIPv4 to configure on the TAP
-3. **nftables enforcement by k3rs-vpc** — VPC rules applied to TAP interface traffic
+1. **TAP gets dual-stack** — VM sees GuestIPv4 on TAP + Ghost IPv6 as primary routable address
+2. **Ghost IPv6 assigned by k3rs-vpc** — Agent calls `Allocate` before VM boot; `k3rs-vpc` returns GuestIPv4 and Ghost IPv6
+3. **eBPF enforcement by k3rs-vpc** — TC classifiers on TAP interface, same IPv6-native logic
 4. **VPC in PodSpec** — VMs respect the same `spec.vpc` field as container Pods
 5. **TAP ↔ VPC binding** — `k3rs-vpc` tracks which TAP device belongs to which VPC for per-interface enforcement
 
@@ -985,8 +1098,8 @@ VMs already get isolated TAP networks (`172.16.x.0/30`). With Ghost IPv6:
 3. Scheduler places Pod on a node (VPC doesn't affect placement — all nodes participate in all VPCs)
 4. Agent receives scheduled Pod
 5. Agent calls `k3rs-vpc` → `Allocate(pod_id, "my-vpc")`
-6. `k3rs-vpc` allocates GuestIPv4, constructs Ghost IPv6, installs nftables rules
-7. Agent configures container with GuestIPv4 (pod sees IPv4 only)
+6. `k3rs-vpc` allocates GuestIPv4, constructs Ghost IPv6, updates eBPF maps
+7. Agent configures dual-stack pod interface (Ghost IPv6 primary + GuestIPv4 compat)
 8. Agent reports `ghost_ipv6` and `vpc_name` to server
 
 ##### VPC Deletion Flow
@@ -996,13 +1109,13 @@ VMs already get isolated TAP networks (`172.16.x.0/30`). With Ghost IPv6:
 3. Server blocks new Pod creation in this VPC
 4. Existing Pods continue running (fail-static)
 5. As pods terminate, Agents call `Release` on `k3rs-vpc`
-6. When all allocations are released, `k3rs-vpc` removes VPC enforcement rules (eBPF maps/nftables chains)
+6. When all allocations are released, `k3rs-vpc` removes VPC enforcement rules (eBPF maps/programs)
 7. Server marks VPC as `Deleted`
 8. **Cooldown period** (300 seconds) before VpcID can be reused
 
 #### Data Plane Enforcement
 
-##### Routing Decision (per-packet, in nftables/eBPF)
+##### Routing Decision (per-packet, in eBPF)
 
 ```rust
 fn route_packet(src_ghost: Ipv6Addr, dst_ipv4: Ipv4Addr) -> Result<Ipv6Addr> {
@@ -1030,9 +1143,9 @@ fn route_packet(src_ghost: Ipv6Addr, dst_ipv4: Ipv4Addr) -> Result<Ipv6Addr> {
 
 ##### Spoofing Prevention
 
-- `k3rs-vpc` installs per-pod anti-spoofing rules: source IP must match allocated GuestIPv4
-- Ghost IPv6 structure (version, flags, cluster prefix) validated on every packet
-- Pods cannot forge traffic that appears to come from a different VPC
+- eBPF validates Ghost IPv6 prefix and version on every packet
+- Packets with non-Ghost source targeting Ghost destinations are dropped
+- Pods cannot forge traffic that appears to come from a different VPC (VPC ID is in the address)
 - TAP interfaces for VMs have MAC + IP pinning
 
 #### Fail-Static Guarantees
@@ -1042,15 +1155,15 @@ Three independent failure domains:
 | Failure | Networking Impact | Pod Impact |
 |---------|------------------|------------|
 | **Server crash** | Existing VPCs continue. No new VPC creation. `k3rs-vpc` serves from VpcStore. | Agent serves pods from cache. |
-| **k3rs-vpc crash** | nftables rules persist in kernel. Existing isolation intact. No new allocations until restart. | Pods keep running. Agent retries `k3rs-vpc` connection. |
+| **k3rs-vpc crash** | eBPF programs/maps persist in kernel (pinned to bpffs). Existing isolation intact. No new allocations until restart. | Pods keep running. Agent retries `k3rs-vpc` connection. |
 | **Agent crash** | `k3rs-vpc` unaffected. VPC enforcement continues. | Pods keep running (not children of Agent). |
-| **k3rs-vpc + Agent crash** | nftables persist. Both recover from own SlateDB. | Pods unaffected. |
-| **All three crash** | nftables persist. Server recovers cluster state. `k3rs-vpc` rebuilds from VpcStore. Agent rebuilds from AgentStore. | Pods unaffected. Full recovery via reconciliation. |
+| **k3rs-vpc + Agent crash** | eBPF persists in kernel. Both recover from own SlateDB. | Pods unaffected. |
+| **All three crash** | eBPF persists in kernel. Server recovers cluster state. `k3rs-vpc` rebuilds from VpcStore. Agent rebuilds from AgentStore. | Pods unaffected. Full recovery via reconciliation. |
 
 **k3rs-vpc Recovery**:
 
 1. Open VpcStore → all allocations, VPCs, peerings loaded
-2. Rebuild nftables from allocations (instant, <100ms)
+2. Re-open pinned BPF maps, reconcile against VpcStore (instant)
 3. Resume Unix socket listener → Agent reconnects
 4. Sync with server → apply any changes that happened during downtime
 
@@ -1065,8 +1178,8 @@ cmd/
 │       ├── sync.rs          # VPC Sync Loop (pull from server)
 │       ├── allocator.rs     # Ghost IPv6 allocator + per-VPC pools
 │       ├── socket.rs        # Unix socket API (NDJSON listener)
-│       ├── nftables.rs      # nftables rule management
-│       └── recovery.rs      # Crash recovery + reconciliation
+│       ├── ebpf_enforcer.rs # eBPF TC classifier management (Aya)
+│       └── enforcer.rs      # NetworkEnforcer trait
 pkg/
 ├── vpc/                     # NEW: Shared VPC library crate
 │   └── src/
@@ -2802,38 +2915,62 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Pod Sync Loop: call `Release` on pod termination
 - [x] Report `ghost_ipv6`, `vpc_name` to server
 
-#### Phase 6: nftables Isolation Enforcement (Fallback)
-- [x] `k3rs-vpc` manages `table inet k3rs_vpc`
-- [x] Per-VPC ingress/egress chains
-- [x] Per-pod rules installed on `Allocate`, removed on `Release`
-- [x] Anti-spoofing rules per pod
-- [x] nftables snapshot for crash recovery
-- [x] Firecracker VM: TAP interface rules
-
-#### Phase 7: VPC-Scoped Service Proxy & DNS
+#### Phase 6: VPC-Scoped Service Proxy & DNS
 - [x] Service Proxy queries `k3rs-vpc` for VPC-scoped routing
 - [x] DNS resolver queries `k3rs-vpc` for source Pod VPC membership
 - [x] Services inherit VPC from spec or default
 - [x] `GetRoutes` command in k3rs-vpc
 
-#### Phase 8: VPC Peering
+#### Phase 7: VPC Peering
 - [x] Peering sync in `k3rs-vpc` VPC Sync Loop
-- [x] Cross-VPC nftables accept rules on peering creation
+- [x] Cross-VPC eBPF peering rules on peering creation
 - [x] Bidirectional and InitiatorOnly enforcement
 - [x] `CheckReachability` command in k3rs-vpc
 - [x] Cross-VPC DNS resolution for peered VPCs
 
-#### Phase 9: eBPF Enforcement (Linux Primary)
-- [ ] Define `NetworkEnforcer` trait abstracting NftManager's public API
-- [ ] Implement `NftEnforcer` wrapping existing NftManager (fallback backend)
-- [ ] Implement `NoopEnforcer` for macOS (log-only, no isolation)
-- [ ] Add `aya` + `aya-ebpf` dependencies to workspace
-- [ ] Implement `EbpfEnforcer` — TC classifier programs for pod veth/TAP
-- [ ] BPF HashMap maps: `vpc_membership`, `vpc_cidrs`, `peerings`
-- [ ] Pin programs/maps to bpffs for crash survival
-- [ ] Runtime backend selection: eBPF → nftables fallback → noop
-- [ ] Update `k3rs-vpc` sync loop + main.rs to use `NetworkEnforcer` trait
-- [ ] Integration tests for eBPF enforcement path
+#### Phase 8: eBPF Enforcement (IPv6-Native)
+- [x] Define `NetworkEnforcer` trait
+- [x] Implement `NoopEnforcer` for macOS (log-only, no isolation)
+- [x] Add `aya` + `aya-ebpf` dependencies to workspace
+- [x] Implement `EbpfEnforcer` — TC classifier programs for pod veth/TAP
+- [x] BPF HashMap map: `peerings` (only map needed — VPC ID extracted from IPv6 header)
+- [x] Pin programs/maps to bpffs for crash survival
+- [x] Runtime backend selection: eBPF (Linux) → noop (macOS)
+- [x] Update `k3rs-vpc` sync loop + main.rs to use `NetworkEnforcer` trait
+
+#### Phase 9: IPv6-Native Pod Interface
+- [ ] Agent: assign Ghost IPv6 (primary) + GuestIPv4 (compat) on pod veth
+- [ ] Agent: configure IPv6 default route via k3rs-bridge
+- [ ] Agent: configure IPv4 default route via NAT64 prefix
+- [ ] Test: pod-to-pod same node via Ghost IPv6
+
+#### Phase 10: eBPF IPv6 Classifier
+- [ ] New TC classifier `tc_egress_v6` / `tc_ingress_v6`
+- [ ] Parse IPv6 header, extract VPC ID from bytes 10-11
+- [ ] Validate Ghost prefix (`fd6b:3372`)
+- [ ] Remove `VPC_MEMBERSHIP` and `VPC_CIDRS` maps
+- [ ] Keep `PEERINGS` map for cross-VPC only
+- [ ] Anti-spoofing: reject non-Ghost src with Ghost dst
+
+#### Phase 11: DNS64 Integration
+- [ ] DNS server: synthesize AAAA from A records using `64:ff9b::/96`
+- [ ] DNS server: return Ghost IPv6 AAAA for internal services
+- [ ] DNS server: VPC-scoped resolution returns AAAA instead of A
+
+#### Phase 12: NAT64 at Node Level (eBPF)
+- [ ] eBPF NAT64: translate `64:ff9b::x` → IPv4
+- [ ] SNAT: Ghost IPv6 → node IPv4 for outbound
+- [ ] Stateful connection tracking for return traffic
+
+#### Phase 13: Cross-Node Mesh
+- [ ] WireGuard tunnel setup between nodes (Ghost IPv6 traffic)
+- [ ] 1-route-per-node instead of per-pod-CIDR routes
+- [ ] Node discovery: exchange Ghost IPv6 prefixes on registration
+
+#### Phase 14: Service Proxy IPv6 Backend
+- [ ] Pingora Service Proxy: route to Ghost IPv6 backends
+- [ ] Health checks via Ghost IPv6
+- [ ] Endpoint controller: populate endpoints with Ghost IPv6
 
 ### 16.7 Process Manager Checklists
 
