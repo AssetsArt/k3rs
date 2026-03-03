@@ -34,11 +34,11 @@ fn start_one(component: &ComponentName, foreground: bool) -> Result<()> {
     })?;
 
     // Check if already running
-    if let Some(pid) = entry.pid {
-        if is_alive(pid) {
-            println!("{} is already running (pid {})", key, pid);
-            return Ok(());
-        }
+    if let Some(pid) = entry.pid
+        && is_alive(pid)
+    {
+        println!("{} is already running (pid {})", key, pid);
+        return Ok(());
     }
 
     let bin_path = &entry.bin_path;
@@ -51,20 +51,21 @@ fn start_one(component: &ComponentName, foreground: bool) -> Result<()> {
     }
 
     // Build CLI args from config YAML and persist to registry
-    if let Some(config_path) = &entry.config_path {
-        if config_path.exists() && entry.args.is_empty() {
-            let args = build_args_from_config(config_path)?;
-            let config_p = config_path.clone();
-            let k = key.clone();
-            registry::update(|reg| {
-                if let Some(e) = reg.processes.get_mut(&k) {
-                    e.args = args;
-                    // Also pass --config to the binary
-                    e.args.insert(0, config_p.display().to_string());
-                    e.args.insert(0, "--config".to_string());
-                }
-            })?;
-        }
+    if let Some(config_path) = &entry.config_path
+        && config_path.exists()
+        && entry.args.is_empty()
+    {
+        let args = build_args_from_config(config_path)?;
+        let config_p = config_path.clone();
+        let k = key.clone();
+        registry::update(|reg| {
+            if let Some(e) = reg.processes.get_mut(&k) {
+                e.args = args;
+                // Also pass --config to the binary
+                e.args.insert(0, config_p.display().to_string());
+                e.args.insert(0, "--config".to_string());
+            }
+        })?;
     }
     // Re-load after potential update
     let reg = registry::load()?;
@@ -95,17 +96,17 @@ fn start_one(component: &ComponentName, foreground: bool) -> Result<()> {
         thread::sleep(Duration::from_secs(2));
 
         let reg = registry::load()?;
-        if let Some(e) = reg.processes.get(&key) {
-            if let Some(pid) = e.pid {
-                if is_alive(pid) {
-                    println!("  {} started (pid {}, watchdog active)", key, pid);
-                } else {
-                    eprintln!(
-                        "  Warning: {} exited within 2s — check logs at {}",
-                        key,
-                        stderr_log.display()
-                    );
-                }
+        if let Some(e) = reg.processes.get(&key)
+            && let Some(pid) = e.pid
+        {
+            if is_alive(pid) {
+                println!("  {} started (pid {}, watchdog active)", key, pid);
+            } else {
+                eprintln!(
+                    "  Warning: {} exited within 2s — check logs at {}",
+                    key,
+                    stderr_log.display()
+                );
             }
         }
     } else {
@@ -122,8 +123,7 @@ fn start_one(component: &ComponentName, foreground: bool) -> Result<()> {
                 .stdout(stdout_file)
                 .stderr(stderr_file)
                 .pre_exec(|| {
-                    nix::unistd::setsid()
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                    nix::unistd::setsid().map_err(std::io::Error::other)?;
                     Ok(())
                 })
                 .spawn()
@@ -289,7 +289,7 @@ fn delete_one(
     };
 
     // Stop if running
-    if entry.pid.is_some_and(|p| is_alive(p)) {
+    if entry.pid.is_some_and(is_alive) {
         stop_one(component, false, 10)?;
     }
 

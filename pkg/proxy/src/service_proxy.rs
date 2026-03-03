@@ -55,23 +55,22 @@ impl ProxyHttp for ServiceProxyHandler {
         let lb_map = self.lb_table.read().await;
 
         // Try exact match first
-        if let Some(lb) = lb_map.get(&host) {
-            if let Some(upstream) = lb.select(b"", 256) {
-                let peer = HttpPeer::new(upstream, false, String::new());
-                return Ok(Box::new(peer));
-            }
+        if let Some(lb) = lb_map.get(&host)
+            && let Some(upstream) = lb.select(b"", 256)
+        {
+            let peer = HttpPeer::new(upstream, false, String::new());
+            return Ok(Box::new(peer));
         }
 
         // Fallback: try without port matching (just plain host)
         let table = self.routing_table.read().await;
         for key in table.routes.keys() {
-            if key.starts_with(&host) {
-                if let Some(lb) = lb_map.get(key) {
-                    if let Some(upstream) = lb.select(b"", 256) {
-                        let peer = HttpPeer::new(upstream, false, String::new());
-                        return Ok(Box::new(peer));
-                    }
-                }
+            if key.starts_with(&host)
+                && let Some(lb) = lb_map.get(key)
+                && let Some(upstream) = lb.select(b"", 256)
+            {
+                let peer = HttpPeer::new(upstream, false, String::new());
+                return Ok(Box::new(peer));
             }
         }
 

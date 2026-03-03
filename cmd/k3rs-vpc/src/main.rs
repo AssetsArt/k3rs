@@ -163,10 +163,10 @@ async fn main() -> anyhow::Result<()> {
     enforcer
         .rebuild(&cached_vpcs, &stored_allocations, &cached_peerings)
         .await?;
-    if let Ok(snapshot) = enforcer.snapshot().await {
-        if let Err(e) = store.save_nft_snapshot(&snapshot).await {
-            tracing::warn!("Failed to save enforcer snapshot: {}", e);
-        }
+    if let Ok(snapshot) = enforcer.snapshot().await
+        && let Err(e) = store.save_nft_snapshot(&snapshot).await
+    {
+        tracing::warn!("Failed to save enforcer snapshot: {}", e);
     }
     let enforcer: Arc<Mutex<Box<dyn NetworkEnforcer>>> = Arc::new(Mutex::new(enforcer));
 

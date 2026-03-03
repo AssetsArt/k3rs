@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 /// Start the pod sync loop (every 5s).
+#[allow(clippy::too_many_arguments)]
 pub fn start(
     runtime: Option<Arc<ContainerRuntime>>,
     client: reqwest::Client,

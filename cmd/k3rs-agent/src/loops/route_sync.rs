@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 /// Start the route sync loop (every 10s).
+#[allow(clippy::too_many_arguments)]
 pub fn start(
     client: reqwest::Client,
     server: String,

@@ -258,12 +258,12 @@ fn cmd_stop(args: StopArgs) {
     match output {
         Ok(o) if o.status.success() => {
             let pid_str = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if let Some(first_pid) = pid_str.lines().next() {
-                if let Ok(pid) = first_pid.parse::<i32>() {
-                    unsafe { libc::kill(pid, libc::SIGTERM) };
-                    println!("state=stopped");
-                    return;
-                }
+            if let Some(first_pid) = pid_str.lines().next()
+                && let Ok(pid) = first_pid.parse::<i32>()
+            {
+                unsafe { libc::kill(pid, libc::SIGTERM) };
+                println!("state=stopped");
+                return;
             }
         }
         _ => {}

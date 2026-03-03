@@ -109,14 +109,14 @@ impl FcNetworkManager {
             .output()
             .await;
 
-        if let Ok(o) = check {
-            if o.status.success() {
-                info!(
-                    "[fc-net] NAT masquerade already configured via {}",
-                    default_iface
-                );
-                return Ok(());
-            }
+        if let Ok(o) = check
+            && o.status.success()
+        {
+            info!(
+                "[fc-net] NAT masquerade already configured via {}",
+                default_iface
+            );
+            return Ok(());
         }
 
         // Add masquerade rule

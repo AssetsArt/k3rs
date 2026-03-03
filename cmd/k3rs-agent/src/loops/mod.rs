@@ -15,6 +15,7 @@ pub mod reconnect;
 pub mod route_sync;
 
 /// Start all controller loops on a dedicated OS thread with its own multi-threaded runtime.
+#[allow(clippy::too_many_arguments)]
 pub fn start_controller_loops(
     server: String,
     token: String,

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 /// Start the reconnect loop — probes and re-registers with the server when not connected.
+#[allow(clippy::too_many_arguments)]
 pub fn start(
     client: reqwest::Client,
     server: String,

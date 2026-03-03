@@ -11,15 +11,15 @@ pub fn list() -> Result<()> {
 
     // Refresh liveness for installed entries
     for entry in reg.processes.values_mut() {
-        if let Some(pid) = entry.pid {
-            if !is_alive(pid) {
-                entry.status = if entry.status == ProcessStatus::Running {
-                    ProcessStatus::Crashed
-                } else {
-                    ProcessStatus::Stopped
-                };
-                entry.pid = None;
-            }
+        if let Some(pid) = entry.pid
+            && !is_alive(pid)
+        {
+            entry.status = if entry.status == ProcessStatus::Running {
+                ProcessStatus::Crashed
+            } else {
+                ProcessStatus::Stopped
+            };
+            entry.pid = None;
         }
     }
     registry::save(&reg)?;

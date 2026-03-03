@@ -71,7 +71,8 @@ impl VpcStore {
         self.db
             .put(KEY_META, serde_json::to_vec(meta)?)
             .await
-            .map_err(|e| anyhow::anyhow!("VpcStore put meta: {}", e))
+            .map_err(|e| anyhow::anyhow!("VpcStore put meta: {}", e))?;
+        Ok(())
     }
 
     pub async fn load_meta(&self) -> anyhow::Result<Option<VpcDaemonMeta>> {
@@ -165,7 +166,8 @@ impl VpcStore {
         self.db
             .put(key.as_bytes(), serde_json::to_vec(alloc)?)
             .await
-            .map_err(|e| anyhow::anyhow!("VpcStore save_allocation: {}", e))
+            .map_err(|e| anyhow::anyhow!("VpcStore save_allocation: {}", e))?;
+        Ok(())
     }
 
     pub async fn delete_allocation(&self, vpc_name: &str, pod_id: &str) -> anyhow::Result<()> {
@@ -173,7 +175,8 @@ impl VpcStore {
         self.db
             .delete(key.as_bytes())
             .await
-            .map_err(|e| anyhow::anyhow!("VpcStore delete_allocation: {}", e))
+            .map_err(|e| anyhow::anyhow!("VpcStore delete_allocation: {}", e))?;
+        Ok(())
     }
 
     pub async fn load_all_allocations(&self) -> anyhow::Result<Vec<StoredAllocation>> {
@@ -202,7 +205,8 @@ impl VpcStore {
         self.db
             .put(KEY_NFT_SNAPSHOT, snapshot.as_bytes().to_vec())
             .await
-            .map_err(|e| anyhow::anyhow!("VpcStore save_nft_snapshot: {}", e))
+            .map_err(|e| anyhow::anyhow!("VpcStore save_nft_snapshot: {}", e))?;
+        Ok(())
     }
 
     pub async fn load_nft_snapshot(&self) -> anyhow::Result<Option<String>> {

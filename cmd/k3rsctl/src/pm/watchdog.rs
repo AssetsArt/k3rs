@@ -181,8 +181,7 @@ pub fn spawn_watchdog(component: &ComponentName) -> Result<()> {
             .stdout(log_file.try_clone()?)
             .stderr(log_file)
             .pre_exec(|| {
-                nix::unistd::setsid()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                nix::unistd::setsid().map_err(std::io::Error::other)?;
                 Ok(())
             })
             .spawn()
@@ -195,17 +194,16 @@ pub fn spawn_watchdog(component: &ComponentName) -> Result<()> {
 /// Kill the watchdog sidecar for a component (if running).
 pub fn stop_watchdog(key: &str) {
     let watch_pid_path = registry::pids_dir().join(format!("{}-watch.pid", key));
-    if let Ok(content) = fs::read_to_string(&watch_pid_path) {
-        if let Ok(pid) = content.trim().parse::<u32>() {
-            if is_alive(pid) {
-                let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
-                let _ = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGTERM);
-                // Give it a moment to clean up
-                thread::sleep(Duration::from_millis(500));
-                if is_alive(pid) {
-                    let _ = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGKILL);
-                }
-            }
+    if let Ok(content) = fs::read_to_string(&watch_pid_path)
+        && let Ok(pid) = content.trim().parse::<u32>()
+        && is_alive(pid)
+    {
+        let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
+        let _ = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGTERM);
+        // Give it a moment to clean up
+        thread::sleep(Duration::from_millis(500));
+        if is_alive(pid) {
+            let _ = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGKILL);
         }
     }
     let _ = fs::remove_file(&watch_pid_path);

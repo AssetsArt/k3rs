@@ -173,10 +173,10 @@ impl ContainerRuntime {
     /// The name of the backend used for a specific container.
     /// Falls back to the default backend name if the container is not tracked.
     pub fn backend_name_for(&self, container_id: &str) -> &str {
-        if let Some(entry) = self.store.get(container_id) {
-            if entry.runtime_name == "vm" {
-                return "vm";
-            }
+        if let Some(entry) = self.store.get(container_id)
+            && entry.runtime_name == "vm"
+        {
+            return "vm";
         }
         self.backend.name()
     }
@@ -428,10 +428,10 @@ impl ContainerRuntime {
         // Discover from VM backend (Firecracker/Virtualization.framework)
         // if it was previously initialized. The FC backend's list() calls
         // restore_from_pid_files() which recovers VMs that survived agent restart.
-        if let Ok(vm) = self.get_or_init_vm_backend().await {
-            if !Arc::ptr_eq(&self.backend, &vm) {
-                self.discover_from_backend(&vm, &mut discovered).await;
-            }
+        if let Ok(vm) = self.get_or_init_vm_backend().await
+            && !Arc::ptr_eq(&self.backend, &vm)
+        {
+            self.discover_from_backend(&vm, &mut discovered).await;
         }
 
         info!("Discovered {} running/created containers", discovered.len());

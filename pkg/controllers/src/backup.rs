@@ -163,12 +163,11 @@ impl BackupController {
 
         while let Ok(Some(entry)) = dir.next_entry().await {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with(".k3rs-backup.json.gz") {
-                if let Ok(meta) = entry.metadata().await {
-                    if let Ok(mtime) = meta.modified() {
-                        files.push((entry.path().to_string_lossy().to_string(), mtime));
-                    }
-                }
+            if name.ends_with(".k3rs-backup.json.gz")
+                && let Ok(meta) = entry.metadata().await
+                && let Ok(mtime) = meta.modified()
+            {
+                files.push((entry.path().to_string_lossy().to_string(), mtime));
             }
         }
 

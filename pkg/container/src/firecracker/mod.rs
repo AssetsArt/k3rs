@@ -1035,17 +1035,17 @@ impl RuntimeBackend for FirecrackerBackend {
 
         // PID file check (post-restart recovery)
         let pid_file = self.pid_file_path(id);
-        if let Ok(content) = tokio::fs::read_to_string(&pid_file).await {
-            if let Ok(pid) = content.trim().parse::<u32>() {
-                let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
-                if alive {
-                    return Ok(ContainerStateInfo {
-                        id: id.to_string(),
-                        status: "running".to_string(),
-                        pid,
-                        bundle: self.rootfs_dir(id).to_string_lossy().to_string(),
-                    });
-                }
+        if let Ok(content) = tokio::fs::read_to_string(&pid_file).await
+            && let Ok(pid) = content.trim().parse::<u32>()
+        {
+            let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+            if alive {
+                return Ok(ContainerStateInfo {
+                    id: id.to_string(),
+                    status: "running".to_string(),
+                    pid,
+                    bundle: self.rootfs_dir(id).to_string_lossy().to_string(),
+                });
             }
         }
 

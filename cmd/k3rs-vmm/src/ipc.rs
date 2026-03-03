@@ -64,7 +64,7 @@ pub fn socket_path(id: &str) -> String {
 /// Two handler closures are accepted:
 /// - `exec_handler`:   called for regular one-shot commands; returns output string.
 /// - `stream_handler`: called for streaming/tty commands; receives the open
-///                     `UnixStream` and is responsible for bidirectional relay.
+///   `UnixStream` and is responsible for bidirectional relay.
 pub fn start_listener(
     id: &str,
     exec_handler: impl Fn(&[String]) -> String + Send + Sync + 'static,

@@ -288,7 +288,7 @@ impl GhostAllocator {
     /// Return all allocations for a given VPC by vpc_id.
     /// Returns Vec<(pod_id, guest_ipv4, ghost_ipv6)>.
     pub fn get_routes(&self, vpc_id: u16) -> Vec<(String, String, String)> {
-        for (_vpc_name, pool) in &self.pools {
+        for pool in self.pools.values() {
             if pool.vpc_id == vpc_id {
                 return pool
                     .allocations

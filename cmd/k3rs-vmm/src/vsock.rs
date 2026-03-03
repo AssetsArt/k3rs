@@ -240,7 +240,7 @@ fn connect_vsock(vm: &Arc<MainThreadBound<Retained<VZVirtualMachine>>>) -> Resul
         );
 
         unsafe {
-            vsock_device.connectToPort_completionHandler(VSOCK_EXEC_PORT, &*block);
+            vsock_device.connectToPort_completionHandler(VSOCK_EXEC_PORT, &block);
         }
     });
 

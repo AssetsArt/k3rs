@@ -18,15 +18,15 @@ pub fn status() -> Result<()> {
 
     // Refresh liveness
     for entry in reg.processes.values_mut() {
-        if let Some(pid) = entry.pid {
-            if !is_alive(pid) {
-                entry.status = if entry.status == ProcessStatus::Running {
-                    ProcessStatus::Crashed
-                } else {
-                    ProcessStatus::Stopped
-                };
-                entry.pid = None;
-            }
+        if let Some(pid) = entry.pid
+            && !is_alive(pid)
+        {
+            entry.status = if entry.status == ProcessStatus::Running {
+                ProcessStatus::Crashed
+            } else {
+                ProcessStatus::Stopped
+            };
+            entry.pid = None;
         }
     }
     registry::save(&reg)?;
@@ -58,29 +58,26 @@ pub fn status() -> Result<()> {
         }
 
         // Show port/server from config if available
-        if let Some(config_path) = &entry.config_path {
-            if config_path.exists() {
-                if let Ok(content) = fs::read_to_string(config_path) {
-                    for line in content.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.starts_with("port:") {
-                            println!(
-                                "  Port:      {}",
-                                trimmed.trim_start_matches("port:").trim()
-                            );
-                        } else if trimmed.starts_with("server:")
-                            || trimmed.starts_with("server-url:")
-                        {
-                            // server: http://... has two colons, take everything after first ':'
-                            let full_val = trimmed.splitn(2, ':').nth(1).unwrap_or("").trim();
-                            println!("  Server:    {}", full_val);
-                        } else if trimmed.starts_with("data-dir:") {
-                            println!(
-                                "  Data Dir:  {}",
-                                trimmed.trim_start_matches("data-dir:").trim()
-                            );
-                        }
-                    }
+        if let Some(config_path) = &entry.config_path
+            && config_path.exists()
+            && let Ok(content) = fs::read_to_string(config_path)
+        {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("port:") {
+                    println!(
+                        "  Port:      {}",
+                        trimmed.trim_start_matches("port:").trim()
+                    );
+                } else if trimmed.starts_with("server:") || trimmed.starts_with("server-url:") {
+                    // server: http://... has two colons, take everything after first ':'
+                    let full_val = trimmed.split_once(':').map(|x| x.1).unwrap_or("").trim();
+                    println!("  Server:    {}", full_val);
+                } else if trimmed.starts_with("data-dir:") {
+                    println!(
+                        "  Data Dir:  {}",
+                        trimmed.trim_start_matches("data-dir:").trim()
+                    );
                 }
             }
         }

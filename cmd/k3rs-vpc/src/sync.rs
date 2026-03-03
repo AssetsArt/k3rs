@@ -123,10 +123,10 @@ pub fn start_sync_loop(
 
                 // Remove rules for VPCs that no longer exist
                 for vpc_id in prev_vpc_ids.keys() {
-                    if !current_vpc_ids.contains_key(vpc_id) {
-                        if let Err(e) = enf.remove_vpc(*vpc_id).await {
-                            warn!("VPC sync: failed to remove VPC vpc_id={}: {}", vpc_id, e);
-                        }
+                    if !current_vpc_ids.contains_key(vpc_id)
+                        && let Err(e) = enf.remove_vpc(*vpc_id).await
+                    {
+                        warn!("VPC sync: failed to remove VPC vpc_id={}: {}", vpc_id, e);
                     }
                 }
 
@@ -141,13 +141,13 @@ pub fn start_sync_loop(
 
                 // Remove rules for peerings that disappeared or became inactive
                 for name in &prev_peering_names {
-                    if !current_peering_names.contains(name) {
-                        if let Err(e) = enf.remove_peering_rules(name).await {
-                            warn!(
-                                "VPC sync: failed to remove peering rules for '{}': {}",
-                                name, e
-                            );
-                        }
+                    if !current_peering_names.contains(name)
+                        && let Err(e) = enf.remove_peering_rules(name).await
+                    {
+                        warn!(
+                            "VPC sync: failed to remove peering rules for '{}': {}",
+                            name, e
+                        );
                     }
                 }
 
