@@ -2,6 +2,7 @@ pub mod apply;
 pub mod backup;
 pub mod cluster;
 pub mod delete;
+pub mod describe;
 pub mod exec;
 pub mod get;
 pub mod logs;
@@ -21,6 +22,11 @@ pub async fn dispatch(cli: &Cli, client: &reqwest::Client) -> anyhow::Result<()>
             resource,
             namespace,
         } => get::handle(client, base, resource, namespace).await,
+        Commands::Describe {
+            resource,
+            name,
+            namespace,
+        } => describe::handle(client, base, resource, name, namespace).await,
         Commands::Apply { file, namespace } => apply::handle(client, base, file, namespace).await,
         Commands::Delete {
             resource,

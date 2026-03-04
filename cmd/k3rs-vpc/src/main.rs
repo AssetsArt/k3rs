@@ -62,6 +62,10 @@ struct Cli {
     /// Physical network interface for NAT64 (auto-detected from default route if not set)
     #[arg(long)]
     phys_iface: Option<String>,
+
+    /// Clean up all eBPF state (pinned maps, programs) and exit. Use for uninstall.
+    #[arg(long, default_value_t = false)]
+    cleanup: bool,
 }
 
 /// Auto-detect the default route interface and gateway IPv4 by parsing `ip route show default`.
@@ -204,6 +208,15 @@ async fn main() -> anyhow::Result<()> {
     // 7. Initialize network enforcer and rebuild rules from stored state
     let mut enforcer = select_enforcer(platform_prefix, cluster_id);
     enforcer.init().await?;
+
+    // If --cleanup was requested, tear down all enforcement state and exit
+    if cli.cleanup {
+        info!("--cleanup requested: tearing down all eBPF state");
+        enforcer.cleanup().await?;
+        info!("Cleanup complete. Exiting.");
+        return Ok(());
+    }
+
     enforcer
         .rebuild(&cached_vpcs, &stored_allocations, &cached_peerings)
         .await?;

@@ -3492,9 +3492,9 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 - [x] Peering support (bidirectional + initiator-only)
 - [x] `AttachTap`/`DetachTap` protocol + `tap_guard` anti-spoofing for VM TAPs
 - [x] `StoredAllocation.interface_type` for OCI/VM dispatch in `rebuild()`
-- [ ] Crash recovery: re-open pinned BPF maps, reconcile with VpcStore
+- [x] Crash recovery: re-open pinned BPF maps, reconcile with VpcStore
 - [x] Automatic NAT64 install at startup (detect node IPv4 + physical interface)
-- [ ] Graceful shutdown: unpin programs/maps or leave pinned for zero-downtime restart
+- [x] Graceful shutdown: unpin programs/maps or leave pinned for zero-downtime restart
 
 #### Agent — Pod Lifecycle
 
@@ -3526,8 +3526,8 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 - [x] Cluster info, node list, pod/deployment/service CRUD
 - [x] Apply, logs, exec
 - [x] Process manager (`k3rsctl pm`)
-- [ ] `k3rsctl get vpcs` / `k3rsctl get vpc-peerings`
-- [ ] `k3rsctl describe pod` — show Ghost IPv6, VPC name, VPC ID
+- [x] `k3rsctl get vpcs` / `k3rsctl get vpc-peerings`
+- [x] `k3rsctl describe pod` — show Ghost IPv6, VPC name, VPC ID
 
 #### UI (`k3rs-ui`)
 

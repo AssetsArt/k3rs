@@ -8,6 +8,7 @@ use pkg_types::pod::Pod;
 use pkg_types::replicaset::ReplicaSet;
 use pkg_types::secret::Secret;
 use pkg_types::service::Service;
+use pkg_types::vpc::{Vpc, VpcPeering};
 
 pub async fn handle(
     client: &reqwest::Client,
@@ -226,9 +227,54 @@ pub async fn handle(
                 );
             }
         }
+        "vpcs" | "vpc" => {
+            let url = format!("{}/api/v1/vpcs", base);
+            let resp = client.get(&url).send().await?;
+            let vpcs: Vec<Vpc> = resp.json().await?;
+            println!(
+                "{:<6} {:<20} {:<12} {:<18} CREATED",
+                "VPC-ID", "NAME", "STATUS", "CIDR"
+            );
+            for vpc in &vpcs {
+                println!(
+                    "{:<6} {:<20} {:<12} {:<18} {}",
+                    vpc.vpc_id,
+                    vpc.name,
+                    vpc.status,
+                    vpc.ipv4_cidr,
+                    vpc.created_at.format("%Y-%m-%d %H:%M:%S")
+                );
+            }
+            if vpcs.is_empty() {
+                println!("No VPCs found");
+            }
+        }
+        "vpc-peerings" | "vpc-peering" | "peerings" | "peering" => {
+            let url = format!("{}/api/v1/vpc-peerings", base);
+            let resp = client.get(&url).send().await?;
+            let peerings: Vec<VpcPeering> = resp.json().await?;
+            println!(
+                "{:<20} {:<16} {:<16} {:<15} {:<10} CREATED",
+                "NAME", "VPC-A", "VPC-B", "DIRECTION", "STATUS"
+            );
+            for p in &peerings {
+                println!(
+                    "{:<20} {:<16} {:<16} {:<15} {:<10} {}",
+                    p.name,
+                    p.vpc_a,
+                    p.vpc_b,
+                    p.direction,
+                    p.status,
+                    p.created_at.format("%Y-%m-%d %H:%M:%S")
+                );
+            }
+            if peerings.is_empty() {
+                println!("No VPC peerings found");
+            }
+        }
         other => {
             eprintln!(
-                "Unknown resource type: {}. Supported: pods, services, deployments, replicasets, daemonsets, jobs, cronjobs, hpa, configmaps, secrets, namespaces",
+                "Unknown resource type: {}. Supported: pods, services, deployments, replicasets, daemonsets, jobs, cronjobs, hpa, configmaps, secrets, namespaces, vpcs, vpc-peerings",
                 other
             );
             std::process::exit(1);

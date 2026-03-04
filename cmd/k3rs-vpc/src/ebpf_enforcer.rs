@@ -126,7 +126,51 @@ impl NetworkEnforcer for EbpfEnforcer {
         std::fs::create_dir_all(BPFFS_PIN_DIR)
             .with_context(|| format!("failed to create {}", BPFFS_PIN_DIR))?;
 
-        info!("ebpf: initialized, pin dir={}", BPFFS_PIN_DIR);
+        // Detect crash recovery: if pinned maps already exist, aya reuses them
+        // automatically via map_pin_path(). Pre-populate in-memory state from
+        // the pinned VPC_CIDRS and PEERINGS maps so rebuild() can diff correctly.
+        let has_pinned_maps = Path::new(BPFFS_PIN_DIR).join("VPC_CIDRS").exists();
+        if has_pinned_maps {
+            info!(
+                "ebpf: detected existing pinned maps at {} — recovering state from previous run",
+                BPFFS_PIN_DIR
+            );
+
+            // Recover active_vpcs from pinned VPC_CIDRS map
+            if let Ok(map) = BpfHashMap::<&aya::maps::MapData, VpcCidrKey, VpcCidrValue>::try_from(
+                self.bpf.map("VPC_CIDRS").unwrap(),
+            ) {
+                for item in map.iter() {
+                    if let Ok((k, _)) = item {
+                        self.active_vpcs.insert(k.vpc_id);
+                    }
+                }
+                info!(
+                    "ebpf: recovered {} VPC entries from pinned maps",
+                    self.active_vpcs.len()
+                );
+            }
+
+            // Recover peering_to_keys from pinned PEERINGS map (stored as synthetic keys)
+            if let Ok(map) = BpfHashMap::<&aya::maps::MapData, PeeringKey, PeeringValue>::try_from(
+                self.bpf.map("PEERINGS").unwrap(),
+            ) {
+                let mut count = 0u32;
+                for item in map.iter() {
+                    if let Ok((k, _)) = item {
+                        // We don't know the peering name from the map alone; rebuild() will
+                        // re-populate peering_to_keys with proper names from VpcStore data.
+                        // Just count for logging here.
+                        count += 1;
+                        let _ = k;
+                    }
+                }
+                info!("ebpf: found {} peering entries in pinned maps", count);
+            }
+        } else {
+            info!("ebpf: fresh start, pin dir={}", BPFFS_PIN_DIR);
+        }
+
         Ok(())
     }
 

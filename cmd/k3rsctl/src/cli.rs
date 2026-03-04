@@ -35,6 +35,16 @@ pub enum Commands {
         #[arg(short, long, default_value = "default")]
         namespace: String,
     },
+    /// Describe a resource in detail
+    Describe {
+        /// Resource type (pod)
+        resource: String,
+        /// Resource name
+        name: String,
+        /// Namespace (default: "default")
+        #[arg(short, long, default_value = "default")]
+        namespace: String,
+    },
     /// Apply a manifest file
     Apply {
         /// Path to YAML/JSON manifest
