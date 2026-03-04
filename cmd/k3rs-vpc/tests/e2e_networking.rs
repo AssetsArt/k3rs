@@ -10,8 +10,6 @@
 //! Run with:
 //!   cargo test -p k3rs-vpc --test e2e_networking -- --ignored --test-threads=1
 
-use pkg_types::vpc::{Vpc, VpcPeering, VpcStatus};
-
 const API_BASE: &str = "http://localhost:8080";
 const API_TOKEN: &str = "k3rs";
 
@@ -146,7 +144,6 @@ async fn e2e_pod_to_pod_same_node_ghost_ipv6() {
 #[ignore = "requires running k3rs cluster with eBPF"]
 async fn e2e_pod_to_pod_overlapping_cidrs_different_vpcs() {
     let client = api_client();
-    let ns = "default";
 
     // Create two VPCs with overlapping CIDRs — this should fail (409)
     let vpc_req = serde_json::json!({
