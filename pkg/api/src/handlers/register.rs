@@ -58,6 +58,17 @@ pub async fn register_node(
 
     let agent_api_port = 10250; // Default kubelet-like port
 
+    // Compute WireGuard endpoint from node address + listen port
+    let wg_endpoint = payload.wg_listen_port.map(|port| {
+        // Extract just the IP/host from the node address (strip any existing port)
+        let host = payload
+            .address
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(&payload.address);
+        format!("{}:{}", host, port)
+    });
+
     let node = if let Some(mut existing) = existing_node {
         info!("Updating existing node: {}", payload.node_name);
         existing.status = NodeStatus::Ready;
@@ -65,6 +76,8 @@ pub async fn register_node(
         existing.address = payload.address.clone();
         existing.agent_api_port = agent_api_port;
         existing.labels.extend(payload.labels.clone());
+        existing.wg_public_key = payload.wg_public_key.clone();
+        existing.wg_endpoint = wg_endpoint;
         existing
     } else {
         Node {
@@ -80,6 +93,8 @@ pub async fn register_node(
             capacity: payload.capacity.unwrap_or_default(),
             allocated: ResourceRequirements::default(),
             unschedulable: false,
+            wg_public_key: payload.wg_public_key.clone(),
+            wg_endpoint,
         }
     };
 

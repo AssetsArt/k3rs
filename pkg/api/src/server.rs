@@ -430,6 +430,8 @@ async fn seed_master_node(store: &StateStore, name: &str) -> anyhow::Result<()> 
             capacity: pkg_types::pod::ResourceRequirements::default(),
             allocated: pkg_types::pod::ResourceRequirements::default(),
             unschedulable: false,
+            wg_public_key: None,
+            wg_endpoint: None,
         };
         let data = serde_json::to_vec(&node)?;
         store.put(&key, &data).await?;

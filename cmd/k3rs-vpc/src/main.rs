@@ -1,6 +1,7 @@
 mod allocator;
 mod socket;
 mod sync;
+mod wireguard;
 
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
 mod ebpf_enforcer;
@@ -45,6 +46,14 @@ struct Cli {
     /// Log format: 'text' or 'json'
     #[arg(long, default_value = "text")]
     log_format: String,
+
+    /// WireGuard listen port
+    #[arg(long)]
+    wg_listen_port: Option<u16>,
+
+    /// Path to store WireGuard keys
+    #[arg(long)]
+    wg_key_path: Option<String>,
 }
 
 /// Select the best available network enforcement backend.
@@ -165,21 +174,54 @@ async fn main() -> anyhow::Result<()> {
     }
     let enforcer: Arc<Mutex<Box<dyn NetworkEnforcer>>> = Arc::new(Mutex::new(enforcer));
 
-    // 8. Start Unix socket listener
-    let socket_handle =
-        socket::start_listener(&socket_path, Arc::clone(&allocator), Arc::clone(&enforcer));
+    // 8. Initialize WireGuard mesh manager (Linux only, non-fatal on failure)
+    let wg_listen_port = cli
+        .wg_listen_port
+        .or(file_cfg.wg_listen_port)
+        .unwrap_or(pkg_network::wireguard::WG_DEFAULT_PORT);
+    let wg_key_path = cli
+        .wg_key_path
+        .or(file_cfg.wg_key_path)
+        .unwrap_or_else(|| pkg_network::wireguard::WG_DEFAULT_KEY_PATH.to_string());
 
-    // 9. Start VPC sync loop (every 10s)
+    let wg_manager = match wireguard::WireGuardManager::init(wg_listen_port, &wg_key_path).await {
+        Ok(mgr) => {
+            info!(
+                "WireGuard mesh initialized (pubkey: {}..., port: {})",
+                &mgr.public_key()[..8.min(mgr.public_key().len())],
+                mgr.listen_port()
+            );
+            Some(Arc::new(mgr))
+        }
+        Err(e) => {
+            tracing::warn!(
+                "WireGuard mesh not available ({}), cross-node traffic disabled",
+                e
+            );
+            None
+        }
+    };
+
+    // 9. Start Unix socket listener
+    let socket_handle = socket::start_listener(
+        &socket_path,
+        Arc::clone(&allocator),
+        Arc::clone(&enforcer),
+        wg_manager.clone(),
+    );
+
+    // 10. Start VPC sync loop (every 10s)
     let sync_handle = sync::start_sync_loop(
         server_url,
         token,
         Arc::clone(&store),
         Arc::clone(&allocator),
         Arc::clone(&enforcer),
+        wg_manager.clone(),
         10,
     );
 
-    // 10. Graceful shutdown on Ctrl+C
+    // 11. Graceful shutdown on Ctrl+C
     info!("k3rs-vpc daemon running. Press Ctrl+C to stop.");
     tokio::signal::ctrl_c().await?;
     info!("Shutting down k3rs-vpc daemon...");

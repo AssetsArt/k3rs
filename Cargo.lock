@@ -3880,6 +3880,7 @@ dependencies = [
  "k3rs-vpc-common",
  "libc",
  "pkg-constants",
+ "pkg-network",
  "pkg-types",
  "pkg-vpc",
  "reqwest 0.13.2",

@@ -347,28 +347,28 @@ async fn run_pod_lifecycle(
 
     // 2b. Pod network setup (netkit pair + Ghost IPv6) — skip for VM backends
     #[cfg(target_os = "linux")]
-    if runtime.backend_name_for(&pod.id) != "vm" {
-        if let Some((ref guest_ipv4, ref ghost_ipv6, _)) = vpc_alloc {
-            if let Some(pid) = runtime.container_pid(&pod.id) {
-                let net_config = pkg_network::netns::PodNetworkConfig {
-                    pod_id: pod.id.clone(),
-                    ghost_ipv6: ghost_ipv6.clone(),
-                    guest_ipv4: guest_ipv4.clone(),
-                    container_pid: pid,
-                    bridge_name: "k3rs0".to_string(),
-                };
-                if let Err(e) = pkg_network::netns::setup_pod_network(&net_config).await {
-                    warn!(
-                        "[pod:{}] Pod network setup failed: {} (continuing without network)",
-                        pod.name, e
-                    );
-                }
-            } else {
+    if runtime.backend_name_for(&pod.id) != "vm"
+        && let Some((ref guest_ipv4, ref ghost_ipv6, _)) = vpc_alloc
+    {
+        if let Some(pid) = runtime.container_pid(&pod.id) {
+            let net_config = pkg_network::netns::PodNetworkConfig {
+                pod_id: pod.id.clone(),
+                ghost_ipv6: ghost_ipv6.clone(),
+                guest_ipv4: guest_ipv4.clone(),
+                container_pid: pid,
+                bridge_name: "k3rs0".to_string(),
+            };
+            if let Err(e) = pkg_network::netns::setup_pod_network(&net_config).await {
                 warn!(
-                    "[pod:{}] Container PID not available, skipping network setup",
-                    pod.name
+                    "[pod:{}] Pod network setup failed: {} (continuing without network)",
+                    pod.name, e
                 );
             }
+        } else {
+            warn!(
+                "[pod:{}] Container PID not available, skipping network setup",
+                pod.name
+            );
         }
     }
 

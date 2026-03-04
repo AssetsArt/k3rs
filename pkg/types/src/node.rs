@@ -16,6 +16,12 @@ pub struct NodeRegistrationRequest {
     pub labels: HashMap<String, String>,
     #[serde(default)]
     pub capacity: Option<ResourceRequirements>,
+    /// WireGuard public key for cross-node mesh.
+    #[serde(default)]
+    pub wg_public_key: Option<String>,
+    /// WireGuard listen port on this node.
+    #[serde(default)]
+    pub wg_listen_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +86,12 @@ pub struct Node {
     /// If true, the scheduler will not place new pods on this node.
     #[serde(default)]
     pub unschedulable: bool,
+    /// WireGuard public key for cross-node mesh.
+    #[serde(default)]
+    pub wg_public_key: Option<String>,
+    /// WireGuard endpoint ("host:port") for cross-node mesh.
+    #[serde(default)]
+    pub wg_endpoint: Option<String>,
 }
 
 // --- Cluster info ---

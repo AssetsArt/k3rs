@@ -48,6 +48,7 @@ enum VpcRequest {
     },
     ListVpcs,
     Ping,
+    GetWgPublicKey,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -84,6 +85,10 @@ pub enum VpcResponse {
         vpcs: Vec<VpcInfo>,
     },
     Pong,
+    WgPublicKey {
+        public_key: Option<String>,
+        listen_port: Option<u16>,
+    },
     Ok,
     Error {
         code: String,
@@ -290,6 +295,26 @@ impl VpcClient {
             )),
             Ok(other) => Err(anyhow::anyhow!(
                 "Unexpected VPC response to DetachTap: {:?}",
+                other
+            )),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get the WireGuard public key and listen port from the VPC daemon.
+    pub async fn get_wg_public_key(&self) -> anyhow::Result<(Option<String>, Option<u16>)> {
+        match self.request(&VpcRequest::GetWgPublicKey).await {
+            Ok(VpcResponse::WgPublicKey {
+                public_key,
+                listen_port,
+            }) => Ok((public_key, listen_port)),
+            Ok(VpcResponse::Error { code, message }) => Err(anyhow::anyhow!(
+                "VPC get_wg_public_key error [{}]: {}",
+                code,
+                message
+            )),
+            Ok(other) => Err(anyhow::anyhow!(
+                "Unexpected VPC response to GetWgPublicKey: {:?}",
                 other
             )),
             Err(e) => Err(e),

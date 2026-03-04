@@ -192,12 +192,31 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Query WireGuard public key from VPC daemon (best-effort)
+    let (wg_public_key, wg_listen_port) = match vpc_client.get_wg_public_key().await {
+        Ok((pk, port)) => {
+            if let Some(ref key) = pk {
+                info!(
+                    "WireGuard public key from VPC daemon: {}...",
+                    &key[..8.min(key.len())]
+                );
+            }
+            (pk, port)
+        }
+        Err(e) => {
+            warn!("Could not get WireGuard key from VPC daemon: {}", e);
+            (None, None)
+        }
+    };
+
     let reg_req = NodeRegistrationRequest {
         token: token.clone(),
         node_name: node_name.clone(),
         address: "127.0.0.1".to_string(),
         labels: HashMap::new(),
         capacity: Some(capacity),
+        wg_public_key,
+        wg_listen_port,
     };
 
     info!("Connecting to server at {}", server);

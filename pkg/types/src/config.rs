@@ -45,6 +45,12 @@ pub struct AgentConfigFile {
     pub service_proxy_port: Option<u16>,
     #[serde(default, alias = "dns-port")]
     pub dns_port: Option<u16>,
+    /// WireGuard listen port (default: 51820).
+    #[serde(default, alias = "wg-listen-port")]
+    pub wg_listen_port: Option<u16>,
+    /// Path to store WireGuard keys (default: /var/lib/k3rs/wireguard/).
+    #[serde(default, alias = "wg-key-path")]
+    pub wg_key_path: Option<String>,
 }
 
 /// VPC daemon configuration file (YAML).
@@ -69,6 +75,12 @@ pub struct VpcConfigFile {
     pub socket: Option<String>,
     #[serde(default, alias = "log-format")]
     pub log_format: Option<String>,
+    /// WireGuard listen port (default: 51820).
+    #[serde(default, alias = "wg-listen-port")]
+    pub wg_listen_port: Option<u16>,
+    /// Path to store WireGuard keys (default: /var/lib/k3rs/wireguard/).
+    #[serde(default, alias = "wg-key-path")]
+    pub wg_key_path: Option<String>,
 }
 
 /// Load a YAML config file, returning the default if the file doesn't exist.

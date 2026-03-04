@@ -27,6 +27,7 @@ async-trait = { workspace = true }
 pkg-types = { path = "../../pkg/types" }
 pkg-constants = { path = "../../pkg/constants" }
 pkg-vpc = { path = "../../pkg/vpc" }
+pkg-network = { path = "../../pkg/network" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aya = { workspace = true }

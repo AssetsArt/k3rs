@@ -9,8 +9,10 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::allocator::GhostAllocator;
+use crate::wireguard::WireGuardManager;
 use k3rs_vpc::enforcer::NetworkEnforcer;
 use k3rs_vpc::store::{VpcDaemonMeta, VpcStore};
+use pkg_types::node::Node;
 use pkg_types::vpc::{PeeringStatus, Vpc, VpcPeering};
 use pkg_vpc::constants::PLATFORM_PREFIX;
 
@@ -21,6 +23,7 @@ pub fn start_sync_loop(
     store: Arc<VpcStore>,
     allocator: Arc<Mutex<GhostAllocator>>,
     enforcer: Arc<Mutex<Box<dyn NetworkEnforcer>>>,
+    wg_manager: Option<Arc<WireGuardManager>>,
     interval_secs: u64,
 ) -> JoinHandle<()> {
     let client = reqwest::Client::new();
@@ -171,6 +174,35 @@ pub fn start_sync_loop(
                 }
 
                 prev_peering_names = current_peering_names;
+            }
+
+            // Sync WireGuard mesh peers from node list
+            if let Some(ref wg_mgr) = wg_manager {
+                match client
+                    .get(format!("{}/api/v1/nodes", base))
+                    .header("Authorization", format!("Bearer {}", token))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        match resp.json::<Vec<Node>>().await {
+                            Ok(nodes) => {
+                                if let Err(e) = wg_mgr.sync_peers(&nodes).await {
+                                    warn!("VPC sync: WireGuard peer sync failed: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("VPC sync: failed to parse nodes response: {}", e);
+                            }
+                        }
+                    }
+                    Ok(resp) => {
+                        warn!("VPC sync: nodes endpoint returned {}", resp.status());
+                    }
+                    Err(e) => {
+                        warn!("VPC sync: failed to fetch nodes: {}", e);
+                    }
+                }
             }
 
             // Update meta

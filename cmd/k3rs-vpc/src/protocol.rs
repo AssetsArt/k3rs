@@ -52,6 +52,8 @@ pub enum VpcRequest {
     },
     ListVpcs,
     Ping,
+    /// Get the WireGuard public key for this node's mesh interface.
+    GetWgPublicKey,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -79,6 +81,11 @@ pub enum VpcResponse {
         vpcs: Vec<VpcInfo>,
     },
     Pong,
+    /// WireGuard public key for this node.
+    WgPublicKey {
+        public_key: Option<String>,
+        listen_port: Option<u16>,
+    },
     /// Acknowledgement for AttachNetkit / DetachNetkit.
     Ok,
     Error {

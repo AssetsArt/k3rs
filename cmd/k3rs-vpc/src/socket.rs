@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::allocator::GhostAllocator;
+use crate::wireguard::WireGuardManager;
 use k3rs_vpc::enforcer::NetworkEnforcer;
 use k3rs_vpc::protocol::{VpcInfo, VpcRequest, VpcResponse};
 
@@ -17,6 +18,7 @@ pub fn start_listener(
     socket_path: &str,
     allocator: Arc<Mutex<GhostAllocator>>,
     enforcer: Arc<Mutex<Box<dyn NetworkEnforcer>>>,
+    wg_manager: Option<Arc<WireGuardManager>>,
 ) -> JoinHandle<()> {
     // Remove stale socket file if it exists
     let _ = std::fs::remove_file(socket_path);
@@ -35,8 +37,11 @@ pub fn start_listener(
                 Ok((stream, _addr)) => {
                     let allocator = Arc::clone(&allocator);
                     let enforcer = Arc::clone(&enforcer);
+                    let wg_manager = wg_manager.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, allocator, enforcer).await {
+                        if let Err(e) =
+                            handle_connection(stream, allocator, enforcer, wg_manager).await
+                        {
                             warn!("VPC socket connection error: {}", e);
                         }
                     });
@@ -53,6 +58,7 @@ async fn handle_connection(
     stream: tokio::net::UnixStream,
     allocator: Arc<Mutex<GhostAllocator>>,
     enforcer: Arc<Mutex<Box<dyn NetworkEnforcer>>>,
+    wg_manager: Option<Arc<WireGuardManager>>,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -64,7 +70,7 @@ async fn handle_connection(
         }
 
         let response = match serde_json::from_str::<VpcRequest>(&line) {
-            Ok(req) => dispatch(req, &allocator, &enforcer).await,
+            Ok(req) => dispatch(req, &allocator, &enforcer, &wg_manager).await,
             Err(e) => VpcResponse::Error {
                 code: "parse_error".to_string(),
                 message: format!("Invalid request: {}", e),
@@ -83,6 +89,7 @@ async fn dispatch(
     req: VpcRequest,
     allocator: &Arc<Mutex<GhostAllocator>>,
     enforcer: &Arc<Mutex<Box<dyn NetworkEnforcer>>>,
+    wg_manager: &Option<Arc<WireGuardManager>>,
 ) -> VpcResponse {
     match req {
         VpcRequest::Ping => VpcResponse::Pong,
@@ -223,6 +230,19 @@ async fn dispatch(
                     code: "detach_tap_error".to_string(),
                     message: format!("Failed to detach TC from TAP {}: {}", tap_name, e),
                 },
+            }
+        }
+        VpcRequest::GetWgPublicKey => {
+            if let Some(mgr) = wg_manager {
+                VpcResponse::WgPublicKey {
+                    public_key: Some(mgr.public_key().to_string()),
+                    listen_port: Some(mgr.listen_port()),
+                }
+            } else {
+                VpcResponse::WgPublicKey {
+                    public_key: None,
+                    listen_port: None,
+                }
             }
         }
         VpcRequest::CheckReachability { src_vpc, dst_vpc } => {
