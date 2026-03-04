@@ -6,7 +6,6 @@ pub mod logs;
 pub mod registry;
 pub mod startup;
 pub mod status;
-pub mod tui;
 pub mod types;
 pub mod watchdog;
 

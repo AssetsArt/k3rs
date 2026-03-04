@@ -1,19 +1,18 @@
-//! `pm dev` — run k3rs components in dev mode with ratatui TUI dashboard.
+//! `pm dev` — run k3rs components in dev mode.
 //!
 //! - Server/Agent/Vpc: `cargo watch -x "run --bin <bin> -- <args>"`
 //! - UI: `dx serve --package k3rs-ui`
 //!
-//! Press `q` or Ctrl+C to stop everything.
+//! Press Ctrl+C to stop everything.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
 
-use super::tui::{App, ComponentInfo, ComponentStatus, LogBuffer};
 use super::types::ComponentName;
 
 // ── Dev config ──────────────────────────────────────────────────
@@ -24,7 +23,9 @@ struct DevConfig {
     args: Vec<String>,
     watch_dirs: Vec<&'static str>,
     env: HashMap<String, String>,
+    #[allow(dead_code)]
     url: &'static str,
+    #[allow(dead_code)]
     color_idx: usize,
     ports: Vec<u16>,
 }
@@ -148,13 +149,7 @@ fn kill_ports(configs: &[DevConfig]) {
 
 // ── Process spawning ────────────────────────────────────────────
 
-fn spawn_component(
-    config: &DevConfig,
-    running: Arc<AtomicBool>,
-    buffer: LogBuffer,
-    components: Arc<Mutex<Vec<ComponentInfo>>>,
-    comp_idx: usize,
-) -> Result<std::process::Child> {
+fn spawn_component(config: &DevConfig, running: Arc<AtomicBool>) -> Result<std::process::Child> {
     let is_ui = config.bin_name.is_empty();
 
     let mut child = if is_ui {
@@ -182,69 +177,33 @@ fn spawn_component(
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?
     };
 
-    // Update PID
-    {
-        let mut comps = components.lock().unwrap();
-        if let Some(comp) = comps.get_mut(comp_idx) {
-            comp.pid = Some(child.id());
-            comp.status = ComponentStatus::Running;
-        }
-    }
+    let label = config.label.to_string();
 
     // stdout reader
     if let Some(stdout) = child.stdout.take() {
-        let buffer = buffer.clone();
         let running = Arc::clone(&running);
-        let components = Arc::clone(&components);
+        let label = label.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }
-                // Detect cargo-watch rebuild
-                if line.contains("Compiling") || line.contains("warning[") {
-                    let mut comps = components.lock().unwrap();
-                    if let Some(comp) = comps.get_mut(comp_idx) {
-                        comp.status = ComponentStatus::Rebuilding;
-                    }
-                } else if line.contains("Running `")
-                    || line.contains("Listening")
-                    || line.contains("started")
-                {
-                    let mut comps = components.lock().unwrap();
-                    if let Some(comp) = comps.get_mut(comp_idx) {
-                        comp.status = ComponentStatus::Running;
-                    }
-                }
-                buffer.push(line, false);
+                println!("[{}] {}", label, line);
             }
         });
     }
 
     // stderr reader
     if let Some(stderr) = child.stderr.take() {
-        let buffer = buffer.clone();
         let running = Arc::clone(&running);
-        let components = Arc::clone(&components);
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }
-                if line.contains("Compiling") || line.contains("warning[") {
-                    let mut comps = components.lock().unwrap();
-                    if let Some(comp) = comps.get_mut(comp_idx) {
-                        comp.status = ComponentStatus::Rebuilding;
-                    }
-                } else if line.contains("Finished") {
-                    let mut comps = components.lock().unwrap();
-                    if let Some(comp) = comps.get_mut(comp_idx) {
-                        comp.status = ComponentStatus::Running;
-                    }
-                }
-                buffer.push(line, true);
+                eprintln!("[{}] {}", label, line);
             }
         });
     }
@@ -309,44 +268,30 @@ pub fn run(component: &ComponentName) -> Result<()> {
 
     let running = Arc::new(AtomicBool::new(true));
 
-    // Build ComponentInfo list for TUI
-    let comp_infos: Vec<ComponentInfo> = configs
-        .iter()
-        .map(|c| ComponentInfo {
-            label: c.label.to_string(),
-            url: c.url.to_string(),
-            pid: None,
-            color_idx: c.color_idx,
-            buffer: LogBuffer::new(),
-            status: ComponentStatus::Starting,
-        })
-        .collect();
-
-    let shared_comps = Arc::new(Mutex::new(comp_infos));
+    // Stop cleanly on Ctrl-C
+    let r = Arc::clone(&running);
+    ctrlc::set_handler(move || {
+        println!("\nReceived Ctrl-C, shutting down...");
+        r.store(false, Ordering::Relaxed);
+    })
+    .expect("Error setting Ctrl-C handler");
 
     // Spawn all components
     let mut children: Vec<std::process::Child> = Vec::new();
-    for (i, config) in configs.iter().enumerate() {
-        let buffer = {
-            let comps = shared_comps.lock().unwrap();
-            comps[i].buffer.clone()
-        };
-        let child = spawn_component(
-            config,
-            Arc::clone(&running),
-            buffer,
-            Arc::clone(&shared_comps),
-            i,
-        )?;
+    for config in configs.iter() {
+        let child = spawn_component(config, Arc::clone(&running))?;
         children.push(child);
     }
 
-    // Run TUI (blocks until q/Ctrl+C)
-    let mut app = App::new(Arc::clone(&shared_comps));
-    let _quit_type = super::tui::run_tui(&mut app);
+    println!("All components started. Logs will appear below (Ctrl+C to quit)...");
+
+    // Wait until running flag is flipped (due to SigInt)
+    while running.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 
     // Shutdown
-    running.store(false, Ordering::Relaxed);
+    println!("Stopping processes...");
     for child in children.iter_mut() {
         let _ = child.kill();
         let _ = child.wait();
