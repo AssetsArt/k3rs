@@ -25,19 +25,23 @@ pub fn Pods() -> Element {
                         th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Name" }
                         th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Status" }
                         th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Node" }
+                        th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "VPC" }
+                        th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "Ghost IPv6" }
                         th { class: "text-left px-5 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold", "ID" }
                     }
                 }
                 tbody {
                     if let Some(pods) = data.as_ref() {
                         if pods.is_empty() {
-                            tr { td { colspan: "4", class: "text-center py-16 text-slate-500 text-sm", "No pods found" } }
+                            tr { td { colspan: "6", class: "text-center py-16 text-slate-500 text-sm", "No pods found" } }
                         } else {
                             for pod in pods.iter() {
                                 tr { class: "border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors",
                                     td { class: "px-5 py-3 text-sm text-slate-300 font-medium", "{pod.name}" }
                                     td { class: "px-5 py-3", StatusBadge { status: pod.status.clone() } }
-                                    td { class: "px-5 py-3 text-xs text-slate-500", "{pod.node_name.as_deref().unwrap_or(\"—\")}" }
+                                    td { class: "px-5 py-3 text-xs text-slate-500", "{pod.node_name.as_deref().unwrap_or(\"\u{2014}\")}" }
+                                    td { class: "px-5 py-3 text-xs text-slate-400", "{pod.vpc_name.as_deref().unwrap_or(\"\u{2014}\")}" }
+                                    td { class: "px-5 py-3 text-xs font-mono text-cyan-400/70", "{pod.ghost_ipv6.as_deref().unwrap_or(\"\u{2014}\")}" }
                                     td { class: "px-5 py-3 text-xs font-mono text-slate-600", "{pod.id}" }
                                 }
                             }

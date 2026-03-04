@@ -3533,9 +3533,9 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 
 - [x] Dashboard, Nodes, Pods, Deployments, Services, ConfigMaps, Secrets pages
 - [x] Ingress, Network Policies, Resource Quotas, Volumes, Events, Processes pages
-- [ ] VPC management page (list VPCs, create/delete, view pods per VPC)
-- [ ] VPC Peering management page
-- [ ] Pod detail view showing Ghost IPv6 + VPC assignment
+- [x] VPC management page (list VPCs, create/delete, view pods per VPC)
+- [x] VPC Peering management page
+- [x] Pod detail view showing Ghost IPv6 + VPC assignment
 
 #### Testing & Validation
 

@@ -12,6 +12,8 @@ mod quotas;
 mod secrets;
 mod services;
 mod volumes;
+mod vpc_peerings;
+mod vpcs;
 
 pub use configmaps::*;
 pub use dashboard::*;
@@ -27,3 +29,5 @@ pub use quotas::*;
 pub use secrets::*;
 pub use services::*;
 pub use volumes::*;
+pub use vpc_peerings::*;
+pub use vpcs::*;

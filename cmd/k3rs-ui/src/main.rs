@@ -43,6 +43,10 @@ enum Route {
         ProcessList {},
         #[route("/images")]
         Images {},
+        #[route("/vpcs")]
+        Vpcs {},
+        #[route("/vpc-peerings")]
+        VpcPeerings {},
 }
 
 // ============================================================
@@ -179,6 +183,14 @@ fn Layout() -> Element {
                         Icon { width: 13, height: 13, icon: LdShield }
                         "Network Policies"
                     }
+                    Link { class: sub_cls(&Route::Vpcs {}), to: Route::Vpcs {},
+                        Icon { width: 13, height: 13, icon: LdLayers }
+                        "VPCs"
+                    }
+                    Link { class: sub_cls(&Route::VpcPeerings {}), to: Route::VpcPeerings {},
+                        Icon { width: 13, height: 13, icon: LdLink }
+                        "VPC Peerings"
+                    }
 
                     p { class: "text-[9px] font-bold uppercase tracking-[0.15em] text-slate-600 px-3 py-1 mt-3",
                         "Storage"
@@ -260,6 +272,10 @@ pub struct Pod {
     pub status: String,
     #[serde(default)]
     pub node_name: Option<String>,
+    #[serde(default)]
+    pub ghost_ipv6: Option<String>,
+    #[serde(default)]
+    pub vpc_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -419,6 +435,34 @@ pub struct ProcessInfo {
     pub cpu_percent: f32,
     #[serde(default)]
     pub memory_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct Vpc {
+    pub name: String,
+    #[serde(default)]
+    pub vpc_id: u16,
+    #[serde(default)]
+    pub ipv4_cidr: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct VpcPeering {
+    pub name: String,
+    #[serde(default)]
+    pub vpc_a: String,
+    #[serde(default)]
+    pub vpc_b: String,
+    #[serde(default)]
+    pub direction: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

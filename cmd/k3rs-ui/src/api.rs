@@ -233,6 +233,38 @@ pub async fn get_processes() -> Result<Vec<ProcessInfo>> {
     Ok(procs)
 }
 
+#[get("/api/ui/vpcs")]
+pub async fn get_vpcs() -> Result<Vec<Vpc>> {
+    let url = format!("{}/api/v1/vpcs", K3RS_API);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", K3RS_TOKEN))
+        .send()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let vpcs: Vec<Vpc> = resp
+        .json()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(vpcs)
+}
+
+#[get("/api/ui/vpc-peerings")]
+pub async fn get_vpc_peerings() -> Result<Vec<VpcPeering>> {
+    let url = format!("{}/api/v1/vpc-peerings", K3RS_API);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", K3RS_TOKEN))
+        .send()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let peerings: Vec<VpcPeering> = resp
+        .json()
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(peerings)
+}
+
 #[get("/api/ui/images")]
 pub async fn get_images() -> Result<Vec<ImageInfo>> {
     let url = format!("{}/api/v1/images", K3RS_API);
