@@ -324,13 +324,24 @@ async fn run_pod_lifecycle(
             Some(alloc)
         }
         Err(e) => {
-            error!("[pod:{}] VPC allocation failed: {}", pod.name, e);
-            let _ = client
-                .put(&status_url)
-                .header("Authorization", format!("Bearer {}", token))
-                .json(&pkg_types::pod::PodStatus::Failed)
-                .send()
-                .await;
+            // If VPC daemon is not running (socket missing), keep pod Pending
+            // so it will be retried on the next sync cycle.
+            let is_transient = e.to_string().contains("os error 2")
+                || e.to_string().contains("Connection refused");
+            if is_transient {
+                warn!(
+                    "[pod:{}] VPC daemon not available, will retry: {}",
+                    pod.name, e
+                );
+            } else {
+                error!("[pod:{}] VPC allocation failed: {}", pod.name, e);
+                let _ = client
+                    .put(&status_url)
+                    .header("Authorization", format!("Bearer {}", token))
+                    .json(&pkg_types::pod::PodStatus::Failed)
+                    .send()
+                    .await;
+            }
             in_flight.lock().unwrap().remove(&pod.id);
             return;
         }

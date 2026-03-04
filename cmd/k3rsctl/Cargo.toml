@@ -24,4 +24,3 @@ nix = { workspace = true }
 sysinfo = { workspace = true }
 dirs = "6"
 ctrlc = "3"
-ratatui = { workspace = true }
