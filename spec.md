@@ -3294,7 +3294,7 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Non-fatal network setup — agent stays functional if bridge/netkit fails (dev mode, rootless, macOS)
 - [x] IPv4 default route via `169.254.1.1` link-local gateway + `proxy_arp` on host-side netkit — enables SIIT translation at netkit boundary
 - [x] Netkit L2 mode — `ip link add <name> type netkit mode l2 peer name <peer>` (requires kernel 6.7+)
-- [ ] Test: pod-to-pod same node via Ghost IPv6
+- [x] Test: pod-to-pod same node via Ghost IPv6
 
 #### Phase 10: eBPF IPv6 Classifier
 - [x] New TC classifier `tc_egress_v6` / `tc_ingress_v6` — shared `enforce_v6()` logic in `k3rs-vpc-ebpf/src/main.rs`
@@ -3445,8 +3445,8 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 - [x] Per-pod SIIT (IPv4↔IPv6 at netkit boundary) via per-pod Ebpf `.rodata`
 - [x] IPv6 VPC enforcement (`tc_egress_v6`/`tc_ingress_v6`)
 - [x] VPC_PODS map for intra-VPC resolution (no collision with overlapping CIDRs)
-- [ ] E2E test: pod-to-pod same node via Ghost IPv6 (OCI containers)
-- [ ] E2E test: pod-to-pod same node with overlapping CIDRs in different VPCs
+- [x] E2E test: pod-to-pod same node via Ghost IPv6 (OCI containers)
+- [x] E2E test: pod-to-pod same node with overlapping CIDRs in different VPCs
 
 #### Networking — TAP/VM Pod Enforcement (Symmetric In-Guest SIIT)
 
@@ -3457,8 +3457,8 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 - [x] `siit_in` formula fallback: `MY_VPC_NETWORK`/`MY_VPC_MASK` for VM guests (empty VPC_PODS)
 - [x] Guest networking: `/proc/cmdline` boot params, static ARP gateway `169.254.0.1` → MAC `02:fc:00:00:00:01`
 - [x] Kernel BPF configs for guest VM (`BPF_SYSCALL`, `NET_CLS_BPF`, `NET_SCH_CLSACT`, `BPF_JIT`)
-- [ ] E2E test: VM-to-VM same node via TAP with VPC enforcement
-- [ ] E2E test: VM-to-OCI pod same node
+- [x] E2E test: VM-to-VM same node via TAP with VPC enforcement
+- [x] E2E test: VM-to-OCI pod same node
 
 #### Networking — NAT64/DNS64 (External IPv4 Access)
 
@@ -3466,7 +3466,7 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 - [x] SNAT Ghost IPv6 → node IPv4, conntrack for return traffic
 - [x] DNS64 synthesis (A→AAAA with `64:ff9b::/96` prefix)
 - [x] Configure NAT64 node IPv4 + physical interface automatically at `k3rs-vpc` startup
-- [ ] E2E test: pod reaches external IPv4 service via DNS64+NAT64
+- [x] E2E test: pod reaches external IPv4 service via DNS64+NAT64
 
 #### Networking — Cross-Node (WireGuard Mesh)
 
@@ -3474,7 +3474,7 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 - [x] Node discovery: exchange Ghost IPv6 prefixes on registration
 - [x] 1-route-per-node routing (all Ghost traffic via `wg-k3rs` interface)
 - [x] Automatic peer configuration when nodes join/leave
-- [ ] E2E test: pod-to-pod cross-node via WireGuard tunnel
+- [x] E2E test: pod-to-pod cross-node via WireGuard tunnel
 
 #### Networking — Service Proxy IPv6
 
@@ -3541,9 +3541,9 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 
 - [x] 24 unit tests (agent), 7 E2E bash scenarios
 - [x] Container process independence test (`test-recovery.sh`)
-- [ ] eBPF program integration test (load + attach + verify packet flow)
-- [ ] VPC isolation E2E test (pods in different VPCs cannot communicate)
-- [ ] VPC peering E2E test (peered VPCs can communicate)
-- [ ] NAT64 E2E test (pod → external IPv4)
-- [ ] Cross-node pod-to-pod E2E test (via WireGuard)
-- [ ] Full cluster bootstrap E2E test (`k3rsctl pm start all` → deploy workload → verify networking)
+- [x] eBPF program integration test (load + attach + verify packet flow)
+- [x] VPC isolation E2E test (pods in different VPCs cannot communicate)
+- [x] VPC peering E2E test (peered VPCs can communicate)
+- [x] NAT64 E2E test (pod → external IPv4)
+- [x] Cross-node pod-to-pod E2E test (via WireGuard)
+- [x] Full cluster bootstrap E2E test (`k3rsctl pm start all` → deploy workload → verify networking)
