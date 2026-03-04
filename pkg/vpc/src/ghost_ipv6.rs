@@ -182,6 +182,52 @@ mod tests {
         assert_eq!(fields.guest_ipv4, Ipv4Addr::new(0, 0, 0, 0));
     }
 
+    /// Two pods in the same VPC should produce different Ghost IPv6 addresses
+    /// that share the same platform_prefix, cluster_id, and vpc_id fields.
+    #[test]
+    fn test_same_vpc_different_pods() {
+        let prefix = 0xfd6b_3372u32;
+        let cluster = 1u32;
+        let vpc = 5u16;
+
+        let addr_a = construct(prefix, cluster, vpc, Ipv4Addr::new(10, 0, 1, 10));
+        let addr_b = construct(prefix, cluster, vpc, Ipv4Addr::new(10, 0, 1, 11));
+
+        assert_ne!(
+            addr_a, addr_b,
+            "different pods should have different Ghost IPv6"
+        );
+
+        let fields_a = parse(addr_a).unwrap();
+        let fields_b = parse(addr_b).unwrap();
+
+        assert_eq!(fields_a.platform_prefix, fields_b.platform_prefix);
+        assert_eq!(fields_a.cluster_id, fields_b.cluster_id);
+        assert_eq!(fields_a.vpc_id, fields_b.vpc_id);
+        assert_ne!(fields_a.guest_ipv4, fields_b.guest_ipv4);
+    }
+
+    /// Two pods with the same IPv4 in different VPCs should produce different Ghost IPv6.
+    #[test]
+    fn test_different_vpcs_same_ipv4() {
+        let prefix = 0xfd6b_3372u32;
+        let cluster = 1u32;
+        let ipv4 = Ipv4Addr::new(10, 0, 1, 10);
+
+        let addr_vpc1 = construct(prefix, cluster, 1, ipv4);
+        let addr_vpc2 = construct(prefix, cluster, 2, ipv4);
+
+        assert_ne!(
+            addr_vpc1, addr_vpc2,
+            "same IPv4 in different VPCs must produce different Ghost IPv6"
+        );
+
+        let f1 = parse(addr_vpc1).unwrap();
+        let f2 = parse(addr_vpc2).unwrap();
+        assert_eq!(f1.guest_ipv4, f2.guest_ipv4);
+        assert_ne!(f1.vpc_id, f2.vpc_id);
+    }
+
     #[test]
     fn test_max_values() {
         let addr = construct(
