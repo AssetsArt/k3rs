@@ -49,10 +49,21 @@ struct Cli {
 
 /// Select the best available network enforcement backend.
 /// Priority: eBPF (Linux + feature) → noop (fallback / non-Linux).
-fn select_enforcer() -> Box<dyn NetworkEnforcer> {
+fn select_enforcer(
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "ebpf")),
+        allow(unused_variables)
+    )]
+    platform_prefix: u32,
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "ebpf")),
+        allow(unused_variables)
+    )]
+    cluster_id: u32,
+) -> Box<dyn NetworkEnforcer> {
     #[cfg(all(target_os = "linux", feature = "ebpf"))]
     {
-        match ebpf_enforcer::EbpfEnforcer::new() {
+        match ebpf_enforcer::EbpfEnforcer::new(platform_prefix, cluster_id) {
             Ok(e) => {
                 info!("Selected eBPF network enforcer");
                 return Box::new(e);
@@ -142,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
     let allocator = Arc::new(Mutex::new(allocator));
 
     // 7. Initialize network enforcer and rebuild rules from stored state
-    let mut enforcer = select_enforcer();
+    let mut enforcer = select_enforcer(platform_prefix, cluster_id);
     enforcer.init().await?;
     enforcer
         .rebuild(&cached_vpcs, &stored_allocations, &cached_peerings)

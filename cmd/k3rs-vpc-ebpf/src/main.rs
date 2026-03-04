@@ -1,10 +1,15 @@
-//! k3rs-vpc eBPF TC classifier programs for VPC network isolation and NAT64.
+//! k3rs-vpc eBPF TC classifier programs for VPC network isolation and SIIT translation.
 //!
-//! **VPC classifiers** — attach to pod TAP/netkit interfaces:
-//!   IPv4 (tc_egress, tc_ingress): Per-pod .rodata + VPC_PODS for same-VPC, VPC_MEMBERSHIP fallback for peering.
-//!   IPv6 (tc_egress_v6, tc_ingress_v6): VPC ID from Ghost IPv6 bytes 10-11.
+//! **Host-side classifiers** — attached to pod TAP/netkit host interfaces:
+//!   IPv6 (tc_egress_v6, tc_ingress_v6): VPC isolation via Ghost IPv6 header (VPC ID at bytes 10-11).
+//!   No IPv4 classifiers — all pod-to-pod traffic is IPv6 after SIIT translation.
 //!
-//! **NAT64** — attach to k3rs0 bridge + physical interface:
+//! **Pod/VM-side translators** — attached inside pod netns (eth0) or on TAP ingress:
+//!   siit_in:   IPv4 egress → IPv6 (app sends IPv4, translated to Ghost IPv6 before leaving pod).
+//!   siit_out:  IPv6 ingress → IPv4 (Ghost IPv6 arrives, delivered as IPv4 to app).
+//!   tap_guard: TAP ingress anti-spoofing (VM → host), IPv6 only.
+//!
+//! **NAT64** — attached to k3rs0 bridge + physical interface:
 //!   nat64_egress: IPv6 `64:ff9b::x` → IPv4, SNAT to node IPv4, redirect to phys.
 //!   nat64_ingress: IPv4 return → IPv6, reverse SNAT, redirect to bridge.
 
@@ -19,8 +24,8 @@ use aya_ebpf::{
 };
 use aya_ebpf_bindings::helpers::bpf_redirect;
 use k3rs_vpc_common::{
-    Nat64Config, Nat64Key, Nat64Value, PeeringKey, PeeringValue, PodKey, PodValue, VpcCidrKey,
-    VpcCidrValue, VpcPodKey, VpcPodValue, GHOST_PREFIX, NAT64_PREFIX_U32,
+    GHOST_PREFIX, NAT64_PREFIX_U32, Nat64Config, Nat64Key, Nat64Value, PeeringKey, PeeringValue,
+    VpcCidrKey, VpcCidrValue,
 };
 use network_types::eth::EthHdr;
 
@@ -45,10 +50,12 @@ static MY_VPC_ID: u16 = 0;
 static MY_VPC_NETWORK: u32 = 0; // VPC network in host byte order (e.g. 0x0a000100 for 10.0.1.0)
 #[no_mangle]
 static MY_VPC_MASK: u32 = 0; // VPC mask in host byte order (e.g. 0xffffff00 for /24)
+#[no_mangle]
+static MY_PLATFORM_PREFIX: u32 = 0; // e.g. 0xfd6b_3372
+#[no_mangle]
+static MY_CLUSTER_ID: u32 = 0;
 
-/// BPF HashMap: IPv4 address → VPC membership (pinned, shared across per-pod instances).
-#[map]
-static VPC_MEMBERSHIP: HashMap<PodKey, PodValue> = HashMap::pinned(4096, 0);
+// ─── Shared pinned maps ─────────────────────────────────────────
 
 /// BPF HashMap: VPC ID → CIDR info (pinned, shared).
 #[map]
@@ -58,134 +65,7 @@ static VPC_CIDRS: HashMap<VpcCidrKey, VpcCidrValue> = HashMap::pinned(256, 0);
 #[map]
 static PEERINGS: HashMap<PeeringKey, PeeringValue> = HashMap::pinned(1024, 0);
 
-// ─── IPv4 Classifiers (unchanged) ───────────────────────────────
-
-/// TC egress classifier — enforces VPC isolation on outbound IPv4 traffic.
-///
-/// Attached to TAP interface egress (host → VM). Uses per-pod .rodata globals
-/// for VPC identity. Primary same-VPC check uses VPC_PODS (VPC-scoped key,
-/// no collision with overlapping CIDRs). VPC_MEMBERSHIP is a fallback for
-/// cross-VPC peering decisions only.
-///
-/// Logic:
-/// 1. Parse IPv4 header; pass non-IPv4 traffic.
-/// 2. Read MY_VPC_ID from .rodata (baked at load time).
-/// 3. Same-VPC: VPC_PODS[(MY_VPC_ID, src_ip)] exists → allow.
-/// 4. Cross-VPC: VPC_MEMBERSHIP[src_ip] → src_vpc_id → peering check.
-/// 5. External (not in VPC_MEMBERSHIP) → allow.
-/// 6. On any error → allow (fail-open).
-#[classifier]
-pub fn tc_egress(ctx: TcContext) -> i32 {
-    match try_tc_egress(&ctx) {
-        Ok(action) => action,
-        Err(_) => TC_ACT_OK, // fail-open
-    }
-}
-
-fn try_tc_egress(ctx: &TcContext) -> Result<i32, ()> {
-    let etype: u16 = ctx.load(12).map_err(|_| ())?;
-    if etype != ETH_P_IP.to_be() {
-        return Ok(TC_ACT_OK);
-    }
-
-    let src_ip = u32::from_be(ctx.load::<u32>(EthHdr::LEN + 12).map_err(|_| ())?);
-
-    let my_vpc_id = unsafe { core::ptr::read_volatile(&MY_VPC_ID) };
-
-    // Same-VPC check via VPC_PODS (VPC-scoped key, no collision with overlapping CIDRs)
-    let vpc_key = VpcPodKey {
-        vpc_id: my_vpc_id,
-        _pad: 0,
-        ipv4_addr: src_ip,
-    };
-    if unsafe { VPC_PODS.get(&vpc_key) }.is_some() {
-        return Ok(TC_ACT_OK);
-    }
-
-    // Cross-VPC: look up src in flat VPC_MEMBERSHIP (for peering decisions)
-    let src_key = PodKey { ipv4_addr: src_ip };
-    match unsafe { VPC_MEMBERSHIP.get(&src_key) } {
-        None => Ok(TC_ACT_OK), // not a managed pod → external → allow
-        Some(src_pod) => {
-            // Same VPC via VPC_MEMBERSHIP (timing fallback before VPC_PODS is populated)
-            if src_pod.vpc_id == my_vpc_id {
-                return Ok(TC_ACT_OK);
-            }
-            // Different VPC → check peering (src_vpc → MY_VPC_ID)
-            let peering_key = PeeringKey {
-                src_vpc_id: src_pod.vpc_id,
-                dst_vpc_id: my_vpc_id,
-            };
-            match unsafe { PEERINGS.get(&peering_key) } {
-                Some(p) if p.allowed != 0 => Ok(TC_ACT_OK),
-                _ => Ok(TC_ACT_SHOT),
-            }
-        }
-    }
-}
-
-/// TC ingress classifier — enforces VPC isolation on inbound IPv4 traffic.
-///
-/// Attached to TAP interface ingress (VM → host). Uses per-pod .rodata globals.
-/// Anti-spoofs source IP, then checks if destination is reachable from this pod's VPC.
-#[classifier]
-pub fn tc_ingress(ctx: TcContext) -> i32 {
-    match try_tc_ingress(&ctx) {
-        Ok(action) => action,
-        Err(_) => TC_ACT_OK, // fail-open
-    }
-}
-
-fn try_tc_ingress(ctx: &TcContext) -> Result<i32, ()> {
-    let etype: u16 = ctx.load(12).map_err(|_| ())?;
-    if etype != ETH_P_IP.to_be() {
-        return Ok(TC_ACT_OK);
-    }
-
-    let src_ip = u32::from_be(ctx.load::<u32>(EthHdr::LEN + 12).map_err(|_| ())?);
-    let dst_ip = u32::from_be(ctx.load::<u32>(EthHdr::LEN + 16).map_err(|_| ())?);
-
-    let my_vpc_id = unsafe { core::ptr::read_volatile(&MY_VPC_ID) };
-    let my_guest_ipv4 = unsafe { core::ptr::read_volatile(&MY_GUEST_IPV4) };
-
-    // Anti-spoof: source must be this pod's guest IPv4
-    if src_ip != my_guest_ipv4 {
-        return Ok(TC_ACT_SHOT);
-    }
-
-    // Same-VPC check via VPC_PODS (VPC-scoped key, no collision)
-    let vpc_key = VpcPodKey {
-        vpc_id: my_vpc_id,
-        _pad: 0,
-        ipv4_addr: dst_ip,
-    };
-    if unsafe { VPC_PODS.get(&vpc_key) }.is_some() {
-        return Ok(TC_ACT_OK);
-    }
-
-    // Cross-VPC: look up dst in flat VPC_MEMBERSHIP (for peering decisions)
-    let dst_key = PodKey { ipv4_addr: dst_ip };
-    match unsafe { VPC_MEMBERSHIP.get(&dst_key) } {
-        None => Ok(TC_ACT_OK), // not a managed pod → external → allow
-        Some(dst_pod) => {
-            // Same VPC via VPC_MEMBERSHIP (timing fallback)
-            if dst_pod.vpc_id == my_vpc_id {
-                return Ok(TC_ACT_OK);
-            }
-            // Different VPC → check peering (MY_VPC_ID → dst_vpc)
-            let peering_key = PeeringKey {
-                src_vpc_id: my_vpc_id,
-                dst_vpc_id: dst_pod.vpc_id,
-            };
-            match unsafe { PEERINGS.get(&peering_key) } {
-                Some(p) if p.allowed != 0 => Ok(TC_ACT_OK),
-                _ => Ok(TC_ACT_SHOT),
-            }
-        }
-    }
-}
-
-// ─── IPv6 Classifiers (Ghost IPv6 native) ───────────────────────
+// ─── IPv6 Host-side Isolation Classifiers ───────────────────────
 
 /// Check if 4 bytes at `offset` in the packet match the Ghost IPv6 prefix.
 ///
@@ -209,6 +89,9 @@ fn extract_vpc_id(ctx: &TcContext, addr_offset: usize) -> Result<u16, ()> {
 
 /// Shared IPv6 VPC enforcement logic used by both egress and ingress.
 ///
+/// All pod-to-pod traffic on the host is Ghost IPv6 after SIIT translation.
+/// No IPv4 classifiers needed — the SIIT layer inside pods handles IPv4↔IPv6.
+///
 /// 1. Validate Ghost IPv6 prefix on src and dst addresses.
 /// 2. Anti-spoofing: non-Ghost src + Ghost dst → DROP.
 /// 3. Extract VPC ID from bytes 10-11 of each Ghost IPv6 address (no map lookup).
@@ -225,7 +108,6 @@ fn enforce_v6(ctx: &TcContext) -> Result<i32, ()> {
     let dst_is_ghost = is_ghost_prefix(ctx, IPV6_DST_ADDR_OFF)?;
 
     // Anti-spoofing: non-Ghost source targeting a Ghost destination → drop.
-    // Prevents external/spoofed traffic from reaching Ghost-addressed pods.
     if !src_is_ghost && dst_is_ghost {
         return Ok(TC_ACT_SHOT);
     }
@@ -263,8 +145,9 @@ fn enforce_v6(ctx: &TcContext) -> Result<i32, ()> {
 
 /// TC egress classifier for IPv6 — enforces VPC isolation on outbound Ghost IPv6 traffic.
 ///
-/// Extracts VPC ID directly from Ghost IPv6 header (bytes 10-11) — no BPF map lookup
-/// for same-VPC decisions. Only the PEERINGS map is consulted for cross-VPC traffic.
+/// Attached to TAP/netkit host-side egress. Extracts VPC ID directly from Ghost IPv6
+/// header (bytes 10-11) — no BPF map lookup for same-VPC decisions.
+/// Only the PEERINGS map is consulted for cross-VPC traffic.
 #[classifier]
 pub fn tc_egress_v6(ctx: TcContext) -> i32 {
     match enforce_v6(&ctx) {
@@ -282,23 +165,44 @@ pub fn tc_ingress_v6(ctx: TcContext) -> i32 {
     }
 }
 
-// ─── SIIT Per-Pod Translation Programs ─────────────────────────
+// ─── Ghost IPv6 Construction ────────────────────────────────────
 
-/// VPC-scoped pod lookup: (vpc_id, ipv4) → ghost_ipv6 (for intra-VPC routing, pinned, shared).
-#[map]
-static VPC_PODS: HashMap<VpcPodKey, VpcPodValue> = HashMap::pinned(4096, 0);
+/// Construct a Ghost IPv6 address from platform config + VPC ID + IPv4 address.
+///
+/// Layout (128 bits):
+///   b[0..4]   = platform_prefix (BE) — e.g. `0xfd6b_3372` → `fd:6b:33:72`
+///   b[4]      = (GHOST_VERSION << 4) | 0  — version = 1
+///   b[5]      = 0
+///   b[6..8]   = cluster_id high 16 bits (BE)
+///   b[8..10]  = cluster_id low 16 bits (BE)
+///   b[10..12] = vpc_id (BE)
+///   b[12..16] = IPv4 address octets
+#[inline(always)]
+fn construct_ghost_ipv6(platform_prefix: u32, cluster_id: u32, vpc_id: u16, ipv4: u32) -> [u8; 16] {
+    let mut b = [0u8; 16];
+    b[0..4].copy_from_slice(&platform_prefix.to_be_bytes());
+    b[4] = 1u8 << 4; // GHOST_VERSION = 1
+    b[5] = 0x00;
+    b[6..8].copy_from_slice(&((cluster_id >> 16) as u16).to_be_bytes());
+    b[8..10].copy_from_slice(&((cluster_id & 0xFFFF) as u16).to_be_bytes());
+    b[10..12].copy_from_slice(&vpc_id.to_be_bytes());
+    b[12..16].copy_from_slice(&ipv4.to_be_bytes());
+    b
+}
+
+// ─── SIIT Per-Pod/VM Translation Programs ──────────────────────
 
 /// SIIT inbound translator (IPv4 → IPv6).
 /// Attached inside the pod's netns on eth0 TC **Egress** (app sends IPv4 out).
 /// Translates IPv4 packets from the pod application → IPv6 before they exit to the host.
 ///
-/// Pod identity (ghost_ipv6, guest_ipv4, vpc_id) is baked into .rodata globals
-/// at load time — no map lookup needed.
+/// Pod identity (ghost_ipv6, guest_ipv4, vpc_id, platform_prefix, cluster_id) is baked
+/// into .rodata globals at load time — no map lookup needed.
 ///
 /// 1. Check IPv4, pass non-IPv4.
 /// 2. Read pod config from .rodata globals.
 /// 3. Anti-spoof: src_ipv4 must match guest_ipv4.
-/// 4. Resolve dst IPv6: intra-VPC (VPC_PODS) or external (64:ff9b::).
+/// 4. Resolve dst IPv6: intra-VPC (construct Ghost IPv6 from formula) or external (64:ff9b::).
 /// 5. Translate: change_proto(IPv6), write IPv6 header, adjust L4 checksum.
 #[classifier]
 pub fn siit_in(mut ctx: TcContext) -> i32 {
@@ -325,6 +229,10 @@ fn try_siit_in(ctx: &mut TcContext) -> Result<i32, ()> {
     let ghost_ipv6 = unsafe { core::ptr::read_volatile(&MY_GHOST_IPV6) };
     let guest_ipv4 = unsafe { core::ptr::read_volatile(&MY_GUEST_IPV4) };
     let vpc_id = unsafe { core::ptr::read_volatile(&MY_VPC_ID) };
+    let platform_prefix = unsafe { core::ptr::read_volatile(&MY_PLATFORM_PREFIX) };
+    let cluster_id = unsafe { core::ptr::read_volatile(&MY_CLUSTER_ID) };
+    let vpc_network = unsafe { core::ptr::read_volatile(&MY_VPC_NETWORK) };
+    let vpc_mask = unsafe { core::ptr::read_volatile(&MY_VPC_MASK) };
 
     // 3. Read IPv4 header fields
     let protocol: u8 = ctx.load(EthHdr::LEN + 9).map_err(|_| ())?;
@@ -343,34 +251,13 @@ fn try_siit_in(ctx: &mut TcContext) -> Result<i32, ()> {
         return Ok(TC_ACT_SHOT);
     }
 
-    // 5. Resolve destination IPv6
-    let dst_ipv6 = {
-        let vpc_key = VpcPodKey {
-            vpc_id,
-            _pad: 0,
-            ipv4_addr: dst_ip,
-        };
-        match unsafe { VPC_PODS.get(&vpc_key) } {
-            Some(pod) => pod.ghost_ipv6,
-            None => {
-                // Formula fallback: if dst is within VPC CIDR, compute Ghost IPv6
-                // from this pod's prefix (bytes 0-11) + dst IPv4 (bytes 12-15).
-                // Used by VMs where VPC_PODS is empty (separate kernel).
-                let vpc_network = unsafe { core::ptr::read_volatile(&MY_VPC_NETWORK) };
-                let vpc_mask = unsafe { core::ptr::read_volatile(&MY_VPC_MASK) };
-                if vpc_network != 0 && (dst_ip & vpc_mask) == (vpc_network & vpc_mask) {
-                    let dst_bytes = dst_ip.to_be_bytes();
-                    let mut addr = ghost_ipv6;
-                    addr[12] = dst_bytes[0];
-                    addr[13] = dst_bytes[1];
-                    addr[14] = dst_bytes[2];
-                    addr[15] = dst_bytes[3];
-                    addr
-                } else {
-                    nat64_addr(dst_ip) // external: 64:ff9b::dst_ipv4
-                }
-            }
-        }
+    // 5. Resolve destination IPv6 — no map lookup needed.
+    //    If dst is within our VPC CIDR → construct Ghost IPv6 algorithmically.
+    //    Otherwise → external: use NAT64 prefix 64:ff9b::dst_ipv4.
+    let dst_ipv6 = if vpc_network != 0 && (dst_ip & vpc_mask) == (vpc_network & vpc_mask) {
+        construct_ghost_ipv6(platform_prefix, cluster_id, vpc_id, dst_ip)
+    } else {
+        nat64_addr(dst_ip)
     };
 
     // 6. Source IPv6 = pod's Ghost IPv6
@@ -412,8 +299,13 @@ fn try_siit_in(ctx: &mut TcContext) -> Result<i32, ()> {
     ctx.store(l3 + 36, &d6[3], 0).map_err(|_| ())?;
 
     // 10. Adjust L4 checksum (IPv4 pseudo → IPv6 pseudo)
-    let csum_off = EthHdr::LEN + IPV6_HDR_LEN
-        + if protocol == IPPROTO_TCP { TCP_CSUM_OFF } else { UDP_CSUM_OFF };
+    let csum_off = EthHdr::LEN
+        + IPV6_HDR_LEN
+        + if protocol == IPPROTO_TCP {
+            TCP_CSUM_OFF
+        } else {
+            UDP_CSUM_OFF
+        };
     csum_4to6(ctx, csum_off, src_raw, dst_raw, s6, d6)?;
 
     Ok(TC_ACT_OK)
@@ -505,8 +397,13 @@ fn try_siit_out(ctx: &mut TcContext) -> Result<i32, ()> {
     ctx.store(l3 + 10, &csum.to_be(), 0).map_err(|_| ())?;
 
     // 9. Adjust L4 checksum (IPv6 pseudo → IPv4 pseudo)
-    let csum_off = EthHdr::LEN + IPV4_HDR_LEN
-        + if next_hdr == IPPROTO_TCP { TCP_CSUM_OFF } else { UDP_CSUM_OFF };
+    let csum_off = EthHdr::LEN
+        + IPV4_HDR_LEN
+        + if next_hdr == IPPROTO_TCP {
+            TCP_CSUM_OFF
+        } else {
+            UDP_CSUM_OFF
+        };
     csum_6to4(ctx, csum_off, src_v6, dst_v6_words, src_raw, dst_raw)?;
 
     Ok(TC_ACT_OK)
@@ -596,7 +493,9 @@ fn ipv4_hdr_csum(total_len: u16, ttl: u8, proto: u8, src: u32, dst: u32) -> u16 
 #[inline(always)]
 fn nat64_addr(ipv4: u32) -> [u8; 16] {
     let b = ipv4.to_be_bytes();
-    [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0, b[0], b[1], b[2], b[3]]
+    [
+        0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0, b[0], b[1], b[2], b[3],
+    ]
 }
 
 /// Convert 16-byte address to 4 raw u32 words for packet store / csum operations.
@@ -612,7 +511,6 @@ fn addr_words(a: &[u8; 16]) -> [u32; 4] {
 }
 
 /// Adjust L4 checksum: IPv6 pseudo-header → IPv4 pseudo-header.
-/// `s6`/`d6` are raw u32 words (from ctx.load), `s4`/`d4` are raw u32 (to_be of host-order).
 #[inline(always)]
 fn csum_6to4(
     ctx: &TcContext,
@@ -623,14 +521,22 @@ fn csum_6to4(
     d4: u32,
 ) -> Result<(), ()> {
     let f = BPF_F_PSEUDO_HDR | 4;
-    ctx.l4_csum_replace(off, s6[0] as u64, s4 as u64, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, s6[1] as u64, 0, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, s6[2] as u64, 0, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, s6[3] as u64, 0, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, d6[0] as u64, d4 as u64, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, d6[1] as u64, 0, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, d6[2] as u64, 0, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, d6[3] as u64, 0, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, s6[0] as u64, s4 as u64, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, s6[1] as u64, 0, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, s6[2] as u64, 0, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, s6[3] as u64, 0, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, d6[0] as u64, d4 as u64, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, d6[1] as u64, 0, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, d6[2] as u64, 0, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, d6[3] as u64, 0, f)
+        .map_err(|_| ())?;
     Ok(())
 }
 
@@ -645,14 +551,22 @@ fn csum_4to6(
     d6: [u32; 4],
 ) -> Result<(), ()> {
     let f = BPF_F_PSEUDO_HDR | 4;
-    ctx.l4_csum_replace(off, s4 as u64, s6[0] as u64, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, 0, s6[1] as u64, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, 0, s6[2] as u64, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, 0, s6[3] as u64, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, d4 as u64, d6[0] as u64, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, 0, d6[1] as u64, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, 0, d6[2] as u64, f).map_err(|_| ())?;
-    ctx.l4_csum_replace(off, 0, d6[3] as u64, f).map_err(|_| ())?;
+    ctx.l4_csum_replace(off, s4 as u64, s6[0] as u64, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, 0, s6[1] as u64, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, 0, s6[2] as u64, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, 0, s6[3] as u64, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, d4 as u64, d6[0] as u64, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, 0, d6[1] as u64, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, 0, d6[2] as u64, f)
+        .map_err(|_| ())?;
+    ctx.l4_csum_replace(off, 0, d6[3] as u64, f)
+        .map_err(|_| ())?;
     Ok(())
 }
 
@@ -719,8 +633,8 @@ fn try_nat64_egress(ctx: &mut TcContext) -> Result<i32, ()> {
             s3.to_ne_bytes(),
         );
         [
-            w0[0], w0[1], w0[2], w0[3], w1[0], w1[1], w1[2], w1[3],
-            w2[0], w2[1], w2[2], w2[3], w3[0], w3[1], w3[2], w3[3],
+            w0[0], w0[1], w0[2], w0[3], w1[0], w1[1], w1[2], w1[3], w2[0], w2[1], w2[2], w2[3],
+            w3[0], w3[1], w3[2], w3[3],
         ]
     };
 
@@ -744,7 +658,9 @@ fn try_nat64_egress(ctx: &mut TcContext) -> Result<i32, ()> {
         _pad2: 0,
     };
     let ct_val = Nat64Value { src_ipv6 };
-    NAT64_CONNTRACK.insert(&ct_key, &ct_val, 0).map_err(|_| ())?;
+    NAT64_CONNTRACK
+        .insert(&ct_key, &ct_val, 0)
+        .map_err(|_| ())?;
 
     // 8. Change protocol: IPv6 → IPv4 (shrinks L3 header by 20 bytes)
     ctx.change_proto(ETH_P_IP, 0).map_err(|_| ())?;
@@ -769,8 +685,13 @@ fn try_nat64_egress(ctx: &mut TcContext) -> Result<i32, ()> {
     ctx.store(l3 + 10, &csum.to_be(), 0).map_err(|_| ())?;
 
     // 11. Adjust L4 checksum for pseudo-header change (IPv6 addrs → IPv4 addrs)
-    let csum_off = EthHdr::LEN + IPV4_HDR_LEN
-        + if next_hdr == IPPROTO_TCP { TCP_CSUM_OFF } else { UDP_CSUM_OFF };
+    let csum_off = EthHdr::LEN
+        + IPV4_HDR_LEN
+        + if next_hdr == IPPROTO_TCP {
+            TCP_CSUM_OFF
+        } else {
+            UDP_CSUM_OFF
+        };
     csum_6to4(ctx, csum_off, src_v6, dst_v6, node_raw, d3)?;
 
     // 12. Redirect to physical interface
@@ -827,8 +748,6 @@ fn try_nat64_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
     let dport = u16::from_be(ctx.load::<u16>(l4 + 2).map_err(|_| ())?);
 
     // 5. Conntrack lookup (reversed: return packet has swapped src/dst ports)
-    //    Egress stored: (proto, pod_src_port, remote_ipv4, remote_port)
-    //    Return pkt:     src=remote_ipv4, src_port=remote_port, dst_port=pod_src_port
     let ct_key = Nat64Key {
         protocol,
         _pad: 0,
@@ -874,8 +793,13 @@ fn try_nat64_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
     ctx.store(l3 + 36, &d6[3], 0).map_err(|_| ())?;
 
     // 10. Adjust L4 checksum for pseudo-header change (IPv4 addrs → IPv6 addrs)
-    let csum_off = EthHdr::LEN + IPV6_HDR_LEN
-        + if protocol == IPPROTO_TCP { TCP_CSUM_OFF } else { UDP_CSUM_OFF };
+    let csum_off = EthHdr::LEN
+        + IPV6_HDR_LEN
+        + if protocol == IPPROTO_TCP {
+            TCP_CSUM_OFF
+        } else {
+            UDP_CSUM_OFF
+        };
     csum_4to6(ctx, csum_off, src_raw, dst_raw, s6, d6)?;
 
     // 11. Redirect to k3rs0 bridge ingress

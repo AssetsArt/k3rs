@@ -108,33 +108,12 @@ async fn dispatch(
         }
         VpcRequest::Allocate { pod_id, vpc_name } => {
             let mut alloc = allocator.lock().await;
-            // Check if this is an idempotent re-allocation (pod already has rules)
-            let is_existing = alloc.query(&pod_id).is_some();
             match alloc.allocate(&pod_id, &vpc_name).await {
-                Ok(result) => {
-                    // Only install rules for new allocations
-                    if !is_existing {
-                        let mut enf = enforcer.lock().await;
-                        if let Err(e) = enf
-                            .install_pod_rules(
-                                &pod_id,
-                                &result.guest_ipv4.to_string(),
-                                result.vpc_id,
-                            )
-                            .await
-                        {
-                            warn!(
-                                "enforcer: failed to install pod rules for {}: {}",
-                                pod_id, e
-                            );
-                        }
-                    }
-                    VpcResponse::Allocated {
-                        guest_ipv4: result.guest_ipv4.to_string(),
-                        ghost_ipv6: result.ghost_ipv6.to_string(),
-                        vpc_id: result.vpc_id,
-                    }
-                }
+                Ok(result) => VpcResponse::Allocated {
+                    guest_ipv4: result.guest_ipv4.to_string(),
+                    ghost_ipv6: result.ghost_ipv6.to_string(),
+                    vpc_id: result.vpc_id,
+                },
                 Err(e) => VpcResponse::Error {
                     code: "allocate_error".to_string(),
                     message: e.to_string(),
@@ -144,14 +123,7 @@ async fn dispatch(
         VpcRequest::Release { pod_id, vpc_name } => {
             let mut alloc = allocator.lock().await;
             match alloc.release(&pod_id, &vpc_name).await {
-                Ok(()) => {
-                    // Remove rules for this pod
-                    let mut enf = enforcer.lock().await;
-                    if let Err(e) = enf.remove_pod_rules(&pod_id).await {
-                        warn!("enforcer: failed to remove pod rules for {}: {}", pod_id, e);
-                    }
-                    VpcResponse::Released
-                }
+                Ok(()) => VpcResponse::Released,
                 Err(e) => VpcResponse::Error {
                     code: "release_error".to_string(),
                     message: e.to_string(),
@@ -192,11 +164,19 @@ async fn dispatch(
             guest_ipv4,
             ghost_ipv6,
             vpc_id,
+            vpc_cidr,
             container_pid,
         } => {
             let mut enf = enforcer.lock().await;
             match enf
-                .install_netkit_rules(&nk_name, &guest_ipv4, &ghost_ipv6, vpc_id, container_pid)
+                .install_netkit_rules(
+                    &nk_name,
+                    &guest_ipv4,
+                    &ghost_ipv6,
+                    vpc_id,
+                    &vpc_cidr,
+                    container_pid,
+                )
                 .await
             {
                 Ok(()) => VpcResponse::Ok,
@@ -221,10 +201,11 @@ async fn dispatch(
             guest_ipv4,
             ghost_ipv6,
             vpc_id,
+            vpc_cidr,
         } => {
             let mut enf = enforcer.lock().await;
             match enf
-                .install_tap_rules(&tap_name, &guest_ipv4, &ghost_ipv6, vpc_id)
+                .install_tap_rules(&tap_name, &guest_ipv4, &ghost_ipv6, vpc_id, &vpc_cidr)
                 .await
             {
                 Ok(()) => VpcResponse::Ok,

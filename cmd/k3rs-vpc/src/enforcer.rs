@@ -25,19 +25,8 @@ pub trait NetworkEnforcer: Send {
     /// Remove VPC-level isolation structures.
     async fn remove_vpc(&mut self, vpc_id: u16) -> Result<()>;
 
-    /// Install per-pod forwarding and anti-spoofing rules.
-    async fn install_pod_rules(
-        &mut self,
-        pod_id: &str,
-        guest_ipv4: &str,
-        vpc_id: u16,
-    ) -> Result<()>;
-
-    /// Remove all rules associated with a pod.
-    async fn remove_pod_rules(&mut self, pod_id: &str) -> Result<()>;
-
     /// Install TAP-interface-specific rules (VM traffic).
-    /// Attaches `tap_guard` (anti-spoofing) on TAP ingress and IPv6 classifiers
+    /// Attaches `tap_guard` (anti-spoofing) on TAP ingress and IPv6 isolation classifiers
     /// on TAP egress+ingress. No IPv4 classifiers — the VM does its own SIIT.
     async fn install_tap_rules(
         &mut self,
@@ -45,6 +34,7 @@ pub trait NetworkEnforcer: Send {
         guest_ipv4: &str,
         ghost_ipv6: &str,
         vpc_id: u16,
+        vpc_cidr: &str,
     ) -> Result<()>;
 
     /// Remove all rules associated with a TAP interface.
@@ -52,13 +42,14 @@ pub trait NetworkEnforcer: Send {
 
     /// Install netkit-interface-specific rules (OCI container traffic).
     /// Attaches SIIT translators (IPv4↔IPv6) inside the pod's netns on eth0,
-    /// and IPv6 VPC classifiers on the host-side netkit.
+    /// and IPv6 VPC isolation classifiers on the host-side netkit.
     async fn install_netkit_rules(
         &mut self,
         nk_name: &str,
         guest_ipv4: &str,
         ghost_ipv6: &str,
         vpc_id: u16,
+        vpc_cidr: &str,
         container_pid: u32,
     ) -> Result<()>;
 
@@ -72,8 +63,6 @@ pub trait NetworkEnforcer: Send {
     async fn remove_peering_rules(&mut self, peering_name: &str) -> Result<()>;
 
     /// Install NAT64 translation programs on the bridge and physical interfaces.
-    /// Populates the NAT64_CONFIG BPF map and attaches nat64_egress (bridge egress)
-    /// and nat64_ingress (physical ingress) TC classifiers.
     async fn install_nat64(
         &mut self,
         _node_ipv4: &str,
@@ -95,7 +84,7 @@ pub trait NetworkEnforcer: Send {
     async fn cleanup(&mut self) -> Result<()>;
 
     /// Rebuild all enforcement state from stored VPCs, allocations, and peerings.
-    /// Default implementation composes ensure_vpc + install_pod_rules + install_peering_rules.
+    /// Default implementation composes ensure_vpc + install_tap_rules + install_peering_rules.
     async fn rebuild(
         &mut self,
         vpcs: &[Vpc],
@@ -115,25 +104,15 @@ pub trait NetworkEnforcer: Send {
         }
 
         for alloc in allocations {
-            // Install pod rules (VPC_MEMBERSHIP) for all allocation types
-            if let Err(e) = self
-                .install_pod_rules(&alloc.pod_id, &alloc.guest_ipv4, alloc.vpc_id)
-                .await
-            {
-                warn!(
-                    "{}: failed to install pod rules for {} in VPC {}: {}",
-                    self.name(),
-                    alloc.pod_id,
-                    alloc.vpc_name,
-                    e
-                );
-            }
-
-            // TAP allocations also need install_tap_rules for the guard + VPC_PODS.
+            // TAP allocations need install_tap_rules for guard + IPv6 isolation classifiers.
             // Note: netkit rules are not rebuilt here because they require container_pid
-            // (the pod must be running), and the agent re-attaches on pod start.
+            // (the pod must be running). The agent re-attaches on pod start.
             if alloc.interface_type == "tap" {
-                // TAP name is derived from pod_id (same convention as FcNetworkManager)
+                let vpc_cidr = vpcs
+                    .iter()
+                    .find(|v| v.vpc_id == alloc.vpc_id)
+                    .map(|v| v.ipv4_cidr.as_str())
+                    .unwrap_or("0.0.0.0/0");
                 let short_id = &alloc.pod_id[..8.min(alloc.pod_id.len())];
                 let tap_name = format!("tap-{}", short_id);
                 if let Err(e) = self
@@ -142,6 +121,7 @@ pub trait NetworkEnforcer: Send {
                         &alloc.guest_ipv4,
                         &alloc.ghost_ipv6,
                         alloc.vpc_id,
+                        vpc_cidr,
                     )
                     .await
                 {

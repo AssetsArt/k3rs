@@ -30,6 +30,7 @@ enum VpcRequest {
         guest_ipv4: String,
         ghost_ipv6: String,
         vpc_id: u16,
+        vpc_cidr: String,
         container_pid: u32,
     },
     DetachNetkit {
@@ -40,6 +41,7 @@ enum VpcRequest {
         guest_ipv4: String,
         ghost_ipv6: String,
         vpc_id: u16,
+        vpc_cidr: String,
     },
     DetachTap {
         tap_name: String,
@@ -247,12 +249,14 @@ impl VpcClient {
         guest_ipv4: &str,
         ghost_ipv6: &str,
         vpc_id: u16,
+        vpc_cidr: &str,
     ) -> anyhow::Result<()> {
         let req = VpcRequest::AttachTap {
             tap_name: tap_name.to_string(),
             guest_ipv4: guest_ipv4.to_string(),
             ghost_ipv6: ghost_ipv6.to_string(),
             vpc_id,
+            vpc_cidr: vpc_cidr.to_string(),
         };
 
         match self.request(&req).await {

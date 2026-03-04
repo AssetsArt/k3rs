@@ -17,27 +17,6 @@ pub const GHOST_PREFIX: u32 = 0xfd6b_3372;
 /// VPC ID is a big-endian u16 at bytes 10-11 of the 16-byte address.
 pub const GHOST_VPC_ID_OFFSET: usize = 10;
 
-// ─── BPF Map Types ──────────────────────────────────────────────
-
-/// Key for the VPC_MEMBERSHIP BPF hash map.
-/// Maps a pod's IPv4 address to its VPC membership.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PodKey {
-    /// Pod's guest IPv4 address in network byte order.
-    pub ipv4_addr: u32,
-}
-
-/// Value for the VPC_MEMBERSHIP BPF hash map.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PodValue {
-    /// VPC ID this pod belongs to.
-    pub vpc_id: u16,
-    /// Padding for alignment.
-    pub _pad: u16,
-}
-
 /// Key for the VPC_CIDRS BPF hash map.
 /// Maps a VPC ID to its CIDR information.
 #[repr(C)]
@@ -79,29 +58,7 @@ pub struct PeeringValue {
     pub allowed: u32,
 }
 
-// ─── SIIT / VPC Pod BPF Map Types ───────────────────────────────
-
-/// Key for the VPC_PODS BPF hash map.
-/// VPC-scoped pod lookup for intra-VPC IPv4→Ghost IPv6 translation.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VpcPodKey {
-    /// VPC ID.
-    pub vpc_id: u16,
-    /// Padding for alignment.
-    pub _pad: u16,
-    /// Pod's guest IPv4 address in host byte order.
-    pub ipv4_addr: u32,
-}
-
-/// Value for the VPC_PODS BPF hash map.
-/// Contains the pod's Ghost IPv6 address for intra-VPC routing.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VpcPodValue {
-    /// Pod's Ghost IPv6 address (16 bytes).
-    pub ghost_ipv6: [u8; 16],
-}
+// ─── SIIT BPF Map Types (remaining) ─────────────────────────────
 
 // ─── NAT64 BPF Map Types ────────────────────────────────────────
 

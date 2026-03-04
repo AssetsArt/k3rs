@@ -5,11 +5,13 @@ use std::path::Path;
 #[cfg(target_os = "linux")]
 #[derive(Debug, Default)]
 pub struct K3rsBootParams {
-    pub ipv4: Option<String>,     // k3rs.ipv4=10.0.1.5
-    pub ipv6: Option<String>,     // k3rs.ipv6=fd6b:3372:...
-    pub vpc_id: Option<u16>,      // k3rs.vpc_id=42
-    pub vpc_cidr: Option<String>, // k3rs.vpc_cidr=10.0.1.0/24
-    pub gw_mac: Option<String>,   // k3rs.gw_mac=02:fc:00:00:00:01
+    pub ipv4: Option<String>,         // k3rs.ipv4=10.0.1.5
+    pub ipv6: Option<String>,         // k3rs.ipv6=fd6b:3372:...
+    pub vpc_id: Option<u16>,          // k3rs.vpc_id=42
+    pub vpc_cidr: Option<String>,     // k3rs.vpc_cidr=10.0.1.0/24
+    pub gw_mac: Option<String>,       // k3rs.gw_mac=02:fc:00:00:00:01
+    pub platform_prefix: Option<u32>, // k3rs.platform_prefix=0xfd6b3372
+    pub cluster_id: Option<u32>,      // k3rs.cluster_id=1
 }
 
 #[cfg(target_os = "linux")]
@@ -21,6 +23,8 @@ impl K3rsBootParams {
             && self.vpc_id.is_some()
             && self.vpc_cidr.is_some()
             && self.gw_mac.is_some()
+            && self.platform_prefix.is_some()
+            && self.cluster_id.is_some()
     }
 }
 
@@ -42,6 +46,11 @@ pub fn parse_cmdline() -> K3rsBootParams {
                 "k3rs.vpc_id" => params.vpc_id = val.parse().ok(),
                 "k3rs.vpc_cidr" => params.vpc_cidr = Some(val.to_string()),
                 "k3rs.gw_mac" => params.gw_mac = Some(val.to_string()),
+                "k3rs.platform_prefix" => {
+                    params.platform_prefix =
+                        u32::from_str_radix(val.trim_start_matches("0x"), 16).ok();
+                }
+                "k3rs.cluster_id" => params.cluster_id = val.parse().ok(),
                 _ => {}
             }
         }

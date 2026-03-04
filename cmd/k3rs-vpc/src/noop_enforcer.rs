@@ -45,31 +45,17 @@ impl NetworkEnforcer for NoopEnforcer {
         Ok(())
     }
 
-    async fn install_pod_rules(
-        &mut self,
-        pod_id: &str,
-        guest_ipv4: &str,
-        vpc_id: u16,
-    ) -> Result<()> {
-        debug!(pod_id, guest_ipv4, vpc_id, "noop: install_pod_rules");
-        Ok(())
-    }
-
-    async fn remove_pod_rules(&mut self, pod_id: &str) -> Result<()> {
-        debug!(pod_id, "noop: remove_pod_rules");
-        Ok(())
-    }
-
     async fn install_tap_rules(
         &mut self,
         tap_name: &str,
         guest_ipv4: &str,
         ghost_ipv6: &str,
         vpc_id: u16,
+        vpc_cidr: &str,
     ) -> Result<()> {
         debug!(
             tap_name,
-            guest_ipv4, ghost_ipv6, vpc_id, "noop: install_tap_rules"
+            guest_ipv4, ghost_ipv6, vpc_id, vpc_cidr, "noop: install_tap_rules"
         );
         Ok(())
     }
@@ -85,11 +71,12 @@ impl NetworkEnforcer for NoopEnforcer {
         guest_ipv4: &str,
         ghost_ipv6: &str,
         vpc_id: u16,
+        vpc_cidr: &str,
         _container_pid: u32,
     ) -> Result<()> {
         debug!(
             nk_name,
-            guest_ipv4, ghost_ipv6, vpc_id, "noop: install_netkit_rules"
+            guest_ipv4, ghost_ipv6, vpc_id, vpc_cidr, "noop: install_netkit_rules"
         );
         Ok(())
     }

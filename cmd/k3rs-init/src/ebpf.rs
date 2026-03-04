@@ -28,6 +28,8 @@ pub fn setup_ebpf() -> Result<(), Box<dyn std::error::Error>> {
     let ipv6_str = params.ipv6.as_ref().unwrap();
     let vpc_id = params.vpc_id.unwrap();
     let vpc_cidr = params.vpc_cidr.as_ref().unwrap();
+    let platform_prefix = params.platform_prefix.unwrap();
+    let cluster_id = params.cluster_id.unwrap();
 
     // Parse addresses
     let ipv6_bytes = parse_ipv6_bytes(ipv6_str)?;
@@ -45,6 +47,8 @@ pub fn setup_ebpf() -> Result<(), Box<dyn std::error::Error>> {
         .set_global("MY_VPC_ID", &vpc_id, true)
         .set_global("MY_VPC_NETWORK", &vpc_network, true)
         .set_global("MY_VPC_MASK", &vpc_mask, true)
+        .set_global("MY_PLATFORM_PREFIX", &platform_prefix, true)
+        .set_global("MY_CLUSTER_ID", &cluster_id, true)
         .load(EBPF_BYTES)
         .map_err(|e| format!("failed to load eBPF programs: {}", e))?;
 
@@ -87,11 +91,13 @@ pub fn setup_ebpf() -> Result<(), Box<dyn std::error::Error>> {
     std::mem::forget(ebpf);
 
     log_info!(
-        "ebpf: SIIT attached on eth0 (ipv4={} ipv6={} vpc_id={} cidr={})",
+        "ebpf: SIIT attached on eth0 (ipv4={} ipv6={} vpc_id={} cidr={} platform_prefix=0x{:08x} cluster_id={})",
         ipv4_str,
         ipv6_str,
         vpc_id,
-        vpc_cidr
+        vpc_cidr,
+        platform_prefix,
+        cluster_id
     );
 
     Ok(())

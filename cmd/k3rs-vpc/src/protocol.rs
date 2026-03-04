@@ -31,6 +31,7 @@ pub enum VpcRequest {
         guest_ipv4: String,
         ghost_ipv6: String,
         vpc_id: u16,
+        vpc_cidr: String,
         container_pid: u32,
     },
     /// Detach TC classifiers from a netkit interface.
@@ -43,6 +44,7 @@ pub enum VpcRequest {
         guest_ipv4: String,
         ghost_ipv6: String,
         vpc_id: u16,
+        vpc_cidr: String,
     },
     /// Detach TC classifiers from a TAP interface.
     DetachTap {
