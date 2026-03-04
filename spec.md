@@ -18,83 +18,78 @@ The system follows a classical **Control Plane (Server)** and **Data Plane (Agen
 > **Fail-Static Principle**: Restarting or crashing any component must **never** disrupt running workloads. Containers continue to run on Agent nodes regardless of Server or Agent process state. See [Fail-Static Guarantees](#122-fail-static-guarantees) for the full specification.
 
 ```mermaid
-graph TB
+flowchart TB
     subgraph server["k3rs-server (Control Plane)"]
         direction TB
-        API["API Server&lt;br/&gt;(Axum)"]
+        API["API Server<br/>(Axum)"]
         SCHED["Scheduler"]
-        CTRL["Controller Manager&lt;br/&gt;(8 controllers)"]
-        DB["Data Store&lt;br/&gt;(SlateDB)"]
+        CTRL["Controller Manager<br/>(8 controllers)"]
+        DB["Data Store<br/>(SlateDB)"]
         LEADER["Leader Election"]
-        METRICS["Metrics&lt;br/&gt;(/metrics)"]
-        PKI["PKI / CA&lt;br/&gt;(mTLS)"]
+        METRICS["Metrics<br/>(/metrics)"]
+        PKI["PKI / CA<br/>(mTLS)"]
 
-        API &lt;--&gt; DB
-        SCHED &lt;--&gt; DB
-        CTRL &lt;--&gt; DB
-        LEADER --&gt; CTRL
-        LEADER --&gt; SCHED
-        API --&gt; PKI
+        API <--> DB
+        SCHED <--> DB
+        CTRL <--> DB
+        LEADER --> CTRL
+        LEADER --> SCHED
+        API --> PKI
     end
 
     subgraph node["Node"]
         subgraph vpc_daemon["k3rs-vpc (VPC Daemon)"]
             direction TB
             VPC_SYNC["VPC Sync Loop"]
-            GHOST["Ghost IPv6&lt;br/&gt;Allocator"]
-            HOST_EBPF["Host eBPF&lt;br/&gt;tc_egress_v6 + tc_ingress_v6&lt;br/&gt;PEERINGS map only&lt;br/&gt;(Isolation)"]
-            SIIT_OCI["OCI Pod eBPF&lt;br/&gt;siit_in + siit_out&lt;br/&gt;in pod netns eth0&lt;br/&gt;.rodata globals only"]
-            SIIT_VM["VM Guest eBPF&lt;br/&gt;siit_in + siit_out&lt;br/&gt;k3rs-init loads in guest&lt;br/&gt;.rodata globals only"]
-            NAT64["NAT64&lt;br/&gt;(eBPF, node-level)"]
-            VPC_STORE["VpcStore&lt;br/&gt;(Own SlateDB)"]
+            GHOST["Ghost IPv6<br/>Allocator"]
+            EBPF["eBPF Enforcer<br/>(SIIT + tap_guard + VPC classifier)"]
+            NAT64["NAT64<br/>(eBPF)"]
+            VPC_STORE["VpcStore<br/>(Own SlateDB)"]
             VPC_SOCK["Unix Socket API"]
 
-            VPC_SYNC --&gt; VPC_STORE
-            GHOST --&gt; VPC_STORE
-            VPC_SOCK --&gt; GHOST
+            VPC_SYNC --> VPC_STORE
+            GHOST --> VPC_STORE
+            VPC_SOCK --> GHOST
         end
 
         subgraph agent["k3rs-agent (Data Plane)"]
             direction TB
-            KUBELET["Pod Sync Loop&lt;br/&gt;(Kubelet equivalent)"]
-            RUNTIME["Container Runtime&lt;br/&gt;(OCI + Firecracker)"]
-            SPROXY["Service Proxy&lt;br/&gt;(Pingora)"]
-            TUNNEL["Tunnel Proxy&lt;br/&gt;(Pingora)"]
-            DNS["DNS Server&lt;br/&gt;(DNS64 + svc.cluster.local)"]
+            KUBELET["Pod Sync Loop<br/>(Kubelet equivalent)"]
+            RUNTIME["Container Runtime<br/>(OCI + Firecracker)"]
+            SPROXY["Service Proxy<br/>(Pingora)"]
+            TUNNEL["Tunnel Proxy<br/>(Pingora)"]
+            DNS["DNS Server<br/>(DNS64 + svc.cluster.local)"]
         end
 
-        BRIDGE["k3rs0 bridge&lt;br/&gt;(IPv6 only)"]
-        OCI_PODS["OCI Pods&lt;br/&gt;IPv4 inside pod&lt;br/&gt;SIIT in pod netns eth0"]
-        VM_PODS["VM Pods&lt;br/&gt;IPv4 inside VM&lt;br/&gt;SIIT in guest eth0"]
+        BRIDGE["k3rs0 bridge<br/>(IPv6 only)"]
+        OCI_PODS["OCI Pods<br/>(SIIT on host-side netkit)"]
+        VM_PODS["VM Pods<br/>(SIIT inside guest<br/>+ tap_guard on host)"]
 
-        KUBELET --&gt; RUNTIME
-        RUNTIME --&gt; OCI_PODS
-        RUNTIME --&gt; VM_PODS
-        SPROXY &lt;--&gt; OCI_PODS
-        SPROXY &lt;--&gt; VM_PODS
-        DNS --&gt; SPROXY
-        OCI_PODS &lt;--&gt;|"netkit&lt;br/&gt;(Ghost IPv6)"| BRIDGE
-        VM_PODS &lt;--&gt;|"TAP&lt;br/&gt;(Ghost IPv6)"| BRIDGE
+        KUBELET --> RUNTIME
+        RUNTIME --> OCI_PODS
+        RUNTIME --> VM_PODS
+        SPROXY <--> OCI_PODS
+        SPROXY <--> VM_PODS
+        DNS --> SPROXY
+        OCI_PODS <-->|"netkit<br/>(IPv6)"| BRIDGE
+        VM_PODS <-->|"TAP<br/>(IPv6)"| BRIDGE
+        EBPF -.->|"SIIT + VPC classifier<br/>on host-side netkit"| OCI_PODS
+        EBPF -.->|"tap_guard + VPC classifier<br/>on host-side TAP"| VM_PODS
+        NAT64 -.->|"IPv6→IPv4<br/>translation"| BRIDGE
 
-        SIIT_OCI -.-&gt;|"siit_in egress&lt;br/&gt;IPv4→Ghost IPv6&lt;br/&gt;formula, no map"| OCI_PODS
-        SIIT_VM -.-&gt;|"siit_in egress&lt;br/&gt;IPv4→Ghost IPv6&lt;br/&gt;formula, no map"| VM_PODS
-        HOST_EBPF -.-&gt;|"tc_v6 ingress/egress&lt;br/&gt;VPC isolation&lt;br/&gt;bytes 10-11 → vpc_id"| BRIDGE
-        HOST_EBPF -.-&gt;|"tap_guard&lt;br/&gt;anti-spoof&lt;br/&gt;on host TAP"| VM_PODS
-        NAT64 -.-&gt;|"IPv6↔IPv4&lt;br/&gt;translation"| BRIDGE
-
-        KUBELET -- "allocate/release&lt;br/&gt;(Unix socket)" --&gt; VPC_SOCK
-        SPROXY -- "query routes&lt;br/&gt;(Unix socket)" --&gt; VPC_SOCK
-        DNS -- "query VPC scope&lt;br/&gt;(Unix socket)" --&gt; VPC_SOCK
+        KUBELET -- "allocate/release<br/>(Unix socket)" --> VPC_SOCK
+        SPROXY -- "query routes<br/>(Unix socket)" --> VPC_SOCK
+        DNS -- "query VPC scope<br/>(Unix socket)" --> VPC_SOCK
     end
 
-    CLI["k3rsctl (CLI)"] --&gt; API
-    UI["k3rs-ui (Dioxus)"] --&gt; API
-    TUNNEL &lt;--&gt; API
-    KUBELET &lt;--&gt; API
-    VPC_SYNC -- "pull VPCs + peerings&lt;br/&gt;(HTTP)" --&gt; API
+    CLI["k3rsctl (CLI)"] --> API
+    UI["k3rs-ui (Dioxus)"] --> API
+    TUNNEL <--> API
+    KUBELET <--> API
+    VPC_SYNC -- "pull VPCs + peerings<br/>(HTTP)" --> API
 
-    WG["WireGuard Mesh&lt;br/&gt;(cross-node)"]
-    BRIDGE &lt;--&gt; WG
+    WG["WireGuard Mesh<br/>(cross-node)"]
+    BRIDGE <--> WG
 
     style server fill:#1a1a2e,stroke:#e94560,stroke-width:2px,color:#fff
     style agent fill:#16213e,stroke:#0f3460,stroke-width:2px,color:#fff
