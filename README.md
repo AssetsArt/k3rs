@@ -12,7 +12,7 @@ Inspired by [K3s](https://k3s.io/), powered by [Cloudflare Pingora](https://gith
 │  k3rs-server (Control Plane)                                │
 │  ┌──────────┐ ┌───────────┐ ┌─────────────────────────────┐ │
 │  │ API      │ │ Scheduler │ │ Controller Manager          │ │
-│  │ (Axum)   │ │           │ │ (8 controllers)             │ │
+│  │ (Axum)   │ │           │ │ (8 controllers + VPC)       │ │
 │  └──────────┘ └───────────┘ └─────────────────────────────┘ │
 │  ┌──────────┐ ┌───────────┐ ┌──────────┐                    │
 │  │ SlateDB  │ │ Leader    │ │ PKI / CA │                    │
@@ -22,27 +22,37 @@ Inspired by [K3s](https://k3s.io/), powered by [Cloudflare Pingora](https://gith
         ▲                           ▲
         │  mTLS                     │  mTLS
         ▼                           ▼
-┌──────────────────┐  ┌──────────────────┐
-│  k3rs-agent      │  │  k3rs-agent      │
-│  ┌────────────┐  │  │  ┌────────────┐  │
-│  │ Container  │  │  │  │ Container  │  │
-│  │ Runtime    │  │  │  │ Runtime    │  │
-│  ├────────────┤  │  │  ├────────────┤  │
-│  │ Service    │  │  │  │ Service    │  │
-│  │ Proxy      │  │  │  │ Proxy      │  │
-│  ├────────────┤  │  │  ├────────────┤  │
-│  │ DNS Server │  │  │  │ DNS Server │  │
-│  └────────────┘  │  │  └────────────┘  │
-│  [Pod] [Pod]     │  │  [Pod] [Pod]     │
-└──────────────────┘  └──────────────────┘
+┌───────────────────────────┐  ┌───────────────────────────┐
+│  Node                     │  │  Node                     │
+│  ┌──────────────────────┐ │  │  ┌──────────────────────┐ │
+│  │ k3rs-vpc             │ │  │  │ k3rs-vpc             │ │
+│  │ Ghost IPv6 allocator │ │  │  │ Ghost IPv6 allocator │ │
+│  │ eBPF SIIT + VPC      │ │  │  │ eBPF SIIT + VPC      │ │
+│  │ NAT64 (eBPF)         │ │  │  │ NAT64 (eBPF)         │ │
+│  └──────────────────────┘ │  │  └──────────────────────┘ │
+│  ┌──────────────────────┐ │  │  ┌──────────────────────┐ │
+│  │ k3rs-agent           │ │  │  │ k3rs-agent           │ │
+│  │ Runtime, Proxy, DNS  │ │  │  │ Runtime, Proxy, DNS  │ │
+│  └──────────────────────┘ │  │  └──────────────────────┘ │
+│                           │  │                           │
+│  [OCI Pod]  [VM Pod]      │  │  [OCI Pod]  [VM Pod]      │
+│   ↕ netkit   ↕ TAP       │  │   ↕ netkit   ↕ TAP       │
+│       (IPv6 only)         │  │       (IPv6 only)         │
+│  ┌──────────────────────┐ │  │  ┌──────────────────────┐ │
+│  │ k3rs0 bridge (IPv6)  │ │  │  │ k3rs0 bridge (IPv6)  │ │
+│  └──────────────────────┘ │  │  └──────────────────────┘ │
+└───────────────────────────┘  └───────────────────────────┘
 ```
 
 ## Features
 
 - **Pure Rust** — memory-safe, single binary per component
 - **Control Plane / Data Plane** — server never touches containers; agents execute
-- **Fail-Static** — restart server or agent without disrupting running pods
+- **Fail-Static** — restart server, agent, or VPC daemon without disrupting running pods
 - **SlateDB** — embedded state store on object storage (S3/R2/MinIO), no etcd
+- **VPC Networking** — first-class VPC resource with Ghost IPv6 addressing, overlapping IPv4 CIDRs, hard VPC isolation
+- **eBPF Data Plane** — per-pod SIIT (IPv4↔IPv6 translation), VPC enforcement via TC classifiers, NAT64 for external IPv4
+- **Symmetric VM SIIT** — OCI and Firecracker VMs use identical SIIT architecture; VMs do in-guest translation via `k3rs-init`
 - **Pingora** — L4/L7 service proxy, tunnel proxy, ingress controller
 - **Platform-Aware Runtime** — Virtualization.framework microVMs (macOS), Firecracker (Linux), youki/crun OCI (Linux)
 - **Management UI** — Dioxus 0.7 web dashboard
@@ -217,6 +227,19 @@ The server is a **pure control plane** — it never runs containers:
 | **PKI / CA** | Issues mTLS certificates to agents |
 | **Metrics** | Prometheus-compatible `/metrics` endpoint |
 
+### VPC Daemon (k3rs-vpc)
+
+Standalone per-node daemon — sole authority for networking. Independent from agent and server:
+
+| Component | Purpose |
+|---|---|
+| **Ghost IPv6 Allocator** | Allocates `(GuestIPv4, GhostIPv6)` pairs per pod from VPC pools |
+| **eBPF Enforcer** | Per-pod SIIT + VPC classifiers on netkit (OCI) and `tap_guard` on TAP (VM) |
+| **NAT64** | eBPF IPv6→IPv4 translation for external connectivity via `64:ff9b::/96` |
+| **VPC Sync Loop** | Pulls VPC definitions and peerings from server every 10s |
+| **VpcStore** | Own SlateDB instance for allocations, independent crash recovery |
+| **Unix Socket API** | NDJSON protocol at `/run/k3rs-vpc.sock` — agent delegates all network ops |
+
 ### Data Plane (k3rs-agent)
 
 The agent runs on worker nodes and manages the container lifecycle:
@@ -227,8 +250,7 @@ The agent runs on worker nodes and manages the container lifecycle:
 | **Container Runtime** | Platform-aware: Virtualization.framework (macOS), Firecracker/youki/crun (Linux) |
 | **Service Proxy** (Pingora) | L4/L7 load balancing, replaces kube-proxy |
 | **Tunnel Proxy** (Pingora) | Persistent reverse tunnel to server |
-| **DNS Server** | Resolves `<svc>.<ns>.svc.cluster.local` |
-| **CNI** | Pod IP allocation from CIDR block |
+| **DNS Server** (DNS64) | Resolves `<svc>.<ns>.svc.cluster.local`, synthesizes AAAA with Ghost IPv6 |
 
 ### Container Runtime
 
@@ -237,6 +259,32 @@ The agent runs on worker nodes and manages the container lifecycle:
 | macOS | `VirtualizationBackend` | Apple Virtualization.framework microVMs |
 | Linux (KVM) | `FirecrackerBackend` | Firecracker via rust-vmm crates |
 | Linux (no KVM) | `OciBackend` | youki / crun OCI runtimes |
+
+### VPC Networking & Ghost IPv6
+
+K3rs uses **IPv6-native pod networking** with **Ghost IPv6** — a deterministic 128-bit address encoding `(ClusterID, VpcID, GuestIPv4)`. Apps see IPv4 inside pods; SIIT translates to Ghost IPv6 at the interface boundary. The bridge is pure IPv6.
+
+```
+Ghost IPv6 layout (128 bits):
+┌──────────────┬────────┬────────────┬──────────┬──────────────┐
+│ Platform     │ Ver    │ ClusterID  │ VpcID    │ GuestIPv4    │
+│ Prefix (32b) │ (4b)   │ (32b)      │ (16b)    │ (32b)        │
+└──────────────┴────────┴────────────┴──────────┴──────────────┘
+```
+
+**OCI containers**: SIIT runs on host-side netkit — `k3rs-vpc` loads per-pod eBPF.
+**VMs (Firecracker)**: SIIT runs inside the guest — `k3rs-init` loads the same eBPF on `eth0`. Host TAP gets `tap_guard` anti-spoofing only.
+
+```
+OCI:  Pod [app →IPv4→ eBPF(eth0) →IPv6] ==netkit== Host(IPv6) ==bridge== ...
+VM:   VM  [app →IPv4→ eBPF(eth0) →IPv6] ==TAP==    Host(IPv6) ==bridge== ...
+```
+
+Key properties:
+- **No route tables** — 1 route per node covers all pods in all VPCs
+- **Overlapping IPv4 CIDRs** — different VPCs can use the same IPv4 range
+- **Hard VPC isolation** — VPC ID extracted from IPv6 bytes 10-11, no BPF map lookup
+- **IPv4 via NAT64/DNS64** — transparent external IPv4 access
 
 ### State Store
 
@@ -260,6 +308,8 @@ All cluster state lives in SlateDB under structured key prefixes:
 /registry/resourcequotas/<ns>/<name>     → Resource quota
 /registry/networkpolicies/<ns>/<name>    → Network policy
 /registry/pvcs/<ns>/<name>               → Persistent volume claim
+/registry/vpcs/<name>                    → VPC definition (vpc_id, cidr)
+/registry/vpc-peerings/<name>            → VPC peering rules
 /registry/images/<node-name>             → Per-node image list
 /registry/leases/controller-leader       → Leader election lease
 ```
@@ -268,11 +318,12 @@ All cluster state lives in SlateDB under structured key prefixes:
 
 **Restart any component without disrupting running workloads.**
 
-| Scenario | Running Containers | Service Proxy | DNS |
-|---|---|---|---|
-| **Server restart** | ✅ Unaffected | ✅ Continues | ✅ Continues |
-| **Agent restart** | ✅ Independent processes | ❌→✅ Restarts | ❌→✅ Restarts |
-| **Server + Agent restart** | ✅ Unaffected | ❌→✅ Restarts | ❌→✅ Restarts |
+| Scenario | Running Containers | Service Proxy | DNS | VPC Enforcement |
+|---|---|---|---|---|
+| **Server restart** | ✅ Unaffected | ✅ Continues | ✅ Continues | ✅ eBPF persists |
+| **Agent restart** | ✅ Independent processes | ❌→✅ Restarts | ❌→✅ Restarts | ✅ eBPF persists |
+| **VPC daemon restart** | ✅ Unaffected | ✅ Continues | ✅ Continues | ✅ eBPF pinned in kernel |
+| **All restart** | ✅ Unaffected | ❌→✅ Restarts | ❌→✅ Restarts | ✅ eBPF pinned in kernel |
 
 Key invariant: `kill -9 <agent-pid>` must **never** cause any container to stop.
 
@@ -293,6 +344,8 @@ Key invariant: `kill -9 <agent-pid>` must **never** cause any container to stop.
 | **HPA** | Horizontal Pod Autoscaler |
 | **NetworkPolicy** | Pod-level network isolation |
 | **ResourceQuota** | Per-namespace limits |
+| **VPC** | Virtual Private Cloud — isolated IPv4 network with Ghost IPv6 |
+| **VPC Peering** | Cross-VPC connectivity (bidirectional or initiator-only) |
 | **PVC** | Persistent volume claims |
 
 ## Security
@@ -310,7 +363,10 @@ k3rs/
 ├── cmd/
 │   ├── k3rs-server/       # Control plane binary
 │   ├── k3rs-agent/        # Data plane binary
-│   ├── k3rs-init/         # Guest PID 1 for microVMs (static musl binary)
+│   ├── k3rs-vpc/          # VPC daemon (Ghost IPv6 allocator + eBPF enforcer)
+│   ├── k3rs-vpc-ebpf/     # eBPF programs (SIIT, VPC classifiers, NAT64, tap_guard)
+│   ├── k3rs-vpc-common/   # Shared types between eBPF and userspace (BPF map keys/values)
+│   ├── k3rs-init/         # Guest PID 1 for microVMs (static musl, in-guest SIIT)
 │   ├── k3rs-vmm/          # Virtualization.framework helper (macOS, Rust + objc2-virtualization)
 │   ├── k3rs-ui/           # Management UI (Dioxus 0.7)
 │   └── k3rsctl/           # CLI tool
@@ -318,14 +374,15 @@ k3rs/
 │   ├── api/               # Axum HTTP API & handlers
 │   ├── constants/         # Centralized constants (paths, network, runtime, auth, state, vm)
 │   ├── container/         # Container runtime (Virtualization/Firecracker/OCI)
-│   ├── controllers/       # 8 control loops
+│   ├── controllers/       # 8 control loops + VPC controller
 │   ├── metrics/           # Prometheus metrics registry
-│   ├── network/           # CNI + DNS
+│   ├── network/           # Bridge, netkit, DNS64
 │   ├── pki/               # CA & mTLS certificates
 │   ├── proxy/             # Pingora proxies (Service/Ingress/Tunnel)
 │   ├── scheduler/         # Pod placement logic
 │   ├── state/             # SlateDB integration
-│   └── types/             # Cluster object models
+│   ├── types/             # Cluster object models
+│   └── vpc/               # Ghost IPv6 construct/parse/validate library
 ├── scripts/
 │   ├── dev.sh             # Full dev environment (tmux)
 │   ├── dev-agent.sh       # Agent dev loop
@@ -333,7 +390,7 @@ k3rs/
 │   ├── build-kernel.sh    # Build Linux kernel + initrd for microVMs
 │   └── ...
 ├── Containerfile.dev      # Podman dev image (Rust + youki + crun + Firecracker)
-├── Cargo.toml             # Workspace root (15 crates)
+├── Cargo.toml             # Workspace root
 └── spec.md                # Full specification
 ```
 
@@ -345,6 +402,7 @@ k3rs/
 | HTTP API | Axum 0.8 |
 | Proxy / Networking | Cloudflare Pingora 0.7 |
 | State Store | SlateDB 0.10 on object storage |
+| eBPF | Aya 0.13 (pure Rust eBPF toolchain) |
 | Management UI | Dioxus 0.7 (WASM SPA) |
 | Container Runtime | Virtualization.framework / Firecracker / youki / crun |
 | Image Pull | oci-client (OCI Distribution spec) |
