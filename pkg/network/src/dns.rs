@@ -5,6 +5,9 @@ use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+/// FQDN → (ClusterIP, vpc_name, vpc_id) shared map.
+type VpcRecords = Arc<RwLock<HashMap<String, (String, String, u16)>>>;
+
 use pkg_types::vpc::{PeeringDirection, PeeringStatus, VpcPeering};
 
 /// DNS query type: A record (IPv4).
@@ -41,7 +44,7 @@ pub struct DnsServer {
     /// FQDN → ClusterIP (non-VPC fallback)
     records: Arc<RwLock<HashMap<String, String>>>,
     /// FQDN → (ClusterIP, vpc_name, vpc_id) for VPC-scoped records
-    vpc_records: Arc<RwLock<HashMap<String, (String, String, u16)>>>,
+    vpc_records: VpcRecords,
     /// pod_ip → vpc_name (source IP → VPC membership)
     vpc_members: Arc<RwLock<HashMap<String, String>>>,
     /// Directed peering pairs: (src_vpc, dst_vpc) — src can resolve dst's services
@@ -243,7 +246,7 @@ impl DnsServer {
     async fn handle_dns_query(
         query: &[u8],
         records: &Arc<RwLock<HashMap<String, String>>>,
-        vpc_records: &Arc<RwLock<HashMap<String, (String, String, u16)>>>,
+        vpc_records: &VpcRecords,
         vpc_members: &Arc<RwLock<HashMap<String, String>>>,
         peered_vpcs: &Arc<RwLock<HashSet<(String, String)>>>,
         src: &SocketAddr,
@@ -320,7 +323,7 @@ impl DnsServer {
         name: &str,
         src_vpc: &Option<String>,
         records: &Arc<RwLock<HashMap<String, String>>>,
-        vpc_records: &Arc<RwLock<HashMap<String, (String, String, u16)>>>,
+        vpc_records: &VpcRecords,
         peered_vpcs: &Arc<RwLock<HashSet<(String, String)>>>,
     ) -> Option<(String, u16)> {
         if let Some(source_vpc) = src_vpc {

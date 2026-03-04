@@ -240,6 +240,7 @@ impl VpcClient {
     }
 
     /// Attach tap_guard + IPv6 classifiers on a host-side TAP for a VM.
+    #[allow(dead_code)]
     pub async fn attach_tap(
         &self,
         tap_name: &str,
