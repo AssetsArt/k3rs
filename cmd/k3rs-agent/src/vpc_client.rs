@@ -10,10 +10,21 @@ use tracing::warn;
 #[serde(tag = "type")]
 #[allow(dead_code)]
 enum VpcRequest {
-    Allocate { pod_id: String, vpc_name: String },
-    Release { pod_id: String, vpc_name: String },
-    GetRoutes { vpc_id: u16 },
-    CheckReachability { src_vpc: String, dst_vpc: String },
+    Allocate {
+        pod_id: String,
+        vpc_name: String,
+    },
+    Release {
+        pod_id: String,
+        vpc_name: String,
+    },
+    GetRoutes {
+        vpc_id: u16,
+    },
+    CheckReachability {
+        src_vpc: String,
+        dst_vpc: String,
+    },
     AttachNetkit {
         nk_name: String,
         guest_ipv4: String,
@@ -21,14 +32,18 @@ enum VpcRequest {
         vpc_id: u16,
         container_pid: u32,
     },
-    DetachNetkit { nk_name: String },
+    DetachNetkit {
+        nk_name: String,
+    },
     AttachTap {
         tap_name: String,
         guest_ipv4: String,
         ghost_ipv6: String,
         vpc_id: u16,
     },
-    DetachTap { tap_name: String },
+    DetachTap {
+        tap_name: String,
+    },
     ListVpcs,
     Ping,
 }
@@ -241,9 +256,11 @@ impl VpcClient {
 
         match self.request(&req).await {
             Ok(VpcResponse::Ok) => Ok(()),
-            Ok(VpcResponse::Error { code, message }) => {
-                Err(anyhow::anyhow!("VPC attach_tap error [{}]: {}", code, message))
-            }
+            Ok(VpcResponse::Error { code, message }) => Err(anyhow::anyhow!(
+                "VPC attach_tap error [{}]: {}",
+                code,
+                message
+            )),
             Ok(other) => Err(anyhow::anyhow!(
                 "Unexpected VPC response to AttachTap: {:?}",
                 other
@@ -261,9 +278,11 @@ impl VpcClient {
 
         match self.request(&req).await {
             Ok(VpcResponse::Ok) => Ok(()),
-            Ok(VpcResponse::Error { code, message }) => {
-                Err(anyhow::anyhow!("VPC detach_tap error [{}]: {}", code, message))
-            }
+            Ok(VpcResponse::Error { code, message }) => Err(anyhow::anyhow!(
+                "VPC detach_tap error [{}]: {}",
+                code,
+                message
+            )),
             Ok(other) => Err(anyhow::anyhow!(
                 "Unexpected VPC response to DetachTap: {:?}",
                 other

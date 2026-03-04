@@ -68,10 +68,7 @@ pub async fn ensure_bridge(config: &BridgeConfig) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !stderr.contains("File exists") {
-            warn!(
-                "[bridge] ip -6 addr add warning: {}",
-                stderr.trim()
-            );
+            warn!("[bridge] ip -6 addr add warning: {}", stderr.trim());
         }
     }
 

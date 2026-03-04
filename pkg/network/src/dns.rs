@@ -224,7 +224,10 @@ impl DnsServer {
             }
         });
 
-        info!("DNS server is running (DNS64 enabled, upstream={})", self.upstream);
+        info!(
+            "DNS server is running (DNS64 enabled, upstream={})",
+            self.upstream
+        );
         Ok(())
     }
 
@@ -275,14 +278,8 @@ impl DnsServer {
             drop(members);
 
             // Resolve internal service (returns ClusterIP + VPC ID)
-            let (ip_str, vpc_id) = Self::resolve_internal(
-                &name,
-                &src_vpc,
-                records,
-                vpc_records,
-                peered_vpcs,
-            )
-            .await?;
+            let (ip_str, vpc_id) =
+                Self::resolve_internal(&name, &src_vpc, records, vpc_records, peered_vpcs).await?;
 
             let octets: Vec<u8> = ip_str.split('.').filter_map(|o| o.parse().ok()).collect();
             if octets.len() != 4 {
@@ -294,12 +291,8 @@ impl DnsServer {
             match qtype {
                 QTYPE_A => Self::build_a_response(txn_id, question, &octets),
                 QTYPE_AAAA => {
-                    let ghost = Self::construct_ghost_ipv6(
-                        platform_prefix,
-                        cluster_id,
-                        vpc_id,
-                        &octets,
-                    );
+                    let ghost =
+                        Self::construct_ghost_ipv6(platform_prefix, cluster_id, vpc_id, &octets);
                     Self::build_aaaa_response(txn_id, question, &ghost)
                 }
                 _ => None,
@@ -350,16 +343,12 @@ impl DnsServer {
             } else {
                 // Not in VPC records, fall back to plain records
                 let records_map = records.read().await;
-                records_map
-                    .get(name)
-                    .map(|ip| (ip.clone(), DEFAULT_VPC_ID))
+                records_map.get(name).map(|ip| (ip.clone(), DEFAULT_VPC_ID))
             }
         } else {
             // Non-VPC source — use plain records (backward compat)
             let records_map = records.read().await;
-            records_map
-                .get(name)
-                .map(|ip| (ip.clone(), DEFAULT_VPC_ID))
+            records_map.get(name).map(|ip| (ip.clone(), DEFAULT_VPC_ID))
         }
     }
 
@@ -593,5 +582,4 @@ impl DnsServer {
         }
         Some(offset)
     }
-
 }

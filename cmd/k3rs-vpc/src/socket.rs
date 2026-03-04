@@ -202,10 +202,7 @@ async fn dispatch(
                 Ok(()) => VpcResponse::Ok,
                 Err(e) => VpcResponse::Error {
                     code: "attach_netkit_error".to_string(),
-                    message: format!(
-                        "Failed to attach TC to netkit {}: {}",
-                        nk_name, e
-                    ),
+                    message: format!("Failed to attach TC to netkit {}: {}", nk_name, e),
                 },
             }
         }
@@ -215,10 +212,7 @@ async fn dispatch(
                 Ok(()) => VpcResponse::Ok,
                 Err(e) => VpcResponse::Error {
                     code: "detach_netkit_error".to_string(),
-                    message: format!(
-                        "Failed to detach TC from netkit {}: {}",
-                        nk_name, e
-                    ),
+                    message: format!("Failed to detach TC from netkit {}: {}", nk_name, e),
                 },
             }
         }

@@ -5,11 +5,11 @@ use std::path::Path;
 #[cfg(target_os = "linux")]
 #[derive(Debug, Default)]
 pub struct K3rsBootParams {
-    pub ipv4: Option<String>,      // k3rs.ipv4=10.0.1.5
-    pub ipv6: Option<String>,      // k3rs.ipv6=fd6b:3372:...
-    pub vpc_id: Option<u16>,       // k3rs.vpc_id=42
-    pub vpc_cidr: Option<String>,  // k3rs.vpc_cidr=10.0.1.0/24
-    pub gw_mac: Option<String>,    // k3rs.gw_mac=02:fc:00:00:00:01
+    pub ipv4: Option<String>,     // k3rs.ipv4=10.0.1.5
+    pub ipv6: Option<String>,     // k3rs.ipv6=fd6b:3372:...
+    pub vpc_id: Option<u16>,      // k3rs.vpc_id=42
+    pub vpc_cidr: Option<String>, // k3rs.vpc_cidr=10.0.1.0/24
+    pub gw_mac: Option<String>,   // k3rs.gw_mac=02:fc:00:00:00:01
 }
 
 #[cfg(target_os = "linux")]
@@ -102,11 +102,13 @@ fn configure_vpc_networking(
     gw_mac: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Parse VPC CIDR to get netmask
-    let (_network_str, prefix_len) = vpc_cidr
-        .split_once('/')
-        .ok_or("invalid vpc_cidr format")?;
+    let (_network_str, prefix_len) = vpc_cidr.split_once('/').ok_or("invalid vpc_cidr format")?;
     let prefix_len: u32 = prefix_len.parse()?;
-    let mask = if prefix_len == 0 { 0u32 } else { !0u32 << (32 - prefix_len) };
+    let mask = if prefix_len == 0 {
+        0u32
+    } else {
+        !0u32 << (32 - prefix_len)
+    };
 
     let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
     if sock < 0 {
@@ -174,11 +176,7 @@ fn set_ipv4_addr(sock: i32, iface: &str, addr: &str) -> Result<(), Box<dyn std::
 
 /// Set IPv4 netmask on an interface using SIOCSIFNETMASK ioctl.
 #[cfg(target_os = "linux")]
-fn set_ipv4_netmask(
-    sock: i32,
-    iface: &str,
-    mask: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn set_ipv4_netmask(sock: i32, iface: &str, mask: u32) -> Result<(), Box<dyn std::error::Error>> {
     let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
     set_ifr_name(&mut ifr, iface);
 

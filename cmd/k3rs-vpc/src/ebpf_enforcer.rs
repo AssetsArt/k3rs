@@ -406,8 +406,8 @@ impl NetworkEnforcer for EbpfEnforcer {
             let pod_ns_path = format!("/proc/{}/ns/net", pid);
             let pod_ns = std::fs::File::open(&pod_ns_path)
                 .with_context(|| format!("failed to open pod netns at {}", pod_ns_path))?;
-            let orig_ns = std::fs::File::open("/proc/self/ns/net")
-                .context("failed to open current netns")?;
+            let orig_ns =
+                std::fs::File::open("/proc/self/ns/net").context("failed to open current netns")?;
 
             // Enter pod network namespace
             let ret = unsafe { libc::setns(pod_ns.as_raw_fd(), libc::CLONE_NEWNET) };
@@ -431,14 +431,20 @@ impl NetworkEnforcer for EbpfEnforcer {
                 siit_in
                     .attach("eth0", TcAttachType::Egress)
                     .with_context(|| {
-                        format!("failed to attach siit_in to eth0 egress in pod (nk={})", nk_name_owned)
+                        format!(
+                            "failed to attach siit_in to eth0 egress in pod (nk={})",
+                            nk_name_owned
+                        )
                     })?;
 
                 // Attach siit_out → eth0 Ingress (IPv6 arrives → translated to IPv4 for app)
                 siit_out
                     .attach("eth0", TcAttachType::Ingress)
                     .with_context(|| {
-                        format!("failed to attach siit_out to eth0 ingress in pod (nk={})", nk_name_owned)
+                        format!(
+                            "failed to attach siit_out to eth0 ingress in pod (nk={})",
+                            nk_name_owned
+                        )
                     })?;
 
                 Ok(())
@@ -527,7 +533,10 @@ impl NetworkEnforcer for EbpfEnforcer {
             // up automatically when Aya detaches on drop or when the pod netns is destroyed.
             self.pod_bpf.remove(nk_name);
 
-            debug!("ebpf: removed netkit rules for nk={} (in-pod SIIT cleaned up automatically)", nk_name);
+            debug!(
+                "ebpf: removed netkit rules for nk={} (in-pod SIIT cleaned up automatically)",
+                nk_name
+            );
         }
         Ok(())
     }
@@ -751,20 +760,14 @@ impl NetworkEnforcer for EbpfEnforcer {
         out.push_str("\n[Per-Netkit SIIT Instances]\n");
         for (nk, (ipv4, vpc_id)) in &self.nk_vpc_pods {
             let addr = Ipv4Addr::from(*ipv4);
-            out.push_str(&format!(
-                "  nk={} ipv4={} vpc_id={}\n",
-                nk, addr, vpc_id
-            ));
+            out.push_str(&format!("  nk={} ipv4={} vpc_id={}\n", nk, addr, vpc_id));
         }
 
         // Per-TAP instances
         out.push_str("\n[Per-TAP Instances]\n");
         for (tap, (ipv4, vpc_id)) in &self.tap_to_ip {
             let addr = Ipv4Addr::from(*ipv4);
-            out.push_str(&format!(
-                "  tap={} ipv4={} vpc_id={}\n",
-                tap, addr, vpc_id
-            ));
+            out.push_str(&format!("  tap={} ipv4={} vpc_id={}\n", tap, addr, vpc_id));
         }
 
         // VPC Pods

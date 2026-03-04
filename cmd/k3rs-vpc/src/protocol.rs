@@ -6,11 +6,24 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum VpcRequest {
-    Allocate { pod_id: String, vpc_name: String },
-    Release { pod_id: String, vpc_name: String },
-    Query { pod_id: String },
-    GetRoutes { vpc_id: u16 },
-    CheckReachability { src_vpc: String, dst_vpc: String },
+    Allocate {
+        pod_id: String,
+        vpc_name: String,
+    },
+    Release {
+        pod_id: String,
+        vpc_name: String,
+    },
+    Query {
+        pod_id: String,
+    },
+    GetRoutes {
+        vpc_id: u16,
+    },
+    CheckReachability {
+        src_vpc: String,
+        dst_vpc: String,
+    },
     /// Attach SIIT translators (inside pod netns on eth0) and IPv6 VPC classifiers
     /// (on host-side netkit) for a container.
     AttachNetkit {
@@ -21,7 +34,9 @@ pub enum VpcRequest {
         container_pid: u32,
     },
     /// Detach TC classifiers from a netkit interface.
-    DetachNetkit { nk_name: String },
+    DetachNetkit {
+        nk_name: String,
+    },
     /// Attach tap_guard + IPv6 classifiers on host-side TAP for a VM.
     AttachTap {
         tap_name: String,
@@ -30,7 +45,9 @@ pub enum VpcRequest {
         vpc_id: u16,
     },
     /// Detach TC classifiers from a TAP interface.
-    DetachTap { tap_name: String },
+    DetachTap {
+        tap_name: String,
+    },
     ListVpcs,
     Ping,
 }

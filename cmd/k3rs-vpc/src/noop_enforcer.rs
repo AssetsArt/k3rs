@@ -67,7 +67,10 @@ impl NetworkEnforcer for NoopEnforcer {
         ghost_ipv6: &str,
         vpc_id: u16,
     ) -> Result<()> {
-        debug!(tap_name, guest_ipv4, ghost_ipv6, vpc_id, "noop: install_tap_rules");
+        debug!(
+            tap_name,
+            guest_ipv4, ghost_ipv6, vpc_id, "noop: install_tap_rules"
+        );
         Ok(())
     }
 
@@ -84,7 +87,10 @@ impl NetworkEnforcer for NoopEnforcer {
         vpc_id: u16,
         _container_pid: u32,
     ) -> Result<()> {
-        debug!(nk_name, guest_ipv4, ghost_ipv6, vpc_id, "noop: install_netkit_rules");
+        debug!(
+            nk_name,
+            guest_ipv4, ghost_ipv6, vpc_id, "noop: install_netkit_rules"
+        );
         Ok(())
     }
 

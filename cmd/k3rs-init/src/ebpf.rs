@@ -154,9 +154,7 @@ fn parse_ipv4_host_order(addr: &str) -> Result<u32, Box<dyn std::error::Error>> 
 /// Parse CIDR string like "10.0.1.0/24" into (network, mask) in host byte order.
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
 fn parse_cidr(cidr: &str) -> Result<(u32, u32), Box<dyn std::error::Error>> {
-    let (addr_str, prefix_str) = cidr
-        .split_once('/')
-        .ok_or("invalid CIDR format")?;
+    let (addr_str, prefix_str) = cidr.split_once('/').ok_or("invalid CIDR format")?;
     let prefix_len: u32 = prefix_str.parse()?;
     if prefix_len > 32 {
         return Err(format!("invalid CIDR prefix: {}", prefix_len).into());

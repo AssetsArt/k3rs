@@ -100,9 +100,7 @@ impl FcNetworkManager {
 
         // Set well-known MAC address (matches guest static ARP)
         let output = tokio::process::Command::new("ip")
-            .args([
-                "link", "set", &tap_name, "address", TAP_WELL_KNOWN_MAC,
-            ])
+            .args(["link", "set", &tap_name, "address", TAP_WELL_KNOWN_MAC])
             .output()
             .await?;
         if !output.status.success() {
@@ -240,10 +238,7 @@ impl FcNetworkManager {
                 );
             }
         }
-        info!(
-            "[fc-net] IPv6 {} added to TAP {}",
-            ghost_ipv6, tap_name
-        );
+        info!("[fc-net] IPv6 {} added to TAP {}", ghost_ipv6, tap_name);
         Ok(())
     }
 

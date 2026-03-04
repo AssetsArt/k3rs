@@ -102,28 +102,16 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     run_ip(&["link", "set", &nk_host, "up"]).await?;
 
     // 4. Inside netns: rename peer → eth0, bring up lo + eth0
-    nsenter_run(
-        pid,
-        &["ip", "link", "set", &nk_peer, "name", "eth0"],
-    )
-    .await?;
+    nsenter_run(pid, &["ip", "link", "set", &nk_peer, "name", "eth0"]).await?;
     nsenter_run(pid, &["ip", "link", "set", "lo", "up"]).await?;
     nsenter_run(pid, &["ip", "link", "set", "eth0", "up"]).await?;
 
     // 5. Assign Ghost IPv6 (/128) and guest IPv4 (/32) to eth0
     let ipv6_cidr = format!("{}/128", config.ghost_ipv6);
-    nsenter_run(
-        pid,
-        &["ip", "-6", "addr", "add", &ipv6_cidr, "dev", "eth0"],
-    )
-    .await?;
+    nsenter_run(pid, &["ip", "-6", "addr", "add", &ipv6_cidr, "dev", "eth0"]).await?;
 
     let ipv4_cidr = format!("{}/32", config.guest_ipv4);
-    nsenter_run(
-        pid,
-        &["ip", "addr", "add", &ipv4_cidr, "dev", "eth0"],
-    )
-    .await?;
+    nsenter_run(pid, &["ip", "addr", "add", &ipv4_cidr, "dev", "eth0"]).await?;
 
     // 6. Default IPv6 route via bridge gateway (fe80::1)
     nsenter_run(
@@ -139,23 +127,34 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     nsenter_run(
         pid,
         &[
-            "ip", "route", "add", "169.254.1.1/32", "dev", "eth0", "scope", "link",
+            "ip",
+            "route",
+            "add",
+            "169.254.1.1/32",
+            "dev",
+            "eth0",
+            "scope",
+            "link",
         ],
     )
     .await?;
     nsenter_run(
         pid,
         &[
-            "ip", "route", "add", "default", "via", "169.254.1.1", "dev", "eth0",
+            "ip",
+            "route",
+            "add",
+            "default",
+            "via",
+            "169.254.1.1",
+            "dev",
+            "eth0",
         ],
     )
     .await?;
 
     // 8. Enable proxy_arp on host-side netkit so it responds to ARP for 169.254.1.1
-    let proxy_arp_path = format!(
-        "/proc/sys/net/ipv4/conf/{}/proxy_arp",
-        config.nk_host()
-    );
+    let proxy_arp_path = format!("/proc/sys/net/ipv4/conf/{}/proxy_arp", config.nk_host());
     if let Err(e) = tokio::fs::write(&proxy_arp_path, "1").await {
         warn!(
             "[netns:{}] Failed to enable proxy_arp on {}: {}",
