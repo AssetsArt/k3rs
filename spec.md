@@ -21,75 +21,80 @@ The system follows a classical **Control Plane (Server)** and **Data Plane (Agen
 graph TB
     subgraph server["k3rs-server (Control Plane)"]
         direction TB
-        API["API Server<br/>(Axum)"]
+        API["API Server&lt;br/&gt;(Axum)"]
         SCHED["Scheduler"]
-        CTRL["Controller Manager<br/>(8 controllers)"]
-        DB["Data Store<br/>(SlateDB)"]
+        CTRL["Controller Manager&lt;br/&gt;(8 controllers)"]
+        DB["Data Store&lt;br/&gt;(SlateDB)"]
         LEADER["Leader Election"]
-        METRICS["Metrics<br/>(/metrics)"]
-        PKI["PKI / CA<br/>(mTLS)"]
+        METRICS["Metrics&lt;br/&gt;(/metrics)"]
+        PKI["PKI / CA&lt;br/&gt;(mTLS)"]
 
-        API <--> DB
-        SCHED <--> DB
-        CTRL <--> DB
-        LEADER --> CTRL
-        LEADER --> SCHED
-        API --> PKI
+        API &lt;--&gt; DB
+        SCHED &lt;--&gt; DB
+        CTRL &lt;--&gt; DB
+        LEADER --&gt; CTRL
+        LEADER --&gt; SCHED
+        API --&gt; PKI
     end
 
     subgraph node["Node"]
         subgraph vpc_daemon["k3rs-vpc (VPC Daemon)"]
             direction TB
             VPC_SYNC["VPC Sync Loop"]
-            GHOST["Ghost IPv6<br/>Allocator"]
-            EBPF["eBPF Enforcer<br/>(SIIT + tap_guard + VPC classifier)"]
-            NAT64["NAT64<br/>(eBPF)"]
-            VPC_STORE["VpcStore<br/>(Own SlateDB)"]
+            GHOST["Ghost IPv6&lt;br/&gt;Allocator"]
+            HOST_EBPF["Host eBPF&lt;br/&gt;tc_egress_v6 + tc_ingress_v6&lt;br/&gt;PEERINGS map only&lt;br/&gt;(Isolation)"]
+            SIIT_OCI["OCI Pod eBPF&lt;br/&gt;siit_in + siit_out&lt;br/&gt;in pod netns eth0&lt;br/&gt;.rodata globals only"]
+            SIIT_VM["VM Guest eBPF&lt;br/&gt;siit_in + siit_out&lt;br/&gt;k3rs-init loads in guest&lt;br/&gt;.rodata globals only"]
+            NAT64["NAT64&lt;br/&gt;(eBPF, node-level)"]
+            VPC_STORE["VpcStore&lt;br/&gt;(Own SlateDB)"]
             VPC_SOCK["Unix Socket API"]
 
-            VPC_SYNC --> VPC_STORE
-            GHOST --> VPC_STORE
-            VPC_SOCK --> GHOST
+            VPC_SYNC --&gt; VPC_STORE
+            GHOST --&gt; VPC_STORE
+            VPC_SOCK --&gt; GHOST
         end
 
         subgraph agent["k3rs-agent (Data Plane)"]
             direction TB
-            KUBELET["Pod Sync Loop<br/>(Kubelet equivalent)"]
-            RUNTIME["Container Runtime<br/>(OCI + Firecracker)"]
-            SPROXY["Service Proxy<br/>(Pingora)"]
-            TUNNEL["Tunnel Proxy<br/>(Pingora)"]
-            DNS["DNS Server<br/>(DNS64 + svc.cluster.local)"]
+            KUBELET["Pod Sync Loop&lt;br/&gt;(Kubelet equivalent)"]
+            RUNTIME["Container Runtime&lt;br/&gt;(OCI + Firecracker)"]
+            SPROXY["Service Proxy&lt;br/&gt;(Pingora)"]
+            TUNNEL["Tunnel Proxy&lt;br/&gt;(Pingora)"]
+            DNS["DNS Server&lt;br/&gt;(DNS64 + svc.cluster.local)"]
         end
 
-        BRIDGE["k3rs0 bridge<br/>(IPv6 only)"]
-        OCI_PODS["OCI Pods<br/>(SIIT on host-side netkit)"]
-        VM_PODS["VM Pods<br/>(SIIT inside guest<br/>+ tap_guard on host)"]
+        BRIDGE["k3rs0 bridge&lt;br/&gt;(IPv6 only)"]
+        OCI_PODS["OCI Pods&lt;br/&gt;IPv4 inside pod&lt;br/&gt;SIIT in pod netns eth0"]
+        VM_PODS["VM Pods&lt;br/&gt;IPv4 inside VM&lt;br/&gt;SIIT in guest eth0"]
 
-        KUBELET --> RUNTIME
-        RUNTIME --> OCI_PODS
-        RUNTIME --> VM_PODS
-        SPROXY <--> OCI_PODS
-        SPROXY <--> VM_PODS
-        DNS --> SPROXY
-        OCI_PODS <-->|"netkit<br/>(IPv6)"| BRIDGE
-        VM_PODS <-->|"TAP<br/>(IPv6)"| BRIDGE
-        EBPF -.->|"SIIT + VPC classifier<br/>on host-side netkit"| OCI_PODS
-        EBPF -.->|"tap_guard + VPC classifier<br/>on host-side TAP"| VM_PODS
-        NAT64 -.->|"IPv6→IPv4<br/>translation"| BRIDGE
+        KUBELET --&gt; RUNTIME
+        RUNTIME --&gt; OCI_PODS
+        RUNTIME --&gt; VM_PODS
+        SPROXY &lt;--&gt; OCI_PODS
+        SPROXY &lt;--&gt; VM_PODS
+        DNS --&gt; SPROXY
+        OCI_PODS &lt;--&gt;|"netkit&lt;br/&gt;(Ghost IPv6)"| BRIDGE
+        VM_PODS &lt;--&gt;|"TAP&lt;br/&gt;(Ghost IPv6)"| BRIDGE
 
-        KUBELET -- "allocate/release<br/>(Unix socket)" --> VPC_SOCK
-        SPROXY -- "query routes<br/>(Unix socket)" --> VPC_SOCK
-        DNS -- "query VPC scope<br/>(Unix socket)" --> VPC_SOCK
+        SIIT_OCI -.-&gt;|"siit_in egress&lt;br/&gt;IPv4→Ghost IPv6&lt;br/&gt;formula, no map"| OCI_PODS
+        SIIT_VM -.-&gt;|"siit_in egress&lt;br/&gt;IPv4→Ghost IPv6&lt;br/&gt;formula, no map"| VM_PODS
+        HOST_EBPF -.-&gt;|"tc_v6 ingress/egress&lt;br/&gt;VPC isolation&lt;br/&gt;bytes 10-11 → vpc_id"| BRIDGE
+        HOST_EBPF -.-&gt;|"tap_guard&lt;br/&gt;anti-spoof&lt;br/&gt;on host TAP"| VM_PODS
+        NAT64 -.-&gt;|"IPv6↔IPv4&lt;br/&gt;translation"| BRIDGE
+
+        KUBELET -- "allocate/release&lt;br/&gt;(Unix socket)" --&gt; VPC_SOCK
+        SPROXY -- "query routes&lt;br/&gt;(Unix socket)" --&gt; VPC_SOCK
+        DNS -- "query VPC scope&lt;br/&gt;(Unix socket)" --&gt; VPC_SOCK
     end
 
-    CLI["k3rsctl (CLI)"] --> API
-    UI["k3rs-ui (Dioxus)"] --> API
-    TUNNEL <--> API
-    KUBELET <--> API
-    VPC_SYNC -- "pull VPCs + peerings<br/>(HTTP)" --> API
+    CLI["k3rsctl (CLI)"] --&gt; API
+    UI["k3rs-ui (Dioxus)"] --&gt; API
+    TUNNEL &lt;--&gt; API
+    KUBELET &lt;--&gt; API
+    VPC_SYNC -- "pull VPCs + peerings&lt;br/&gt;(HTTP)" --&gt; API
 
-    WG["WireGuard Mesh<br/>(cross-node)"]
-    BRIDGE <--> WG
+    WG["WireGuard Mesh&lt;br/&gt;(cross-node)"]
+    BRIDGE &lt;--&gt; WG
 
     style server fill:#1a1a2e,stroke:#e94560,stroke-width:2px,color:#fff
     style agent fill:#16213e,stroke:#0f3460,stroke-width:2px,color:#fff
@@ -99,6 +104,10 @@ graph TB
     style VM_PODS fill:#533483,stroke:#e94560,color:#fff
     style BRIDGE fill:#1a472a,stroke:#2ea043,color:#fff
     style WG fill:#1a472a,stroke:#2ea043,color:#fff
+    style HOST_EBPF fill:#1a2e1a,stroke:#3fb077,color:#fff
+    style SIIT_OCI fill:#2e1a1a,stroke:#f05050,color:#fff
+    style SIIT_VM fill:#2e1a1a,stroke:#f05050,color:#fff
+    style NAT64 fill:#1a2a3e,stroke:#5090f0,color:#fff
 ```
 
 ### 3.1 Server Components (Control Plane)
@@ -121,8 +130,8 @@ The agent binary runs on worker nodes and executes workloads:
 ### 3.3 VPC Daemon (`k3rs-vpc`)
 A standalone per-node daemon managing all VPC networking independently from the Agent:
 - **Ghost IPv6 Allocator**: Allocates `(GuestIPv4, Ghost IPv6)` pairs per pod. Ghost IPv6 is the real routable address assigned to the pod interface.
-- **eBPF Enforcer**: Per-pod TC classifier programs on netkit/TAP interfaces. Each OCI pod gets its own eBPF instance with `.rodata` globals (`MY_GHOST_IPV6`, `MY_GUEST_IPV4`, `MY_VPC_ID`) baked at load time — SIIT translates IPv4↔IPv6 at the netkit boundary. TAP/VM pods get a lightweight `tap_guard` anti-spoofing classifier on the host side — the VM guest performs its own SIIT translation via `k3rs-init` (symmetric architecture). IPv6 classifiers extract VPC ID directly from Ghost IPv6 header (bytes 10-11) — no BPF map lookup for same-VPC traffic. Only the `PEERINGS` map is used for cross-VPC decisions.
-- **NAT64**: eBPF-based IPv6→IPv4 translation at node level. Pods reach external IPv4 services via well-known prefix `64:ff9b::/96`.
+- **eBPF Enforcer**: Per-pod TC classifier programs on netkit/TAP interfaces. Each OCI pod gets its own eBPF instance with `.rodata` globals (`MY_GHOST_IPV6`, `MY_GUEST_IPV4`, `MY_VPC_ID`, `MY_VPC_NETWORK`, `MY_VPC_MASK`, `MY_PLATFORM_PREFIX`, `MY_CLUSTER_ID`) baked at load time — SIIT translates IPv4↔IPv6 at the netkit boundary without any BPF map lookup. TAP/VM pods get a lightweight `tap_guard` anti-spoofing classifier on the host side — the VM guest performs its own SIIT via `k3rs-init` (symmetric architecture). IPv6 host-side classifiers (`tc_egress_v6`/`tc_ingress_v6`) extract VPC ID directly from Ghost IPv6 header (bytes 10-11) — no BPF map lookup needed for same-VPC traffic. There are **no IPv4 host-side classifiers** — all pod-to-pod traffic on the host is Ghost IPv6 after SIIT.
+- **NAT64**: eBPF-based IPv6→IPv4 translation at node level. Pods reach external IPv4 services via well-known prefix `64:ff9b::96`.
 - **VPC Sync Loop**: Pulls VPC definitions and peerings from the server every 10s.
 - **VpcStore (Own SlateDB)**: Independent state store for VPC allocations, crash recovery.
 - **Unix Socket API**: NDJSON protocol at `/run/k3rs-vpc.sock` — Agent delegates all network decisions here.
@@ -508,22 +517,27 @@ enum VpcRequest {
         dst_vpc: String,
     },
     /// Attach eBPF enforcement to a netkit interface (OCI pod)
+    /// `vpc_cidr` is required to set MY_VPC_NETWORK/MY_VPC_MASK in the eBPF program
     AttachNetkit {
         netkit_name: String,
         guest_ipv4: String,
         ghost_ipv6: String,
         vpc_id: u16,
+        vpc_cidr: String,
+        container_pid: u32,
     },
     /// Detach eBPF enforcement from a netkit interface
     DetachNetkit {
         netkit_name: String,
     },
-    /// Attach eBPF enforcement to a TAP interface (VM)
+    /// Attach tap_guard + IPv6 classifiers on host-side TAP for a VM.
+    /// `vpc_cidr` is required to set MY_VPC_NETWORK/MY_VPC_MASK in the eBPF program
     AttachTap {
         tap_name: String,
         guest_ipv4: String,
         ghost_ipv6: String,
         vpc_id: u16,
+        vpc_cidr: String,
     },
     /// Detach eBPF enforcement from a TAP interface
     DetachTap {
@@ -634,111 +648,158 @@ struct Allocation {
 - **OCI containers**: SIIT runs on the **host-side netkit** — `k3rs-vpc` loads per-pod eBPF on the host.
 - **VMs (Firecracker)**: SIIT runs **inside the guest** — `k3rs-init` (guest PID 1) loads the same eBPF programs on `eth0`. The TAP link carries only IPv6. The host attaches a lightweight `tap_guard` anti-spoofing classifier instead.
 
-**Per-pod eBPF instances**: Each OCI pod gets its own `Ebpf` instance loaded with `.rodata` globals baked at load time via `EbpfLoader::set_global()`. Each TAP/VM gets a per-TAP instance with `tap_guard` + `.rodata` on the host side, plus the same SIIT programs loaded inside the guest kernel. Shared BPF maps (`VPC_PODS`, `PEERINGS`, etc.) are accessed via bpffs pin directory — each per-pod instance opens the same pinned maps.
+**Per-pod eBPF instances**: Each OCI pod gets its own `Ebpf` instance loaded with `.rodata` globals baked at load time via `EbpfLoader::set_global()`. Each TAP/VM gets a per-TAP instance with `tap_guard` + `.rodata` on the host side, plus the same SIIT programs loaded inside the guest kernel. Only the `PEERINGS` and `VPC_CIDRS` shared BPF maps are used — accessed via bpffs pin directory. **No `VPC_PODS` or `VPC_MEMBERSHIP` maps exist** — Ghost IPv6 destination addresses are constructed inline from `.rodata` globals (`MY_PLATFORM_PREFIX`, `MY_CLUSTER_ID`, `MY_VPC_ID`, `dst_ipv4`) using a deterministic formula.
 
 ###### Packet Flow Architecture
 
-**OCI Pod → OCI Pod** (SIIT on host-side netkit):
+**Architecture separation (host vs. pod/VM):**
+
+| Layer | Programs | BPF Maps |
+|---|---|---|
+| **Host** (TAP/netkit host iface) | `tc_egress_v6`, `tc_ingress_v6` | `PEERINGS` only |
+| **OCI Pod** (eth0 in pod netns via `EbpfEnforcer`) | `siit_in`, `siit_out` | None (`.rodata` globals) |
+| **VM guest** (eth0 via `k3rs-init`) | `siit_in`, `siit_out` | None (`.rodata` globals) |
+| **NAT64** (k3rs0 + phys) | `nat64_egress`, `nat64_ingress` | `NAT64_CONNTRACK`, `NAT64_CONFIG` |
+
+There are **no IPv4 host-side classifiers**. All pod/VM-to-pod/VM traffic on the host is Ghost IPv6 after SIIT. VPC ID is encoded at bytes 10-11 of every Ghost IPv6 address — enforcement is free (no lookup).
+
+**OCI Pod → OCI Pod** (SIIT in pod netns eth0, isolation on host-side netkit):
 
 ```
-                      Pod A (10.0.0.12, vpc1)         Pod B (10.0.0.13, vpc1)
-                           │                                  ▲
-                     IPv4  │ src=.12 dst=.13           IPv4   │ src=.12 dst=.13
-                           ▼                                  │
-                        [eth0]                             [eth0]
-                           │  netkit (L2)                     │  netkit (L2)
-                           ▼                                  │
-                      [nk-podA]                          [nk-podB]
-                           │                                  ▲
-               ┌───────────┤ host-side netkit host-side netkit├──────────┐
-               │  INGRESS  │                                  │  EGRESS  │
-               │           │                                  │          │
-               │  ① siit_in│ IPv4→IPv6                       │⑤siit_out │ IPv6→IPv4
-               │           │ src=podA_ghost                   │          │ src=10.0.0.12
-               │           │ dst=podB_ghost                   │          │ dst=10.0.0.13
-               │           │                                  │          │
-               │  ② tc_ingress_v6                            │④tc_egress_v6
-               │           │ vpc_id=1==1 → ALLOW              │          │ vpc_id=1==1 → ALLOW
-               └───────────┤                                  ├──────────┘
-                           │                                  │
-                           ▼          ③ bridge FDB           │
-                        k3rs0 ────── IPv6 forward ────────────┘
-                      (IPv6 only)
+   Pod A netns (10.0.0.12, vpc1)            Pod B netns (10.0.0.13, vpc1)
+   ┌─────────────────────────┐              ┌─────────────────────────┐
+   │  app sends IPv4         │              │  app receives IPv4      │
+   │  src=.12 dst=.13        │              │  src=.12 dst=.13        │
+   │         │               │              │         ▲               │
+   │   [eth0] Egress         │              │   [eth0] Ingress        │
+   │ ① siit_in (per-pod eBPF)│              │ ⑥ siit_out(per-pod eBPF)│
+   │   IPv4 → Ghost IPv6     │              │   Ghost IPv6 → IPv4     │
+   │   construct_ghost_ipv6  │              │   dst=MY_GHOST_IPV6 ✓   │
+   │   (formula, no map)     │              │                         │
+   │         │               │              │         │               │
+   └─────────┼───────────────┘              └─────────┼───────────────┘
+             │ netkit (Ghost IPv6 only)                │ netkit (Ghost IPv6 only)
+             ▼                                         │
+        [nk-podA]  HOST netkit                    [nk-podB]  HOST netkit
+        ┌──────────────────────┐               ┌──────────────────────┐
+        │  Ingress             │               │  Egress              │
+        │ ② tc_ingress_v6      │               │ ⑤ tc_egress_v6       │
+        │   Ghost prefix ✓     │               │   Ghost prefix ✓     │
+        │   bytes[10-11]=vpc_A │               │   bytes[10-11]=vpc_B │
+        │   PEERINGS lookup    │               │   PEERINGS lookup    │
+        │   same VPC → ALLOW   │               │   same VPC → ALLOW   │
+        └──────────┬───────────┘               └──────────┬───────────┘
+                   │                                      ▲
+                   ▼        ③ bridge FDB / IPv6 forward   │
+                k3rs0 ──────────────────────────────────────
+              (IPv6 only)
 ```
 
-**VM → VM** (SIIT inside guest, `tap_guard` on host):
+**VM → VM** (SIIT inside guest eth0, tap_guard + isolation on host TAP):
 
 ```
-                    VM A (10.0.0.12, vpc1)              VM B (10.0.0.13, vpc1)
-                           │                                  ▲
-                     IPv4  │ src=.12 dst=.13           IPv4   │ src=.12 dst=.13
-                           ▼                                  │
-               ┌───────── [eth0] ──────────┐    ┌────────── [eth0] ──────────┐
-               │  Guest eBPF (k3rs-init)   │    │  Guest eBPF (k3rs-init)    │
-               │  EGRESS                   │    │  INGRESS                   │
-               │  ① siit_in│ IPv4→IPv6     │    │  ⑥ siit_out│ IPv6→IPv4    │
-               │           │ src=vmA_ghost │    │            │ src=10.0.0.12│
-               │           │ dst=vmB_ghost │    │            │ dst=10.0.0.13│
-               │           │ (formula      │    │            │              │
-               │           │  fallback)    │    │            │              │
-               └───────────┤───────────────┘    └────────────┤──────────────┘
-                           │  TAP (IPv6 only)                │  TAP (IPv6 only)
-                           ▼                                  │
-                      [tap-vmA]                          [tap-vmB]
-                           │                                  ▲
-               ┌───────────┤ host-side TAP        host-side TAP├─────────────┐
-               │  INGRESS  │                                  │  EGRESS     │
-               │           │                                  │             │
-               │  ②tap_guard (anti-spoof)                     │⑤tc_egress_v6│
-               │           │ Ghost src==MY → OK               │             │ vpc_id=1==1
-               │           │                                  │             │ → ALLOW
-               │  ③tc_ingress_v6                              │             │
-               │           │ vpc_id=1==1 → ALLOW              │             │
-               └───────────┤                                  ├─────────────┘
-                           │                                  │
-                           ▼          ④ bridge FDB            │
-                        k3rs0 ────── IPv6 forward ────────────┘
-                      (IPv6 only)
+   VM A guest (10.0.0.12, vpc1)              VM B guest (10.0.0.13, vpc1)
+   ┌──────────────────────────┐              ┌──────────────────────────┐
+   │  app sends IPv4          │              │  app receives IPv4       │
+   │  src=.12 dst=.13         │              │  src=.12 dst=.13         │
+   │         │                │              │         ▲                │
+   │   [eth0] Egress          │              │   [eth0] Ingress         │
+   │ ① siit_in (k3rs-init)    │              │ ⑦ siit_out(k3rs-init)    │
+   │   IPv4 → Ghost IPv6      │              │   Ghost IPv6 → IPv4      │
+   │   construct_ghost_ipv6() │              │   dst=MY_GHOST_IPV6 ✓    │
+   │   platform_prefix,       │              │                          │
+   │   cluster_id, vpc_id,    │              │                          │
+   │   dst_ipv4  (no map)     │              │                          │
+   └──────────┬───────────────┘              └─────────────┬────────────┘
+              │  TAP (Ghost IPv6 only)                      │  TAP (Ghost IPv6 only)
+              ▼                                             │
+     [tap-vmA]  HOST TAP ingress              [tap-vmB]  HOST TAP egress
+     ┌──────────────────────┐               ┌──────────────────────────┐
+     │ ② tap_guard          │               │ ⑥ tc_egress_v6           │
+     │   non-IPv6 → DROP    │               │   Ghost prefix ✓         │
+     │   Ghost src==MY ✓    │               │   bytes[10-11]=vpc_B     │
+     │   non-Ghost pass     │               │   PEERINGS lookup        │
+     │ ③ tc_ingress_v6      │               │   same VPC → ALLOW       │
+     │   Ghost prefix ✓     │               │                          │
+     │   bytes[10-11]=vpc_A │               │                          │
+     │   PEERINGS lookup    │               │                          │
+     │   same VPC → ALLOW   │               │                          │
+     └──────────┬───────────┘               └──────────────┬───────────┘
+                │                                           ▲
+                ▼         ④⑤ bridge FDB / IPv6 forward      │
+             k3rs0 ──────────────────────────────────────────
+           (IPv6 only)
 ```
 
-**OCI → VM** and **VM → OCI** follow the same pattern — both sides produce/consume IPv6 on the bridge. The bridge doesn't know or care whether the source is a netkit (OCI) or TAP (VM).
+**OCI Pod → VM** (and reverse) — bridge is transparent:
+
+```
+   Pod A netns                     k3rs0 bridge     tap-vmB    VM B guest
+   ┌──────────────┐                (IPv6 only)      HOST TAP   ┌──────────┐
+   │ ① siit_in    │ Ghost IPv6                                  │ ⑤siit_out│
+   │  IPv4→IPv6   ├──netkit──→ [nk-podA] ─→ bridge ─→ [tap-vmB] ─→ eth0  │
+   │  (formula)   │ ② tc_ingress_v6      ③ fwd    ④tap_guard   │  IPv6→IPv4│
+   └──────────────┘ host-side: ALLOW               anti-spoof  └──────────┘
+```
+
+**Pod → External IPv4** (NAT64):
+
+```
+   Pod netns eth0                  k3rs0                  Physical NIC
+   ① siit_in: 10.8.0.1 → 64:ff9b::0a08:0001
+              → Ghost IPv6 src, NAT64 prefix dst
+   ② tc_ingress_v6: Ghost src ✓, non-Ghost dst (NAT64 prefix) → ALLOW
+   ③ nat64_egress on bridge: 64:ff9b::x → real IPv4, SNAT Ghost→node IPv4
+   ④ forward to physical NIC → external server
+   ⑤ nat64_ingress on return: IPv4 reply → IPv6, restore Ghost dst from conntrack
+```
 
 **Direction clarification**:
-- **Host-side netkit**: INGRESS = pod→host, EGRESS = host→pod
-- **Host-side TAP**: INGRESS = VM→host, EGRESS = host→VM
-- **Guest eth0**: EGRESS = app→TAP (outbound), INGRESS = TAP→app (inbound)
+- **Pod netns eth0 Egress** = app→network (outbound), **Ingress** = network→app (inbound)
+- **Host-side netkit Ingress** = pod→host, **Egress** = host→pod
+- **Host-side TAP Ingress** = VM→host, **Egress** = host→VM
 
 ###### eBPF Programs per Netkit (OCI containers)
 
-Each OCI pod gets a per-pod `Ebpf` instance with `.rodata` globals (`MY_GHOST_IPV6`, `MY_GUEST_IPV4`, `MY_VPC_ID`) baked at load time. 4 TC classifiers attached by `EbpfEnforcer::install_netkit_rules()`:
+Each OCI pod gets a per-pod `Ebpf` instance with `.rodata` globals baked at load time. 4 TC classifiers attached by `EbpfEnforcer::install_netkit_rules()`, which also accepts `vpc_cidr` to compute `MY_VPC_NETWORK`/`MY_VPC_MASK`:
 
-| Program | Direction | Function |
-|---------|-----------|----------|
-| `siit_in` | Ingress | IPv4→IPv6 translation + anti-spoof |
-| `tc_ingress_v6` | Ingress | IPv6 VPC enforcement (Ghost prefix + VPC ID) |
-| `siit_out` | Egress | IPv6→IPv4 translation |
-| `tc_egress_v6` | Egress | IPv6 VPC enforcement (Ghost prefix + VPC ID) |
+| Program | Instance | Direction | Function |
+|---------|----------|-----------|----------|
+| `siit_in` | Per-pod (pod netns eth0) | Egress | IPv4→IPv6 translation using inline Ghost IPv6 formula |
+| `siit_out` | Per-pod (pod netns eth0) | Ingress | IPv6→IPv4 translation |
+| `tc_ingress_v6` | Shared main | Host netkit Ingress | IPv6 VPC enforcement (Ghost prefix + VPC ID at bytes 10-11) |
+| `tc_egress_v6` | Shared main | Host netkit Egress | IPv6 VPC enforcement (Ghost prefix + VPC ID at bytes 10-11) |
 
 ###### BPF Maps
 
+**Shared pinned maps** (all eBPF instances share via bpffs at `/sys/fs/bpf/k3rs_vpc/`):
+
 | Map | Key | Value | Max | Purpose |
 |-----|-----|-------|-----|---------|
-| `VPC_PODS` | `{ vpc_id: u16, ipv4: u32 }` | `{ ghost_ipv6: [u8;16] }` | 4096 | Intra-VPC IPv4→Ghost IPv6 resolution (netkit SIIT). VMs also populated so OCI pods can resolve VM destinations |
-| `PEERINGS` | `{ src_vpc: u16, dst_vpc: u16 }` | `{ allowed: u32 }` | 1024 | Cross-VPC allow rules (used by `tc_ingress_v6`/`tc_egress_v6` on both netkit and TAP) |
+| `VPC_CIDRS` | `{ vpc_id: u16 }` | `{ network: u32, mask: u32 }` | 256 | VPC CIDR info (for VPC-level ensure/remove) |
+| `PEERINGS` | `{ src_vpc: u16, dst_vpc: u16 }` | `{ allowed: u32 }` | 1024 | Cross-VPC allow rules used by `tc_ingress_v6`/`tc_egress_v6` |
+| `NAT64_CONNTRACK` | `{ proto, src_port, dst_ipv4, dst_port }` | `{ src_ipv6: [u8;16] }` | 65536 | NAT64 connection tracking |
+| `NAT64_CONFIG` | `u32` (index 0) | `{ node_ipv4, phys_ifindex, bridge_ifindex }` | 1 | NAT64 node config |
 
-###### Per-Pod `.rodata` Globals (replaces SIIT_CONFIG map)
+> [!NOTE]
+> **`VPC_PODS` and `VPC_MEMBERSHIP` maps have been removed.** Ghost IPv6 destination addresses are constructed inline in `siit_in` using the deterministic formula `construct_ghost_ipv6(platform_prefix, cluster_id, vpc_id, dst_ipv4)`. No map population, no map lookup — just mathematics.
 
-Instead of a shared BPF map, each pod's eBPF instance embeds its identity in `.rodata` via `EbpfLoader::set_global()`:
+###### Per-Pod `.rodata` Globals
+
+Each pod/VM eBPF instance has its identity baked in at load time via `EbpfLoader::set_global()`. No shared config map needed:
 
 | Global | Type | Used By | Purpose |
 |--------|------|---------|---------|
-| `MY_GHOST_IPV6` | `[u8; 16]` | `siit_in`, `siit_out`, `tap_guard` | Pod's Ghost IPv6 address for SIIT translation + TAP anti-spoofing |
-| `MY_GUEST_IPV4` | `u32` | `siit_in`, `tc_ingress` | Pod's assigned IPv4 for anti-spoofing |
-| `MY_VPC_ID` | `u16` | `siit_in`, `tc_egress`, `tc_ingress` | Pod's VPC ID for same-VPC checks |
-| `MY_VPC_NETWORK` | `u32` | `siit_in` | VPC network address in host byte order (0 = disabled, for formula fallback in VMs) |
-| `MY_VPC_MASK` | `u32` | `siit_in` | VPC netmask in host byte order (for formula fallback in VMs) |
+| `MY_GHOST_IPV6` | `[u8; 16]` | `siit_in`, `siit_out`, `tap_guard` | Pod's Ghost IPv6 for SIIT translation and TAP anti-spoofing |
+| `MY_GUEST_IPV4` | `u32` | `siit_in` | Pod's assigned IPv4 for anti-spoofing (src must match) |
+| `MY_VPC_ID` | `u16` | `siit_in` | Pod's VPC ID — scopes intra-VPC Ghost IPv6 construction |
+| `MY_VPC_NETWORK` | `u32` | `siit_in` | VPC network address in host byte order — distinguishes intra-VPC from external |
+| `MY_VPC_MASK` | `u32` | `siit_in` | VPC netmask in host byte order |
+| `MY_PLATFORM_PREFIX` | `u32` | `siit_in` | cluster platform prefix (e.g. `0xfd6b_3372`) — used in Ghost IPv6 construction |
+| `MY_CLUSTER_ID` | `u32` | `siit_in` | ClusterID — used in Ghost IPv6 construction |
 
-`VPC_PODS` is populated by `install_netkit_rules()` (OCI pods, with real Ghost IPv6) and `install_tap_rules()` (TAP/VM pods, with real Ghost IPv6 so other OCI pods on the same host can resolve VM destinations). `VPC_MEMBERSHIP` is used only as a fallback for cross-VPC peering decisions.
+
+
 
 ###### SIIT Ingress (`siit_in`) — IPv4→IPv6
 
@@ -746,39 +807,56 @@ Instead of a shared BPF map, each pod's eBPF instance embeds its identity in `.r
 // k3rs-vpc-ebpf: siit_in (simplified)
 fn try_siit_in(ctx: &mut TcContext) -> Result<i32, ()> {
     if etype != ETH_P_IP { return Ok(TC_ACT_OK); }       // pass non-IPv4
+    if ver_ihl != 0x45   { return Ok(TC_ACT_OK); }       // no IP options support
     if protocol != TCP && protocol != UDP { return Ok(TC_ACT_OK); }
 
-    // Per-pod .rodata globals (baked at load time via EbpfLoader::set_global)
-    let ghost_ipv6 = read_volatile(&MY_GHOST_IPV6);       // pod's Ghost IPv6
-    let guest_ipv4 = read_volatile(&MY_GUEST_IPV4);       // pod's assigned IPv4
-    let vpc_id     = read_volatile(&MY_VPC_ID);            // pod's VPC ID
+    // All pod identity baked into .rodata at eBPF load time — no map lookup needed
+    let ghost_ipv6       = read_volatile(&MY_GHOST_IPV6);   // own Ghost IPv6
+    let guest_ipv4       = read_volatile(&MY_GUEST_IPV4);   // own GuestIPv4
+    let vpc_id           = read_volatile(&MY_VPC_ID);       // own VPC ID
+    let platform_prefix  = read_volatile(&MY_PLATFORM_PREFIX); // cluster prefix
+    let cluster_id       = read_volatile(&MY_CLUSTER_ID);      // cluster ID
+    let vpc_network      = read_volatile(&MY_VPC_NETWORK);  // VPC CIDR network
+    let vpc_mask         = read_volatile(&MY_VPC_MASK);     // VPC CIDR mask
 
     if src_ipv4 != guest_ipv4 { return Ok(TC_ACT_SHOT); }  // anti-spoof
 
-    let vpc_network = read_volatile(&MY_VPC_NETWORK);   // 0 for OCI, real for VM
-    let vpc_mask    = read_volatile(&MY_VPC_MASK);
-
-    let dst_ipv6 = match VPC_PODS.get((vpc_id, dst_ipv4)) {
-        Some(pod) => pod.ghost_ipv6,                      // intra-VPC (shared kernel)
-        None if vpc_network != 0
-            && (dst_ipv4 & vpc_mask) == (vpc_network & vpc_mask) => {
-            // Formula fallback (VM guest — empty VPC_PODS):
-            // copy bytes 0-11 from MY_GHOST_IPV6, replace bytes 12-15 with dst IPv4
-            let mut addr = ghost_ipv6;
-            addr[12..16].copy_from_slice(&dst_ipv4.to_be_bytes());
-            addr
-        },
-        None      => nat64_addr(dst_ipv4),                // external: 64:ff9b::x
+    // Determine destination IPv6 — completely map-free:
+    //   intra-VPC: construct Ghost IPv6 algorithmically from .rodata globals
+    //   external:  use NAT64 well-known prefix 64:ff9b::dst_ipv4
+    let dst_ipv6 = if vpc_network != 0
+        && (dst_ipv4 & vpc_mask) == (vpc_network & vpc_mask)
+    {
+        construct_ghost_ipv6(platform_prefix, cluster_id, vpc_id, dst_ipv4)
+    } else {
+        nat64_addr(dst_ipv4)  // 64:ff9b::x
     };
 
-    ctx.change_proto(ETH_P_IPV6)?;                        // grow L3 header +20
+    let src_ipv6 = ghost_ipv6;
+
+    ctx.change_proto(ETH_P_IPV6)?;   // grow L3 header +20 bytes
     // write IPv6 header: src=ghost_ipv6, dst=dst_ipv6
     // adjust L4 checksum via csum_4to6()
     Ok(TC_ACT_OK)
 }
+
+/// Construct Ghost IPv6 from cluster config + VPC + IPv4 — deterministic, map-free.
+#[inline(always)]
+fn construct_ghost_ipv6(platform_prefix: u32, cluster_id: u32, vpc_id: u16, ipv4: u32) -> [u8; 16] {
+    let mut b = [0u8; 16];
+    b[0..4].copy_from_slice(&platform_prefix.to_be_bytes()); // cluster prefix
+    b[4] = 0x10;                                              // ver=1, flags_hi=0
+    b[5] = 0x00;                                              // flags_lo=0
+    b[6..8].copy_from_slice(&((cluster_id >> 16) as u16).to_be_bytes());
+    b[8..10].copy_from_slice(&((cluster_id & 0xFFFF) as u16).to_be_bytes());
+    b[10..12].copy_from_slice(&vpc_id.to_be_bytes());        // VPC ID at bytes 10-11
+    b[12..16].copy_from_slice(&ipv4.to_be_bytes());           // GuestIPv4
+    b
+}
 ```
 
-The `VPC_PODS` lookup is keyed by `(vpc_id, ipv4)` — this is how overlapping CIDRs work: `(vpc1, 10.0.0.13)` resolves to podB, while `(vpc2, 10.0.0.13)` resolves to podC. The vpc_id comes from per-pod `.rodata` (baked at eBPF load time) — each pod can only resolve destinations within its own VPC.
+> **Key insight**: Because Ghost IPv6 is *deterministic* from `(platform_prefix, cluster_id, vpc_id, ipv4)`, **no map lookup is needed** to translate a destination IPv4 to its Ghost IPv6. The formula produces the identical address that was constructed at allocation time. Overlapping IPv4 CIDRs never collide because `vpc_id` scopes the formula.
+
 
 ###### SIIT Egress (`siit_out`) — IPv6→IPv4
 
@@ -825,7 +903,19 @@ OCI:  Pod [app →IPv4→ eBPF(eth0) →IPv6] ==netkit== Host(IPv6) ==bridge== .
 VM:   VM  [app →IPv4→ eBPF(eth0) →IPv6] ==TAP==    Host(IPv6) ==bridge== ...
 ```
 
-**In-guest eBPF** (`k3rs-init`): The guest PID 1 init process loads the same SIIT eBPF programs (`siit_in`/`siit_out`) on `eth0` inside the VM. VPC parameters are passed via kernel boot cmdline (`k3rs.ipv4`, `k3rs.ipv6`, `k3rs.vpc_id`, `k3rs.vpc_cidr`, `k3rs.gw_mac`). Since the VM has a separate kernel, BPF maps (`VPC_PODS`) are empty — the `.rodata` formula fallback (`MY_VPC_NETWORK`/`MY_VPC_MASK`) computes Ghost IPv6 addresses deterministically for intra-VPC destinations.
+**In-guest eBPF** (`k3rs-init`): The guest PID 1 init process loads the same SIIT eBPF programs (`siit_in`/`siit_out`) on `eth0` inside the VM. VPC parameters are passed via kernel boot cmdline:
+
+| Boot parameter | Example | Description |
+|---|---|---|
+| `k3rs.ipv4` | `10.0.1.10` | Pod's GuestIPv4 |
+| `k3rs.ipv6` | `fd6b:3372:...` | Pod's Ghost IPv6 |
+| `k3rs.vpc_id` | `5` | Pod's VPC ID |
+| `k3rs.vpc_cidr` | `10.0.1.0/24` | VPC CIDR (for MY_VPC_NETWORK/MY_VPC_MASK) |
+| `k3rs.gw_mac` | `02:fc:00:00:00:01` | TAP gateway MAC |
+| `k3rs.platform_prefix` | `0xfd6b3372` | Cluster platform prefix |
+| `k3rs.cluster_id` | `1` | Cluster ID |
+
+All 7 parameters are required — `K3rsBootParams::is_complete()` blocks eBPF setup until all are present. Since the VM has a separate kernel, all `.rodata` globals including `MY_PLATFORM_PREFIX` and `MY_CLUSTER_ID` are set by `k3rs-init` via `EbpfLoader::set_global()`. The same `construct_ghost_ipv6()` formula runs inside the guest to produce identical Ghost IPv6 addresses as computed by the host.
 
 **Host-side TAP enforcement**: The host attaches a lightweight `tap_guard` anti-spoofing program on TAP ingress instead of the old IPv4 classifiers. IPv6 VPC classifiers (`tc_ingress_v6`/`tc_egress_v6`) enforce VPC isolation on the now-IPv6 TAP traffic.
 
@@ -850,7 +940,7 @@ VM:   VM  [app →IPv4→ eBPF(eth0) →IPv6] ==TAP==    Host(IPv6) ==bridge== .
 | `siit_in` | Egress | IPv4→IPv6 translation (app sends IPv4 out → translated to Ghost IPv6) |
 | `siit_out` | Ingress | IPv6→IPv4 translation (Ghost IPv6 arrives → translated to IPv4 for app) |
 
-The guest `siit_in` uses `MY_VPC_NETWORK`/`MY_VPC_MASK` formula fallback since `VPC_PODS` is empty in the guest kernel.
+The guest `siit_in` uses `MY_PLATFORM_PREFIX`/`MY_CLUSTER_ID`/`MY_VPC_ID` + `MY_VPC_NETWORK`/`MY_VPC_MASK` globals to construct Ghost IPv6 addresses with the same `construct_ghost_ipv6()` formula — producing identical addresses to those allocated by the host. No map lookup needed in the guest kernel either.
 
 ###### `tap_guard` Anti-Spoofing Program
 
@@ -870,22 +960,24 @@ fn try_tap_guard(ctx: &TcContext) -> Result<i32, ()> {
 
 Setup: vpc1 and vpc2 both use `10.0.0.0/16`. podA=vpc1(10.0.0.12), podB=vpc1(10.0.0.13), podC=vpc2(10.0.0.13).
 
+Ghost IPv6 addresses (constructed by allocator and baked into `.rodata` at pod launch):
 ```
-VPC_PODS map:
-  (vpc_id=1, 10.0.0.12) → podA_ghost    fd6b:3372:...:0001:...:0a00:000c
-  (vpc_id=1, 10.0.0.13) → podB_ghost    fd6b:3372:...:0001:...:0a00:000d
-  (vpc_id=2, 10.0.0.13) → podC_ghost    fd6b:3372:...:0002:...:0a00:000d
+podA ghost: fd6b:3372:1000:0000:0000:0001:0a00:000c  (vpc_id=1, ip=10.0.0.12)
+podB ghost: fd6b:3372:1000:0000:0000:0001:0a00:000d  (vpc_id=1, ip=10.0.0.13)
+podC ghost: fd6b:3372:1000:0000:0000:0002:0a00:000d  (vpc_id=2, ip=10.0.0.13)
 ```
 
-podA sends to 10.0.0.13:
-- `siit_in` on nk-podA reads vpc_id=1 from `.rodata` (`MY_VPC_ID`)
-- `VPC_PODS[(1, 10.0.0.13)]` → **podB_ghost** (not podC — vpc_id scopes the lookup)
-- `tc_ingress_v6`: src_vpc=1, dst_vpc=1 → same VPC → ALLOW
+podA (MY_VPC_ID=1) sends to 10.0.0.13:
+- `siit_in` computes: `construct_ghost_ipv6(prefix, cluster_id, vpc_id=1, 10.0.0.13)` → **podB_ghost**
+- `tc_ingress_v6`: bytes 10-11 of src=1, dst=1 → same VPC → **ALLOW**
 - Bridge forwards to nk-podB
 - `siit_out` on nk-podB: dst matches `MY_GHOST_IPV6` → translate to IPv4
 - podB receives `src=10.0.0.12 dst=10.0.0.13` — correct
 
-podC (vpc2, 10.0.0.13) is never involved.
+podC is **never involved** — `vpc_id=2` produces a different Ghost IPv6, routed to a different interface.
+
+If podA tried to reach `vpc_id=2`'s 10.0.0.13, it cannot — its `.rodata` MY_VPC_ID=1 always produces vpc1 addresses, and `tc_ingress_v6` would check peerings before forwarding.
+
 
 ###### Anti-Spoofing
 
@@ -1236,7 +1328,7 @@ resolves to the backend Pod's Ghost IPv6 **only if the querying Pod is in the sa
 
 Pods use Ghost IPv6 as their primary address but still need access to IPv4 services (external APIs, legacy infra). This is handled transparently at the node level via SIIT + NAT64 + DNS64.
 
-**SIIT (per-pod)** translates pod IPv4 → IPv6 at the netkit boundary. For intra-VPC traffic, SIIT resolves the destination pod's Ghost IPv6 directly via the `VPC_PODS` map. For external IPv4, SIIT produces `64:ff9b::dst_ipv4` which the NAT64 on the bridge then translates to real IPv4.
+**SIIT (per-pod)** translates pod IPv4 → IPv6 at the netkit boundary. For intra-VPC traffic, `siit_in` constructs the destination pod's Ghost IPv6 **inline** using `construct_ghost_ipv6(platform_prefix, cluster_id, vpc_id, dst_ipv4)` — no BPF map lookup needed. For external IPv4, SIIT produces `64:ff9b::dst_ipv4` which the NAT64 on the bridge then translates to real IPv4.
 
 ##### NAT64 (Node-Level, eBPF)
 
@@ -1366,17 +1458,23 @@ SIIT (`siit_in`) on the host-side netkit translates pod IPv4 → IPv6 before the
 ```rust
 // siit_in: IPv4→IPv6 at netkit boundary (simplified)
 fn translate_ipv4_to_ipv6(src_ipv4: u32, dst_ipv4: u32) -> Result<(Ipv6, Ipv6)> {
-    // Per-pod .rodata globals (baked at eBPF load time)
-    let ghost_ipv6 = MY_GHOST_IPV6;   // pod's Ghost IPv6
-    let guest_ipv4 = MY_GUEST_IPV4;   // pod's assigned IPv4
-    let vpc_id     = MY_VPC_ID;        // pod's VPC ID
+    // Per-pod .rodata globals (baked at eBPF load time) — all map-free
+    let ghost_ipv6      = MY_GHOST_IPV6;        // pod's Ghost IPv6
+    let guest_ipv4      = MY_GUEST_IPV4;        // pod's assigned IPv4
+    let vpc_id          = MY_VPC_ID;            // pod's VPC ID
+    let platform_prefix = MY_PLATFORM_PREFIX;   // cluster prefix
+    let cluster_id      = MY_CLUSTER_ID;        // cluster ID
+    let vpc_network     = MY_VPC_NETWORK;       // VPC CIDR network
+    let vpc_mask        = MY_VPC_MASK;          // VPC CIDR mask
 
     if src_ipv4 != guest_ipv4 { return Err(Drop); }  // anti-spoof
 
     let src_ipv6 = ghost_ipv6;
-    let dst_ipv6 = match VPC_PODS.get((vpc_id, dst_ipv4)) {
-        Some(pod) => pod.ghost_ipv6,       // intra-VPC: use dst pod's Ghost IPv6
-        None      => nat64_addr(dst_ipv4), // external: 64:ff9b::dst_ipv4 → NAT64
+    // Construct dst Ghost IPv6 algorithmically — no map lookup:
+    let dst_ipv6 = if vpc_network != 0 && (dst_ipv4 & vpc_mask) == (vpc_network & vpc_mask) {
+        construct_ghost_ipv6(platform_prefix, cluster_id, vpc_id, dst_ipv4)
+    } else {
+        nat64_addr(dst_ipv4)  // external: 64:ff9b::dst_ipv4 → NAT64
     };
     Ok((src_ipv6, dst_ipv6))
 }
@@ -3229,31 +3327,42 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] Shared types in `k3rs-vpc-common`: `Nat64Key`, `Nat64Value`, `Nat64Config` structs, `NAT64_PREFIX_U32` constant
 
 #### Phase 12b: Per-Pod SIIT (IPv4↔IPv6 at Netkit Boundary)
-- [x] Shared types in `k3rs-vpc-common`: `VpcPodKey`, `VpcPodValue` structs
-- [x] eBPF `siit_in` TC classifier (netkit ingress): IPv4→IPv6 translation — reads per-pod `.rodata` globals (`MY_GHOST_IPV6`, `MY_GUEST_IPV4`, `MY_VPC_ID`), anti-spoof src IPv4, resolves dst via `VPC_PODS` (intra-VPC) or `64:ff9b::` (external), `change_proto(ETH_P_IPV6)`, writes IPv6 header, adjusts L4 checksum via `csum_4to6()`
-- [x] eBPF `siit_out` TC classifier (netkit egress): IPv6→IPv4 translation — verifies dst matches `MY_GHOST_IPV6` (per-pod `.rodata`), extracts src IPv4 from bytes 12-15, `change_proto(ETH_P_IP)`, writes IPv4 header + checksum, adjusts L4 checksum via `csum_6to4()`
-- [x] Per-pod `.rodata` globals replace `SIIT_CONFIG` map — `MY_GHOST_IPV6`, `MY_GUEST_IPV4`, `MY_VPC_ID` baked at load time via `EbpfLoader::set_global()`
-- [x] BPF maps: `VPC_PODS` HashMap (4096 entries, (vpc_id, ipv4)→ghost_ipv6) — pinned, shared across per-pod instances
-- [x] Per-netkit Ebpf instances in `EbpfEnforcer::pod_bpf: HashMap<String, Ebpf>` — each netkit gets its own Ebpf with `.rodata` globals, shared maps via pin directory
-- [x] `install_netkit_rules()`: loads per-pod Ebpf, populates `VPC_PODS[(vpc_id, ipv4)]`, attaches siit_in + siit_out + tc_ingress_v6 + tc_egress_v6
-- [x] `remove_netkit_rules()`: cleans `VPC_PODS` entry, drops per-pod Ebpf instance
-- [x] Updated `AttachNetkit` RPC: `ghost_ipv6` field in protocol.rs, vpc_client.rs, and socket.rs handler
+- [x] eBPF `siit_in` TC classifier (pod netns eth0 Egress): IPv4→IPv6 translation — reads per-pod `.rodata` globals, anti-spoof src IPv4, constructs dst Ghost IPv6 via `construct_ghost_ipv6(platform_prefix, cluster_id, vpc_id, dst_ipv4)` for intra-VPC or `64:ff9b::` for external, `change_proto(ETH_P_IPV6)`, writes IPv6 header, adjusts L4 checksum via `csum_4to6()`
+- [x] eBPF `siit_out` TC classifier (pod netns eth0 Ingress): IPv6→IPv4 translation — verifies dst matches `MY_GHOST_IPV6` (per-pod `.rodata`), extracts src IPv4 from bytes 12-15, `change_proto(ETH_P_IP)`, writes IPv4 header + checksum, adjusts L4 checksum via `csum_6to4()`
+- [x] Per-pod `.rodata` globals: `MY_GHOST_IPV6`, `MY_GUEST_IPV4`, `MY_VPC_ID`, `MY_VPC_NETWORK`, `MY_VPC_MASK`, `MY_PLATFORM_PREFIX`, `MY_CLUSTER_ID` — baked at load time via `EbpfLoader::set_global()`
+- [x] **`VPC_PODS` map removed** — Ghost IPv6 construction is now fully algorithmic via `construct_ghost_ipv6()` — no map needed for intra-VPC destinations
+- [x] Per-netkit Ebpf instances in `EbpfEnforcer::pod_bpf: HashMap<String, Ebpf>` — SIIT programs run **inside pod netns on eth0**, host-side netkit gets shared IPv6 classifiers only
+- [x] `install_netkit_rules()`: loads per-pod Ebpf, sets `.rodata` globals, enters pod netns, attaches `siit_in` → eth0 Egress + `siit_out` → eth0 Ingress; attaches `tc_ingress_v6`/`tc_egress_v6` on host-side netkit
+- [x] `remove_netkit_rules()`: drops per-pod Ebpf instance
+- [x] Updated `AttachNetkit` RPC: added `vpc_cidr` field in protocol.rs, vpc_client.rs, and socket.rs handler
 - [x] IPv4 default route in `setup_pod_network()`: `169.254.1.1/32 dev eth0` + `default via 169.254.1.1` + `proxy_arp=1` on host-side netkit
-- [x] Updated `snapshot()`: displays `VPC_PODS` map entries and per-netkit/per-TAP instance counts
 - [x] SIIT handles TCP/UDP only (same as NAT64); ICMP/ICMPv6 translation not included
 
 #### Phase 12c: Symmetric VM SIIT (In-Guest eBPF Translation)
-- [x] eBPF `siit_in` formula fallback: `MY_VPC_NETWORK`/`MY_VPC_MASK` `.rodata` globals — when `VPC_PODS` misses (VM guest, empty maps), compute Ghost IPv6 from prefix bytes 0-11 + dst IPv4 bytes 12-15. Disabled for OCI (set to 0).
+- [x] `construct_ghost_ipv6()` inline formula in `siit_in` — both OCI (host enforcer) and VM (k3rs-init) use the same formula; OCI sets `MY_VPC_NETWORK`/`MY_VPC_MASK` from `vpc_cidr`, VM uses them to distinguish intra-VPC from external
 - [x] New `tap_guard` eBPF classifier: anti-spoofing on host TAP ingress — drops non-IPv6, validates Ghost src == `MY_GHOST_IPV6`, passes non-Ghost (NDP fe80::)
-- [x] Rewritten `install_tap_rules()`: accepts `ghost_ipv6` param, populates `VPC_PODS` with real ghost_ipv6, attaches `tap_guard` (ingress) + IPv6 classifiers instead of old IPv4 `tc_egress`/`tc_ingress`
-- [x] `AttachTap`/`DetachTap` protocol messages with `ghost_ipv6` field + socket dispatch + agent VPC client
+- [x] Rewritten `install_tap_rules()`: accepts `vpc_cidr` param, sets `.rodata` globals including `MY_PLATFORM_PREFIX`/`MY_CLUSTER_ID`, attaches `tap_guard` (ingress) + IPv6 classifiers; **no `VPC_PODS` population needed**
+- [x] `AttachTap`/`DetachTap` protocol messages with `vpc_cidr` field + socket dispatch + agent VPC client
 - [x] `StoredAllocation.interface_type` field (`"netkit"` or `"tap"`) for OCI vs VM dispatch in `rebuild()`
-- [x] `k3rs-init` in-guest eBPF: `cmd/k3rs-init/src/ebpf.rs` — mounts bpffs, loads SIIT programs with `.rodata` globals (`MY_GHOST_IPV6`, `MY_GUEST_IPV4`, `MY_VPC_ID`, `MY_VPC_NETWORK`, `MY_VPC_MASK`), attaches `siit_in` → eth0 Egress, `siit_out` → eth0 Ingress
-- [x] `k3rs-init` guest networking: `/proc/cmdline` parsing (`k3rs.ipv4`, `k3rs.ipv6`, `k3rs.vpc_id`, `k3rs.vpc_cidr`, `k3rs.gw_mac`), IPv4/IPv6 address config, static ARP for synthetic gateway `169.254.0.1` → well-known MAC `02:fc:00:00:00:01`
+- [x] `k3rs-init` in-guest eBPF: `cmd/k3rs-init/src/ebpf.rs` — mounts bpffs, loads SIIT programs with `.rodata` globals (`MY_GHOST_IPV6`, `MY_GUEST_IPV4`, `MY_VPC_ID`, `MY_VPC_NETWORK`, `MY_VPC_MASK`, `MY_PLATFORM_PREFIX`, `MY_CLUSTER_ID`), attaches `siit_in` → eth0 Egress, `siit_out` → eth0 Ingress
+- [x] `k3rs-init` guest networking: `/proc/cmdline` parsing (`k3rs.ipv4`, `k3rs.ipv6`, `k3rs.vpc_id`, `k3rs.vpc_cidr`, `k3rs.gw_mac`, `k3rs.platform_prefix`, `k3rs.cluster_id`), IPv4/IPv6 address config, static ARP for synthetic gateway `169.254.0.1` → well-known MAC `02:fc:00:00:00:01`
 - [x] `k3rs-init/build.rs`: eBPF binary compilation using `--manifest-path` (custom build, no aya-build dependency)
 - [x] Firecracker `VpcBootParams`: `configure_and_boot()` accepts VPC params, generates `k3rs.*` kernel cmdline params
 - [x] Firecracker `setup_tap_vpc()`: pure IPv6 TAP — no host-side IPv4, well-known MAC `02:fc:00:00:00:01`
 - [x] Kernel BPF configs in `scripts/build-kernel.sh`: `BPF`, `BPF_SYSCALL`, `NET_CLS_BPF`, `NET_CLS_ACT`, `NET_SCH_CLSACT`, `BPF_JIT`
+
+#### Phase 12d: eBPF Architecture Refactor — Host=Isolation, Pod/VM=Translation
+- [x] **Removed `VPC_PODS` map** entirely — intra-VPC Ghost IPv6 construction is now fully algorithmic
+- [x] **Removed `VPC_MEMBERSHIP` map** entirely — VPC ID extracted from Ghost IPv6 bytes 10-11, no map needed
+- [x] **Removed `tc_egress`/`tc_ingress` IPv4 host-side classifiers** — host sees only IPv6 after SIIT
+- [x] **Removed `install_pod_rules`/`remove_pod_rules`** from `NetworkEnforcer` trait, `EbpfEnforcer`, `NoopEnforcer`, `socket.rs`, `enforcer.rs` rebuild
+- [x] **Removed `PodKey`/`PodValue`/`VpcPodKey`/`VpcPodValue`** from `k3rs-vpc-common`
+- [x] Added `MY_PLATFORM_PREFIX`, `MY_CLUSTER_ID` `.rodata` globals to eBPF program
+- [x] Added `construct_ghost_ipv6()` helper in `k3rs-vpc-ebpf` (same formula as allocator)
+- [x] `EbpfEnforcer::new(platform_prefix, cluster_id)` — reads from VpcStore meta; sets globals on main + per-pod + per-TAP EbpfLoader
+- [x] SIIT programs now run **inside pod netns** (eth0 Egress/Ingress) for OCI pods; host-side netkit gets IPv6-only classifiers
+- [x] Added `vpc_cidr` to `AttachNetkit`/`AttachTap` protocol variants; all callers updated
+- [x] `k3rs-init` boot params: added `k3rs.platform_prefix` and `k3rs.cluster_id` to cmdline parsing + `K3rsBootParams::is_complete()` check
 
 #### Phase 13: Cross-Node Mesh
 - [ ] WireGuard tunnel setup between nodes (Ghost IPv6 traffic)
