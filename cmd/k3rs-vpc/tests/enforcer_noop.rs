@@ -12,6 +12,7 @@ fn make_vpc(name: &str, vpc_id: u16, cidr: &str) -> Vpc {
         ipv4_cidr: cidr.to_string(),
         status: VpcStatus::Active,
         created_at: chrono::Utc::now(),
+        deleted_at: None,
     }
 }
 
