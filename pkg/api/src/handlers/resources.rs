@@ -113,6 +113,23 @@ pub async fn create_pod(
     pod.status = pkg_types::pod::PodStatus::Pending;
     pod.created_at = Utc::now();
 
+    // Block pod creation in Terminating/Deleted VPCs
+    let vpc_name = pod.spec.vpc.as_deref().unwrap_or("default");
+    let vpc_key = format!("/registry/vpcs/{}", vpc_name);
+    if let Ok(Some(vpc_data)) = state.store.get(&vpc_key).await
+        && let Ok(vpc) = serde_json::from_slice::<pkg_types::vpc::Vpc>(&vpc_data)
+        && vpc.status != pkg_types::vpc::VpcStatus::Active
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            format!(
+                "VPC '{}' is {} — cannot create new pods",
+                vpc_name, vpc.status
+            ),
+        )
+            .into_response();
+    }
+
     // Schedule the pod if scheduler is available
     if let Some(ref scheduler) = state.scheduler {
         let entries = state

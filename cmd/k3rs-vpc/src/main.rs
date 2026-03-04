@@ -13,7 +13,7 @@ use k3rs_vpc::enforcer::NetworkEnforcer;
 use k3rs_vpc::store::VpcStore;
 use pkg_types::config::{VpcConfigFile, load_config_file};
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::allocator::GhostAllocator;
 
@@ -54,6 +54,46 @@ struct Cli {
     /// Path to store WireGuard keys
     #[arg(long)]
     wg_key_path: Option<String>,
+
+    /// Node IPv4 address for NAT64 (auto-detected from default route if not set)
+    #[arg(long)]
+    node_ipv4: Option<String>,
+
+    /// Physical network interface for NAT64 (auto-detected from default route if not set)
+    #[arg(long)]
+    phys_iface: Option<String>,
+}
+
+/// Auto-detect the default route interface and gateway IPv4 by parsing `ip route show default`.
+/// Returns `(interface, ipv4)` or `None` if detection fails.
+fn detect_default_route() -> Option<(String, String)> {
+    let output = std::process::Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .ok()?;
+    let line = String::from_utf8_lossy(&output.stdout);
+    // Format: "default via <gateway> dev <iface> ..."
+    // We need the iface name and the node's own IPv4 on that iface.
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let dev_idx = parts.iter().position(|&p| p == "dev")?;
+    let iface = parts.get(dev_idx + 1)?.to_string();
+
+    // Get the node's IPv4 on this interface via `ip -4 addr show dev <iface>`
+    let addr_output = std::process::Command::new("ip")
+        .args(["-4", "addr", "show", "dev", &iface])
+        .output()
+        .ok()?;
+    let addr_text = String::from_utf8_lossy(&addr_output.stdout);
+    // Look for "inet <ip>/<prefix>" line
+    for line in addr_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("inet ") {
+            let ip_cidr = trimmed.split_whitespace().nth(1)?;
+            let ip = ip_cidr.split('/').next()?.to_string();
+            return Some((iface, ip));
+        }
+    }
+    None
 }
 
 /// Select the best available network enforcement backend.
@@ -172,6 +212,32 @@ async fn main() -> anyhow::Result<()> {
     {
         tracing::warn!("Failed to save enforcer snapshot: {}", e);
     }
+    // 7b. Install NAT64 translation (non-fatal on failure)
+    let nat64_detected = detect_default_route();
+    let node_ipv4 = cli
+        .node_ipv4
+        .or(file_cfg.node_ipv4)
+        .or_else(|| nat64_detected.as_ref().map(|(_, ip)| ip.clone()));
+    let phys_iface = cli
+        .phys_iface
+        .or(file_cfg.phys_iface)
+        .or_else(|| nat64_detected.as_ref().map(|(iface, _)| iface.clone()));
+
+    if let (Some(ipv4), Some(phys)) = (&node_ipv4, &phys_iface) {
+        match enforcer.install_nat64(ipv4, "k3rs0", phys).await {
+            Ok(()) => info!("NAT64 installed (node_ipv4={}, phys_iface={})", ipv4, phys),
+            Err(e) => warn!(
+                "NAT64 install failed: {} (pods cannot reach external IPv4)",
+                e
+            ),
+        }
+    } else {
+        warn!(
+            "NAT64 skipped: node_ipv4={:?}, phys_iface={:?} (use --node-ipv4 / --phys-iface or auto-detect requires a default route)",
+            node_ipv4, phys_iface
+        );
+    }
+
     let enforcer: Arc<Mutex<Box<dyn NetworkEnforcer>>> = Arc::new(Mutex::new(enforcer));
 
     // 8. Initialize WireGuard mesh manager (Linux only, non-fatal on failure)

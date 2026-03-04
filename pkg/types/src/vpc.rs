@@ -29,6 +29,10 @@ pub struct Vpc {
     pub ipv4_cidr: String,
     pub status: VpcStatus,
     pub created_at: DateTime<Utc>,
+    /// Set when status transitions to Deleted. VpcID cannot be reused until
+    /// 300s after this timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 // --- VPC Peering ---

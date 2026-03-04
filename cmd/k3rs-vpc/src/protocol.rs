@@ -63,6 +63,8 @@ pub enum VpcResponse {
         guest_ipv4: String,
         ghost_ipv6: String,
         vpc_id: u16,
+        #[serde(default)]
+        vpc_cidr: String,
     },
     Released,
     QueryResult {

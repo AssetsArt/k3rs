@@ -112,6 +112,14 @@ async fn check_running_pods(
             Ok(state) if state.status == "stopped" || state.status == "exited" => {
                 warn!("[pod:{}] Container stopped unexpectedly", pod.name);
 
+                // Detach eBPF classifiers (best-effort)
+                #[cfg(target_os = "linux")]
+                {
+                    let short = &pod.id[..8.min(pod.id.len())];
+                    let nk_name = format!("nk-{}", short);
+                    let _ = vpc_client.detach_netkit(&nk_name).await;
+                }
+
                 // Tear down pod network (best-effort)
                 #[cfg(target_os = "linux")]
                 pkg_network::netns::teardown_pod_network(&pod.id).await;
@@ -147,6 +155,14 @@ async fn check_running_pods(
             }
             Err(_) => {
                 warn!("[pod:{}] Container not found in runtime", pod.name);
+
+                // Detach eBPF classifiers (best-effort)
+                #[cfg(target_os = "linux")]
+                {
+                    let short = &pod.id[..8.min(pod.id.len())];
+                    let nk_name = format!("nk-{}", short);
+                    let _ = vpc_client.detach_netkit(&nk_name).await;
+                }
 
                 // Tear down pod network (best-effort)
                 #[cfg(target_os = "linux")]
@@ -311,7 +327,7 @@ async fn run_pod_lifecycle(
     };
 
     // Inject VPC addresses as environment variables
-    if let Some((ref guest_ipv4, ref ghost_ipv6, _)) = vpc_alloc {
+    if let Some((ref guest_ipv4, ref ghost_ipv6, _, _)) = vpc_alloc {
         env.insert("K3RS_POD_IP".to_string(), guest_ipv4.clone());
         env.insert("K3RS_POD_IPV6".to_string(), ghost_ipv6.clone());
     }
@@ -348,7 +364,7 @@ async fn run_pod_lifecycle(
     // 2b. Pod network setup (netkit pair + Ghost IPv6) — skip for VM backends
     #[cfg(target_os = "linux")]
     if runtime.backend_name_for(&pod.id) != "vm"
-        && let Some((ref guest_ipv4, ref ghost_ipv6, _)) = vpc_alloc
+        && let Some((ref guest_ipv4, ref ghost_ipv6, vpc_id, ref vpc_cidr)) = vpc_alloc
     {
         if let Some(pid) = runtime.container_pid(&pod.id) {
             let net_config = pkg_network::netns::PodNetworkConfig {
@@ -361,6 +377,19 @@ async fn run_pod_lifecycle(
             if let Err(e) = pkg_network::netns::setup_pod_network(&net_config).await {
                 warn!(
                     "[pod:{}] Pod network setup failed: {} (continuing without network)",
+                    pod.name, e
+                );
+            }
+
+            // 2c. Attach eBPF SIIT + VPC isolation classifiers via k3rs-vpc
+            let short = &pod.id[..8.min(pod.id.len())];
+            let nk_name = format!("nk-{}", short);
+            if let Err(e) = vpc_client
+                .attach_netkit(&nk_name, guest_ipv4, ghost_ipv6, vpc_id, vpc_cidr, pid)
+                .await
+            {
+                warn!(
+                    "[pod:{}] eBPF attach_netkit failed: {} (continuing without SIIT)",
                     pod.name, e
                 );
             }
@@ -402,7 +431,7 @@ async fn run_pod_lifecycle(
         .await;
 
     // 5. Report VPC info to server (best-effort)
-    if let Some((_, ref ghost_ipv6, _)) = vpc_alloc {
+    if let Some((_, ref ghost_ipv6, _, _)) = vpc_alloc {
         let vpc_url = format!(
             "{}/api/v1/namespaces/{}/pods/{}/vpc",
             server.trim_end_matches('/'),

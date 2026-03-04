@@ -462,6 +462,7 @@ async fn seed_default_vpc(store: &StateStore) -> anyhow::Result<()> {
             ipv4_cidr: "10.42.0.0/16".to_string(),
             status: pkg_types::vpc::VpcStatus::Active,
             created_at: Utc::now(),
+            deleted_at: None,
         };
         let data = serde_json::to_vec(&vpc)?;
         store.put(key, &data).await?;

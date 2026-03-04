@@ -75,6 +75,7 @@ impl VpcController {
                 ipv4_cidr: "10.42.0.0/16".to_string(),
                 status: VpcStatus::Active,
                 created_at: Utc::now(),
+                deleted_at: None,
             };
             let data = serde_json::to_vec(&vpc)?;
             self.store.put(key, &data).await?;

@@ -81,6 +81,12 @@ pub struct VpcConfigFile {
     /// Path to store WireGuard keys (default: /var/lib/k3rs/wireguard/).
     #[serde(default, alias = "wg-key-path")]
     pub wg_key_path: Option<String>,
+    /// Node IPv4 address for NAT64 (auto-detected if not set).
+    #[serde(default, alias = "node-ipv4")]
+    pub node_ipv4: Option<String>,
+    /// Physical network interface for NAT64 (auto-detected if not set).
+    #[serde(default, alias = "phys-iface")]
+    pub phys_iface: Option<String>,
 }
 
 /// Load a YAML config file, returning the default if the file doesn't exist.

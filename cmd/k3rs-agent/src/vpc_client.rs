@@ -73,6 +73,8 @@ pub enum VpcResponse {
         guest_ipv4: String,
         ghost_ipv6: String,
         vpc_id: u16,
+        #[serde(default)]
+        vpc_cidr: String,
     },
     Released,
     Routes {
@@ -131,7 +133,7 @@ impl VpcClient {
         &self,
         pod_id: &str,
         vpc_name: &str,
-    ) -> anyhow::Result<(String, String, u16)> {
+    ) -> anyhow::Result<(String, String, u16, String)> {
         let req = VpcRequest::Allocate {
             pod_id: pod_id.to_string(),
             vpc_name: vpc_name.to_string(),
@@ -144,7 +146,8 @@ impl VpcClient {
                     guest_ipv4,
                     ghost_ipv6,
                     vpc_id,
-                }) => return Ok((guest_ipv4, ghost_ipv6, vpc_id)),
+                    vpc_cidr,
+                }) => return Ok((guest_ipv4, ghost_ipv6, vpc_id, vpc_cidr)),
                 Ok(VpcResponse::Error { code, message }) => {
                     return Err(anyhow::anyhow!(
                         "VPC allocate error [{}]: {}",
@@ -240,6 +243,61 @@ impl VpcClient {
             )),
             Ok(other) => Err(anyhow::anyhow!(
                 "Unexpected VPC response to CheckReachability: {:?}",
+                other
+            )),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Attach SIIT translators + IPv6 VPC classifiers for an OCI container.
+    pub async fn attach_netkit(
+        &self,
+        nk_name: &str,
+        guest_ipv4: &str,
+        ghost_ipv6: &str,
+        vpc_id: u16,
+        vpc_cidr: &str,
+        container_pid: u32,
+    ) -> anyhow::Result<()> {
+        let req = VpcRequest::AttachNetkit {
+            nk_name: nk_name.to_string(),
+            guest_ipv4: guest_ipv4.to_string(),
+            ghost_ipv6: ghost_ipv6.to_string(),
+            vpc_id,
+            vpc_cidr: vpc_cidr.to_string(),
+            container_pid,
+        };
+
+        match self.request(&req).await {
+            Ok(VpcResponse::Ok) => Ok(()),
+            Ok(VpcResponse::Error { code, message }) => Err(anyhow::anyhow!(
+                "VPC attach_netkit error [{}]: {}",
+                code,
+                message
+            )),
+            Ok(other) => Err(anyhow::anyhow!(
+                "Unexpected VPC response to AttachNetkit: {:?}",
+                other
+            )),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Detach SIIT/VPC classifiers from a netkit interface.
+    pub async fn detach_netkit(&self, nk_name: &str) -> anyhow::Result<()> {
+        let req = VpcRequest::DetachNetkit {
+            nk_name: nk_name.to_string(),
+        };
+
+        match self.request(&req).await {
+            Ok(VpcResponse::Ok) => Ok(()),
+            Ok(VpcResponse::Error { code, message }) => Err(anyhow::anyhow!(
+                "VPC detach_netkit error [{}]: {}",
+                code,
+                message
+            )),
+            Ok(other) => Err(anyhow::anyhow!(
+                "Unexpected VPC response to DetachNetkit: {:?}",
                 other
             )),
             Err(e) => Err(e),

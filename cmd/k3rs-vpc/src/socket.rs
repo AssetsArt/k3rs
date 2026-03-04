@@ -120,6 +120,7 @@ async fn dispatch(
                     guest_ipv4: result.guest_ipv4.to_string(),
                     ghost_ipv6: result.ghost_ipv6.to_string(),
                     vpc_id: result.vpc_id,
+                    vpc_cidr: result.vpc_cidr,
                 },
                 Err(e) => VpcResponse::Error {
                     code: "allocate_error".to_string(),

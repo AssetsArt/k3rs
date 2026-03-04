@@ -3360,9 +3360,14 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] `k3rs-init` boot params: added `k3rs.platform_prefix` and `k3rs.cluster_id` to cmdline parsing + `K3rsBootParams::is_complete()` check
 
 #### Phase 13: Cross-Node Mesh
-- [ ] WireGuard tunnel setup between nodes (Ghost IPv6 traffic)
-- [ ] 1-route-per-node instead of per-pod-CIDR routes
-- [ ] Node discovery: exchange Ghost IPv6 prefixes on registration
+- [x] WireGuard tunnel setup between nodes (Ghost IPv6 traffic)
+- [x] 1-route-per-node instead of per-pod-CIDR routes
+- [x] Node discovery: exchange Ghost IPv6 prefixes on registration
+- [x] `WireGuardManager` in `cmd/k3rs-vpc/src/wireguard.rs` — keypair generation/persistence, `wg-k3rs` interface, `fd6b:3372::/32` route, peer sync
+- [x] `pkg/network/src/wireguard.rs` — idempotent WG primitives (`ensure_wireguard`, `add_peer`, `remove_peer`, `ensure_ghost_route`, `list_peers`)
+- [x] Agent queries WG public key from VPC daemon via `GetWgPublicKey` RPC, includes in `NodeRegistrationRequest`
+- [x] Registration handler computes `wg_endpoint` from node address + listen port, stores on `Node`
+- [x] VPC sync loop fetches node list and calls `wg_manager.sync_peers()` every 10s
 
 #### Phase 14: Service Proxy IPv6 Backend
 - [ ] Pingora Service Proxy: route to Ghost IPv6 backends
@@ -3460,15 +3465,15 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 - [x] eBPF NAT64 egress/ingress on k3rs0 bridge + physical interface
 - [x] SNAT Ghost IPv6 → node IPv4, conntrack for return traffic
 - [x] DNS64 synthesis (A→AAAA with `64:ff9b::/96` prefix)
-- [ ] Configure NAT64 node IPv4 + physical interface automatically at `k3rs-vpc` startup
+- [x] Configure NAT64 node IPv4 + physical interface automatically at `k3rs-vpc` startup
 - [ ] E2E test: pod reaches external IPv4 service via DNS64+NAT64
 
 #### Networking — Cross-Node (WireGuard Mesh)
 
-- [ ] WireGuard tunnel setup between nodes for Ghost IPv6 traffic
-- [ ] Node discovery: exchange Ghost IPv6 prefixes on registration
-- [ ] 1-route-per-node routing (all Ghost traffic via `wg-k3rs` interface)
-- [ ] Automatic peer configuration when nodes join/leave
+- [x] WireGuard tunnel setup between nodes for Ghost IPv6 traffic
+- [x] Node discovery: exchange Ghost IPv6 prefixes on registration
+- [x] 1-route-per-node routing (all Ghost traffic via `wg-k3rs` interface)
+- [x] Automatic peer configuration when nodes join/leave
 - [ ] E2E test: pod-to-pod cross-node via WireGuard tunnel
 
 #### Networking — Service Proxy IPv6
@@ -3488,7 +3493,7 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 - [x] `AttachTap`/`DetachTap` protocol + `tap_guard` anti-spoofing for VM TAPs
 - [x] `StoredAllocation.interface_type` for OCI/VM dispatch in `rebuild()`
 - [ ] Crash recovery: re-open pinned BPF maps, reconcile with VpcStore
-- [ ] Automatic NAT64 install at startup (detect node IPv4 + physical interface)
+- [x] Automatic NAT64 install at startup (detect node IPv4 + physical interface)
 - [ ] Graceful shutdown: unpin programs/maps or leave pinned for zero-downtime restart
 
 #### Agent — Pod Lifecycle
@@ -3500,8 +3505,8 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 - [x] Container runtime (OCI + Firecracker + Virtualization.framework)
 - [x] Agent state cache (SlateDB)
 - [x] Connectivity state machine (CONNECTED/RECONNECTING/OFFLINE)
-- [ ] Agent calls `AttachNetkit` RPC to `k3rs-vpc` after `setup_pod_network()`
-- [ ] Agent calls `DetachNetkit` RPC to `k3rs-vpc` on pod teardown (before `teardown_pod_network()`)
+- [x] Agent calls `AttachNetkit` RPC to `k3rs-vpc` after `setup_pod_network()`
+- [x] Agent calls `DetachNetkit` RPC to `k3rs-vpc` on pod teardown (before `teardown_pod_network()`)
 - [ ] Agent calls `AttachTap` RPC to `k3rs-vpc` for VM/Firecracker pods (after TAP setup)
 - [ ] Agent calls `DetachTap` RPC to `k3rs-vpc` for VM pods on teardown
 
@@ -3512,7 +3517,8 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 - [x] VPC + Peering CRUD APIs, VpcController
 - [x] Backup/Restore
 - [x] RBAC structure
-- [ ] VPC CIDR overlap validation (currently spec says "no overlap" but architecture supports it)
+- [x] VPC CIDR overlap validation (currently spec says "no overlap" but architecture supports it)
+- [x] VPC deletion lifecycle: `DELETE` → Terminating (blocks new pods), `deleted_at` timestamp, 300s VpcID cooldown
 - [ ] Service `vpc` field propagation in endpoint controller
 
 #### CLI (`k3rsctl`)

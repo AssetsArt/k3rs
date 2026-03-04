@@ -18,6 +18,7 @@ struct Allocation {
 
 struct VpcPool {
     vpc_id: u16,
+    cidr: String,
     base_ip: u32,
     max_hosts: u32,
     next_offset: u32,
@@ -28,6 +29,7 @@ pub struct AllocateResult {
     pub guest_ipv4: Ipv4Addr,
     pub ghost_ipv6: Ipv6Addr,
     pub vpc_id: u16,
+    pub vpc_cidr: String,
 }
 
 pub struct QueryResult {
@@ -91,6 +93,7 @@ impl GhostAllocator {
                 vpc.name.clone(),
                 VpcPool {
                     vpc_id: vpc.vpc_id,
+                    cidr: vpc.ipv4_cidr.clone(),
                     base_ip,
                     max_hosts,
                     next_offset: 1,
@@ -180,6 +183,7 @@ impl GhostAllocator {
                 vpc.name.clone(),
                 VpcPool {
                     vpc_id: vpc.vpc_id,
+                    cidr: vpc.ipv4_cidr.clone(),
                     base_ip,
                     max_hosts,
                     next_offset: 1,
@@ -206,6 +210,7 @@ impl GhostAllocator {
                 guest_ipv4: existing.guest_ipv4,
                 ghost_ipv6: existing.ghost_ipv6,
                 vpc_id: pool.vpc_id,
+                vpc_cidr: pool.cidr.clone(),
             });
         }
 
@@ -268,6 +273,7 @@ impl GhostAllocator {
             guest_ipv4,
             ghost_ipv6,
             vpc_id: pool.vpc_id,
+            vpc_cidr: pool.cidr.clone(),
         })
     }
 
