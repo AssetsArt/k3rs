@@ -326,8 +326,10 @@ async fn run_pod_lifecycle(
         Err(e) => {
             // If VPC daemon is not running (socket missing), keep pod Pending
             // so it will be retried on the next sync cycle.
-            let is_transient = e.to_string().contains("os error 2")
-                || e.to_string().contains("Connection refused");
+            let msg = e.to_string();
+            let is_transient = msg.contains("os error 2")
+                || msg.contains("Connection refused")
+                || msg.contains("socket not found");
             if is_transient {
                 warn!(
                     "[pod:{}] VPC daemon not available, will retry: {}",

@@ -18,6 +18,7 @@ tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 pkg-constants = { workspace = true }
 crossterm = { workspace = true }
+ratatui = { workspace = true }
 flate2 = { workspace = true }
 chrono = { workspace = true }
 nix = { workspace = true }

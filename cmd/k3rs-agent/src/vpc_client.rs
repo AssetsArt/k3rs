@@ -2,6 +2,7 @@
 
 use crate::connectivity::ConnectivityManager;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tracing::warn;
@@ -128,12 +129,21 @@ impl VpcClient {
     }
 
     /// Allocate a Ghost IPv6 address for a pod. Retries up to 5 times with backoff
-    /// if the daemon is not yet ready (connection refused).
+    /// if the daemon is not yet ready (connection refused), but fails fast if
+    /// the socket file does not exist.
     pub async fn allocate(
         &self,
         pod_id: &str,
         vpc_name: &str,
     ) -> anyhow::Result<(String, String, u16, String)> {
+        // Fast path: if socket file doesn't exist, no point retrying
+        if !Path::new(&self.socket_path).exists() {
+            return Err(anyhow::anyhow!(
+                "VPC daemon socket not found: {}",
+                self.socket_path
+            ));
+        }
+
         let req = VpcRequest::Allocate {
             pod_id: pod_id.to_string(),
             vpc_name: vpc_name.to_string(),

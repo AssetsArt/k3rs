@@ -21,14 +21,29 @@ pub fn start_listener(
     wg_manager: Option<Arc<WireGuardManager>>,
 ) -> JoinHandle<()> {
     // Remove stale socket file if it exists
-    let _ = std::fs::remove_file(socket_path);
+    if std::path::Path::new(socket_path).exists() {
+        if let Err(e) = std::fs::remove_file(socket_path) {
+            warn!(
+                "Cannot remove stale socket {}: {} — try: sudo rm {}",
+                socket_path, e, socket_path
+            );
+        }
+    }
 
     // Ensure parent directory exists
     if let Some(parent) = std::path::Path::new(socket_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let listener = UnixListener::bind(socket_path).expect("failed to bind VPC socket");
+    let listener = match UnixListener::bind(socket_path) {
+        Ok(l) => l,
+        Err(e) => {
+            panic!(
+                "failed to bind VPC socket at {}: {} — if a stale socket exists owned by root, run: sudo rm {}",
+                socket_path, e, socket_path
+            );
+        }
+    };
     info!("VPC socket listener started on {}", socket_path);
 
     tokio::spawn(async move {
