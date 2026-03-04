@@ -20,6 +20,7 @@ use pkg_controllers::backup::BackupController;
 use pkg_controllers::cronjob::CronJobController;
 use pkg_controllers::daemonset::DaemonSetController;
 use pkg_controllers::deployment::DeploymentController;
+use pkg_controllers::endpoint::EndpointController;
 use pkg_controllers::eviction::EvictionController;
 use pkg_controllers::hpa::HPAController;
 use pkg_controllers::job::JobController;
@@ -136,6 +137,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
                 HPAController::new(ctrl_store.clone()).start(),
                 EvictionController::new(ctrl_store.clone()).start(),
                 VpcController::new(ctrl_store.clone()).start(),
+                EndpointController::new(ctrl_store.clone()).start(),
             ];
 
             // Start BackupController if a backup directory is configured

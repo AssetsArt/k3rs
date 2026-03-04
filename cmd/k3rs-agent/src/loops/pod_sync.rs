@@ -116,8 +116,13 @@ async fn check_running_pods(
                 #[cfg(target_os = "linux")]
                 {
                     let short = &pod.id[..8.min(pod.id.len())];
-                    let nk_name = format!("nk-{}", short);
-                    let _ = vpc_client.detach_netkit(&nk_name).await;
+                    if runtime.backend_name_for(&pod.id) == "vm" {
+                        let tap_name = format!("tap-{}", short);
+                        let _ = vpc_client.detach_tap(&tap_name).await;
+                    } else {
+                        let nk_name = format!("nk-{}", short);
+                        let _ = vpc_client.detach_netkit(&nk_name).await;
+                    }
                 }
 
                 // Tear down pod network (best-effort)
@@ -160,8 +165,13 @@ async fn check_running_pods(
                 #[cfg(target_os = "linux")]
                 {
                     let short = &pod.id[..8.min(pod.id.len())];
-                    let nk_name = format!("nk-{}", short);
-                    let _ = vpc_client.detach_netkit(&nk_name).await;
+                    if runtime.backend_name_for(&pod.id) == "vm" {
+                        let tap_name = format!("tap-{}", short);
+                        let _ = vpc_client.detach_tap(&tap_name).await;
+                    } else {
+                        let nk_name = format!("nk-{}", short);
+                        let _ = vpc_client.detach_netkit(&nk_name).await;
+                    }
                 }
 
                 // Tear down pod network (best-effort)
@@ -414,6 +424,24 @@ async fn run_pod_lifecycle(
             .send()
             .await;
         return;
+    }
+
+    // 3b. Attach eBPF classifiers for VM backends (TAP created during start_container)
+    #[cfg(target_os = "linux")]
+    if runtime.backend_name_for(&pod.id) == "vm"
+        && let Some((ref guest_ipv4, ref ghost_ipv6, vpc_id, ref vpc_cidr)) = vpc_alloc
+    {
+        let short = &pod.id[..8.min(pod.id.len())];
+        let tap_name = format!("tap-{}", short);
+        if let Err(e) = vpc_client
+            .attach_tap(&tap_name, guest_ipv4, ghost_ipv6, vpc_id, vpc_cidr)
+            .await
+        {
+            warn!(
+                "[pod:{}] eBPF attach_tap failed: {} (continuing without VPC enforcement)",
+                pod.name, e
+            );
+        }
     }
 
     // 4. Success

@@ -2,6 +2,7 @@ pub mod backup;
 pub mod cronjob;
 pub mod daemonset;
 pub mod deployment;
+pub mod endpoint;
 pub mod eviction;
 pub mod hpa;
 pub mod job;

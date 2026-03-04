@@ -3370,9 +3370,9 @@ Replace the ad-hoc JSON file approach with an embedded SlateDB instance.
 - [x] VPC sync loop fetches node list and calls `wg_manager.sync_peers()` every 10s
 
 #### Phase 14: Service Proxy IPv6 Backend
-- [ ] Pingora Service Proxy: route to Ghost IPv6 backends
-- [ ] Health checks via Ghost IPv6
-- [ ] Endpoint controller: populate endpoints with Ghost IPv6
+- [x] Pingora Service Proxy: route to Ghost IPv6 backends
+- [x] Health checks via Ghost IPv6
+- [x] Endpoint controller: populate endpoints with Ghost IPv6
 
 ### 16.7 Process Manager Checklists
 
@@ -3478,10 +3478,10 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 
 #### Networking — Service Proxy IPv6
 
-- [ ] Pingora Service Proxy: route to Ghost IPv6 backends instead of ClusterIP
-- [ ] Health checks via Ghost IPv6
-- [ ] Endpoint controller: populate endpoints with Ghost IPv6 addresses
-- [ ] ClusterIP as virtual concept in DNS only (DNS returns Ghost IPv6 AAAA)
+- [x] Pingora Service Proxy: route to Ghost IPv6 backends instead of ClusterIP (IPv6 bracket formatting in backend addresses)
+- [x] Health checks via Ghost IPv6
+- [x] Endpoint controller: populate endpoints with Ghost IPv6 addresses (`EndpointController` auto-generates from Running pods with `ghost_ipv6`)
+- [x] ClusterIP as virtual concept in DNS only (DNS already returns Ghost IPv6 AAAA, proxy backends are now Ghost IPv6)
 
 #### k3rs-vpc Daemon
 
@@ -3507,8 +3507,8 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 - [x] Connectivity state machine (CONNECTED/RECONNECTING/OFFLINE)
 - [x] Agent calls `AttachNetkit` RPC to `k3rs-vpc` after `setup_pod_network()`
 - [x] Agent calls `DetachNetkit` RPC to `k3rs-vpc` on pod teardown (before `teardown_pod_network()`)
-- [ ] Agent calls `AttachTap` RPC to `k3rs-vpc` for VM/Firecracker pods (after TAP setup)
-- [ ] Agent calls `DetachTap` RPC to `k3rs-vpc` for VM pods on teardown
+- [x] Agent calls `AttachTap` RPC to `k3rs-vpc` for VM/Firecracker pods (after `start_container()`)
+- [x] Agent calls `DetachTap` RPC to `k3rs-vpc` for VM pods on teardown
 
 #### Server — Control Plane
 
@@ -3519,7 +3519,7 @@ Items remaining to achieve a fully operational end-to-end system. Grouped by sub
 - [x] RBAC structure
 - [x] VPC CIDR overlap validation (currently spec says "no overlap" but architecture supports it)
 - [x] VPC deletion lifecycle: `DELETE` → Terminating (blocks new pods), `deleted_at` timestamp, 300s VpcID cooldown
-- [ ] Service `vpc` field propagation in endpoint controller
+- [x] Service `vpc` field propagation in endpoint controller (EndpointController filters pods by service VPC)
 
 #### CLI (`k3rsctl`)
 

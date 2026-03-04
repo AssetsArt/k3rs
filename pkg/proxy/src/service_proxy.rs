@@ -157,7 +157,12 @@ impl ServiceProxy {
                                 continue;
                             }
                         }
-                        backends.push(format!("{}:{}", addr.ip, svc_port.target_port));
+                        // IPv6 addresses need brackets in socket notation
+                        if addr.ip.contains(':') {
+                            backends.push(format!("[{}]:{}", addr.ip, svc_port.target_port));
+                        } else {
+                            backends.push(format!("{}:{}", addr.ip, svc_port.target_port));
+                        }
                     }
                 }
 

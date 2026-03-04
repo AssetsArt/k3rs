@@ -305,7 +305,6 @@ impl VpcClient {
     }
 
     /// Attach tap_guard + IPv6 classifiers on a host-side TAP for a VM.
-    #[allow(dead_code)]
     pub async fn attach_tap(
         &self,
         tap_name: &str,
@@ -338,7 +337,6 @@ impl VpcClient {
     }
 
     /// Detach TC classifiers from a TAP interface.
-    #[allow(dead_code)]
     pub async fn detach_tap(&self, tap_name: &str) -> anyhow::Result<()> {
         let req = VpcRequest::DetachTap {
             tap_name: tap_name.to_string(),

@@ -101,6 +101,10 @@ pub fn start(
                         for entry in routes {
                             ip_to_vpc.insert(entry.destination.clone(), vpc_info.name.clone());
                             ips.insert(entry.destination);
+                            // Also include Ghost IPv6 so proxy VPC filtering works
+                            // with Ghost IPv6 endpoint addresses
+                            ip_to_vpc.insert(entry.next_hop.clone(), vpc_info.name.clone());
+                            ips.insert(entry.next_hop);
                         }
                         vpc_pod_ips.insert(vpc_info.name.clone(), ips);
                     }
