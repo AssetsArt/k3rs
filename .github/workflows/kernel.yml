@@ -114,7 +114,7 @@ jobs:
 
       - name: Build k3rs-init and create initrd
         run: |
-          cargo zigbuild --release --target ${{ matrix.rust_target }} -p k3rs-init
+          cargo +stable zigbuild --release --target ${{ matrix.rust_target }} -p k3rs-init
 
           INITRD_ROOT="/tmp/initrd-$$"
           mkdir -p "$INITRD_ROOT"/{sbin,dev,proc,sys,tmp,run,mnt/rootfs,etc}
