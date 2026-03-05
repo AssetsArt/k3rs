@@ -45,13 +45,24 @@ run() {
     fi
 }
 
+echo "Tag: ${TAG}"
+echo ""
+
+# If tag already exists and --force wasn't given, ask to overwrite
+if ! $FORCE && git rev-parse "$TAG" >/dev/null 2>&1; then
+    read -rp "Tag '${TAG}' already exists. Overwrite? [y/N] " answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+        FORCE=true
+    else
+        echo "Aborted."
+        exit 1
+    fi
+fi
+
 FORCE_FLAG=""
 if $FORCE; then
     FORCE_FLAG="-f"
 fi
-
-echo "Tag: ${TAG}"
-echo ""
 
 run git tag $FORCE_FLAG "$TAG"
 run git push $FORCE_FLAG origin "$TAG"
