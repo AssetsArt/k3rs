@@ -107,6 +107,8 @@ pub enum Commands {
         #[command(subcommand)]
         action: crate::pm::PmAction,
     },
+    /// Diagnose cluster health and local environment
+    Doctor,
     /// Restore cluster from a backup file
     Restore {
         /// Path to the `.k3rs-backup.json.gz` backup file

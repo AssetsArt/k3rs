@@ -3,6 +3,7 @@ pub mod backup;
 pub mod cluster;
 pub mod delete;
 pub mod describe;
+pub mod doctor;
 pub mod exec;
 pub mod get;
 pub mod logs;
@@ -65,6 +66,7 @@ pub async fn dispatch(cli: &Cli, client: &reqwest::Client) -> anyhow::Result<()>
             )
             .await
         }
+        Commands::Doctor => doctor::handle(client, base).await,
         Commands::Runtime { action } => runtime::handle(client, &cli.server, action).await,
         Commands::Backup { action } => backup::handle_backup(client, base, action).await,
         Commands::Restore {
