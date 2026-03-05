@@ -100,9 +100,27 @@ pub async fn ensure_bridge(config: &BridgeConfig) -> Result<()> {
         );
     }
 
+    // Add route for Ghost IPv6 prefix via the bridge so the host can reach pods
+    let ghost_prefix = crate::wireguard::GHOST_ROUTE_PREFIX;
+    let route_output = tokio::process::Command::new("ip")
+        .args(["-6", "route", "add", ghost_prefix, "dev", &config.name])
+        .output()
+        .await?;
+    if !route_output.status.success() {
+        let stderr = String::from_utf8_lossy(&route_output.stderr);
+        if !stderr.contains("File exists") {
+            warn!(
+                "[bridge] Failed to add ghost route {} dev {}: {}",
+                ghost_prefix,
+                config.name,
+                stderr.trim()
+            );
+        }
+    }
+
     info!(
-        "[bridge] {} created (gateway: {}/64, IPv6 forwarding enabled)",
-        config.name, config.gateway_ipv6
+        "[bridge] {} created (gateway: {}/64, route: {}, IPv6 forwarding enabled)",
+        config.name, config.gateway_ipv6, ghost_prefix
     );
     Ok(())
 }
