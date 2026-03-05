@@ -107,8 +107,12 @@ pub enum Commands {
         #[command(subcommand)]
         action: crate::pm::PmAction,
     },
-    /// Diagnose cluster health and local environment
-    Doctor,
+    /// Diagnose prerequisites and local environment
+    Doctor {
+        /// Automatically fix issues (download kernel, set capabilities)
+        #[arg(long, default_value_t = false)]
+        fix: bool,
+    },
     /// Restore cluster from a backup file
     Restore {
         /// Path to the `.k3rs-backup.json.gz` backup file

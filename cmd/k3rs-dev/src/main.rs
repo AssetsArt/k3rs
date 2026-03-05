@@ -310,17 +310,23 @@ fn check_workspace_root() -> Result<()> {
     Ok(())
 }
 
-/// Check Linux capabilities / root for components that need privileged operations.
-fn check_permissions(components: &[Component]) -> Result<()> {
-    let needs_caps = components.iter().any(|c| {
-        matches!(c, Component::Agent | Component::Vpc)
-    });
+/// Ensure Linux capabilities are set on binaries that need privileged operations.
+/// Automatically builds and runs `sudo setcap` so the user just runs `k3rs-dev all`.
+fn ensure_capabilities(components: &[Component]) -> Result<()> {
+    let privileged: Vec<(&str, &str)> = components
+        .iter()
+        .filter_map(|c| match c {
+            Component::Agent => Some(("agent", "k3rs-agent")),
+            Component::Vpc => Some(("vpc", "k3rs-vpc")),
+            _ => None,
+        })
+        .collect();
 
-    if !needs_caps {
+    if privileged.is_empty() {
         return Ok(());
     }
 
-    // Running as root is always fine
+    // Running as root — no caps needed
     let is_root = Command::new("id")
         .arg("-u")
         .output()
@@ -331,62 +337,71 @@ fn check_permissions(components: &[Component]) -> Result<()> {
         return Ok(());
     }
 
-    // Check if the built binaries have capabilities set
-    let mut missing: Vec<(&str, &str)> = Vec::new();
+    // Check which binaries need caps
+    let mut needs_setcap: Vec<(&str, &str)> = Vec::new();
 
-    for comp in components {
-        let (key, bin_name) = match comp {
-            Component::Agent => ("agent", "k3rs-agent"),
-            Component::Vpc => ("vpc", "k3rs-vpc"),
-            _ => continue,
-        };
-
+    for &(key, bin_name) in &privileged {
         let required = pkg_constants::capabilities::caps_for_component(key);
         if required.is_empty() {
             continue;
         }
 
-        // Check target/debug binary (dev builds)
         let debug_bin = format!("target/debug/{}", bin_name);
-        let has_caps = if std::path::Path::new(&debug_bin).exists() {
-            check_file_has_caps(&debug_bin, required)
-        } else {
-            false
-        };
-
-        if !has_caps {
-            missing.push((key, bin_name));
+        if std::path::Path::new(&debug_bin).exists() && check_file_has_caps(&debug_bin, required) {
+            continue;
         }
+
+        needs_setcap.push((key, bin_name));
     }
 
-    if missing.is_empty() {
+    if needs_setcap.is_empty() {
         return Ok(());
     }
 
-    let mut msg = String::from(
-        "Missing permissions — agent/vpc need network capabilities to run.\n\n",
-    );
-    msg.push_str("Choose one:\n\n");
-    msg.push_str("  1. Run as root:\n");
-    msg.push_str("     sudo k3rs-dev all\n\n");
-    msg.push_str("  2. Grant capabilities after building (once per build):\n");
+    // Build the binaries first so setcap has something to apply to
+    let packages: Vec<&str> = needs_setcap.iter().map(|(_, bin)| *bin).collect();
+    println!("Building privileged components: {}", packages.join(", "));
 
-    for (key, bin_name) in &missing {
+    let mut build_cmd = Command::new("cargo");
+    build_cmd.arg("build");
+    for pkg in &packages {
+        build_cmd.args(["-p", pkg]);
+    }
+    let status = build_cmd.status()?;
+    if !status.success() {
+        bail!("cargo build failed");
+    }
+
+    // Apply capabilities via sudo setcap
+    println!("Granting network capabilities (sudo required)...");
+
+    for &(key, bin_name) in &needs_setcap {
         let caps = pkg_constants::capabilities::caps_for_component(key);
         let cap_str = caps
             .iter()
             .map(|c| c.to_lowercase())
             .collect::<Vec<_>>()
-            .join(",");
-        msg.push_str(&format!(
-            "     sudo setcap '{cap_str}+eip' target/debug/{bin_name}\n"
-        ));
+            .join(",")
+            + "+eip";
+
+        let debug_bin = format!("target/debug/{}", bin_name);
+
+        let status = Command::new("sudo")
+            .args(["setcap", &cap_str, &debug_bin])
+            .status()?;
+
+        if !status.success() {
+            bail!(
+                "Failed to set capabilities on {}.\n\
+                 You can also run as root: sudo k3rs-dev all",
+                debug_bin
+            );
+        }
+
+        println!("  {} -> {}", bin_name, cap_str);
     }
 
-    msg.push_str("\n  3. Or run only the server (no caps needed):\n");
-    msg.push_str("     k3rs-dev server\n");
-
-    bail!("{}", msg);
+    Ok(())
 }
 
 /// Check if a binary has the required capabilities set via getcap.
@@ -408,8 +423,8 @@ fn main() -> Result<()> {
     let components = cli.component.resolve();
 
     check_workspace_root()?;
-    check_permissions(&components)?;
     check_tools(&components)?;
+    ensure_capabilities(&components)?;
 
     let configs: Vec<DevConfig> = components
         .iter()
