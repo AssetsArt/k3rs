@@ -3927,6 +3927,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "k3rs-dev"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "pkg-constants",
+]
+
+[[package]]
 name = "k3rs-init"
 version = "0.1.0"
 dependencies = [

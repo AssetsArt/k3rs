@@ -22,6 +22,7 @@ members = [
     "cmd/k3rs-init",
     "cmd/k3rs-vpc",
     "cmd/k3rs-vpc-common",
+    "cmd/k3rs-dev",
 ]
 # Note: cmd/k3rs-vpc-ebpf is NOT a workspace member — it targets bpfel-unknown-none
 # and must be built separately via aya-build (see cmd/k3rs-vpc/build.rs).
@@ -45,6 +46,7 @@ default-members = [
     "pkg/types",
     "pkg/vpc",
     "cmd/k3rs-ui",
+    "cmd/k3rs-dev",
 ]
 
 [workspace.dependencies]

@@ -1,4 +1,4 @@
-//! `pm dev` — run k3rs components in dev mode.
+//! `k3rs-dev` — run k3rs components in dev mode with auto-rebuild on code changes.
 //!
 //! - Server/Agent/Vpc: `cargo watch -x "run --bin <bin> -- <args>"`
 //! - UI: `dx serve --package k3rs-ui`
@@ -12,8 +12,39 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
+use clap::Parser;
 
-use super::types::ComponentName;
+#[derive(Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum Component {
+    Server,
+    Agent,
+    Vpc,
+    Ui,
+    All,
+}
+
+impl Component {
+    const ALL_COMPONENTS: &[Component] = &[
+        Component::Server,
+        Component::Agent,
+        Component::Vpc,
+        Component::Ui,
+    ];
+
+    fn resolve(&self) -> Vec<Component> {
+        match self {
+            Self::All => Self::ALL_COMPONENTS.to_vec(),
+            other => vec![other.clone()],
+        }
+    }
+}
+
+#[derive(Parser)]
+#[command(name = "k3rs-dev", about = "Run k3rs components in dev mode with auto-rebuild")]
+struct Cli {
+    /// Component(s) to run in dev mode (server, agent, vpc, ui, or all)
+    component: Component,
+}
 
 // ── Dev config ──────────────────────────────────────────────────
 
@@ -23,10 +54,6 @@ struct DevConfig {
     args: Vec<String>,
     watch_dirs: Vec<&'static str>,
     env: HashMap<String, String>,
-    #[allow(dead_code)]
-    url: &'static str,
-    #[allow(dead_code)]
-    color_idx: usize,
     ports: Vec<u16>,
 }
 
@@ -49,8 +76,6 @@ fn server_config() -> DevConfig {
         .collect(),
         watch_dirs: vec!["pkg/", "cmd/k3rs-server"],
         env: [("RUST_LOG".into(), "debug".into())].into(),
-        url: "http://127.0.0.1:6443",
-        color_idx: 0,
         ports: vec![pkg_constants::network::DEFAULT_API_PORT],
     }
 }
@@ -80,8 +105,6 @@ fn agent_config() -> DevConfig {
         .collect(),
         watch_dirs: vec!["pkg/", "cmd/k3rs-agent"],
         env: [("RUST_LOG".into(), "debug".into())].into(),
-        url: "proxy :6444 | svc :10256 | dns :5353",
-        color_idx: 1,
         ports: vec![
             pkg_constants::network::DEFAULT_TUNNEL_PORT,
             pkg_constants::network::DEFAULT_SERVICE_PROXY_PORT,
@@ -91,8 +114,6 @@ fn agent_config() -> DevConfig {
 }
 
 fn vpc_config() -> DevConfig {
-    let vpc_socket: &'static str =
-        format!("{}/k3rs-vpc.sock", pkg_constants::paths::DATA_DIR).leak();
     DevConfig {
         label: "vpc",
         bin_name: "k3rs-vpc",
@@ -111,8 +132,6 @@ fn vpc_config() -> DevConfig {
         .collect(),
         watch_dirs: vec!["pkg/", "cmd/k3rs-vpc"],
         env: [("RUST_LOG".into(), "debug".into())].into(),
-        url: vpc_socket,
-        color_idx: 2,
         ports: vec![],
     }
 }
@@ -124,8 +143,6 @@ fn ui_config() -> DevConfig {
         args: vec![],
         watch_dirs: vec![],
         env: HashMap::new(),
-        url: "http://127.0.0.1:8080",
-        color_idx: 3,
         ports: vec![8080],
     }
 }
@@ -185,7 +202,6 @@ fn spawn_component(config: &DevConfig, running: Arc<AtomicBool>) -> Result<std::
 
     let label = config.label.to_string();
 
-    // stdout reader
     if let Some(stdout) = child.stdout.take() {
         let running = Arc::clone(&running);
         let label = label.clone();
@@ -200,7 +216,6 @@ fn spawn_component(config: &DevConfig, running: Arc<AtomicBool>) -> Result<std::
         });
     }
 
-    // stderr reader
     if let Some(stderr) = child.stderr.take() {
         let running = Arc::clone(&running);
         std::thread::spawn(move || {
@@ -219,14 +234,11 @@ fn spawn_component(config: &DevConfig, running: Arc<AtomicBool>) -> Result<std::
 
 // ── Tool check ──────────────────────────────────────────────────
 
-fn check_tools(components: &[ComponentName]) -> Result<()> {
-    let needs_cargo_watch = components.iter().any(|c| {
-        matches!(
-            c,
-            ComponentName::Server | ComponentName::Agent | ComponentName::Vpc
-        )
-    });
-    let needs_dx = components.iter().any(|c| matches!(c, ComponentName::Ui));
+fn check_tools(components: &[Component]) -> Result<()> {
+    let needs_cargo_watch = components
+        .iter()
+        .any(|c| matches!(c, Component::Server | Component::Agent | Component::Vpc));
+    let needs_dx = components.iter().any(|c| matches!(c, Component::Ui));
 
     if needs_cargo_watch {
         let s = Command::new("cargo")
@@ -252,29 +264,28 @@ fn check_tools(components: &[ComponentName]) -> Result<()> {
     Ok(())
 }
 
-// ── Main entry ──────────────────────────────────────────────────
+// ── Main ────────────────────────────────────────────────────────
 
-pub fn run(component: &ComponentName) -> Result<()> {
-    let components = component.resolve();
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let components = cli.component.resolve();
     check_tools(&components)?;
 
     let configs: Vec<DevConfig> = components
         .iter()
         .map(|c| match c {
-            ComponentName::Server => server_config(),
-            ComponentName::Agent => agent_config(),
-            ComponentName::Vpc => vpc_config(),
-            ComponentName::Ui => ui_config(),
-            ComponentName::All => unreachable!(),
+            Component::Server => server_config(),
+            Component::Agent => agent_config(),
+            Component::Vpc => vpc_config(),
+            Component::Ui => ui_config(),
+            Component::All => unreachable!(),
         })
         .collect();
 
-    // Kill any processes already using our ports
     kill_ports(&configs);
 
     let running = Arc::new(AtomicBool::new(true));
 
-    // Stop cleanly on Ctrl-C
     let r = Arc::clone(&running);
     ctrlc::set_handler(move || {
         println!("\nReceived Ctrl-C, shutting down...");
@@ -282,7 +293,6 @@ pub fn run(component: &ComponentName) -> Result<()> {
     })
     .expect("Error setting Ctrl-C handler");
 
-    // Spawn all components
     let mut children: Vec<std::process::Child> = Vec::new();
     for config in configs.iter() {
         let child = spawn_component(config, Arc::clone(&running))?;
@@ -291,12 +301,10 @@ pub fn run(component: &ComponentName) -> Result<()> {
 
     println!("All components started. Logs will appear below (Ctrl+C to quit)...");
 
-    // Wait until running flag is flipped (due to SigInt)
     while running.load(Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Shutdown
     println!("Stopping processes...");
     for child in children.iter_mut() {
         let _ = child.kill();

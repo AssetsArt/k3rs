@@ -1,4 +1,3 @@
-pub mod dev;
 pub mod install;
 pub mod lifecycle;
 pub mod list;
@@ -93,11 +92,6 @@ pub enum PmAction {
         /// Component to watch
         component: ComponentName,
     },
-    /// Run components in dev mode with auto-rebuild on code changes
-    Dev {
-        /// Component(s) to run in dev mode (server, agent, vpc, ui, or all)
-        component: ComponentName,
-    },
     /// Tail or stream component logs
     Logs {
         /// Component to view logs for
@@ -150,7 +144,6 @@ pub async fn handle(action: &PmAction) -> Result<()> {
         PmAction::Status => status::status(),
         PmAction::Startup { user, enable } => startup::startup(*user, *enable),
         PmAction::_Watch { component } => watchdog::run(component),
-        PmAction::Dev { component } => dev::run(component),
         PmAction::Logs {
             component,
             follow,

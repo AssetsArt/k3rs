@@ -1,0 +1,10 @@
+[package]
+name = "k3rs-dev"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { workspace = true }
+anyhow = { workspace = true }
+pkg-constants = { workspace = true }
+ctrlc = "3"
