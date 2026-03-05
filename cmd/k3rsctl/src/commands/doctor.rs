@@ -25,6 +25,11 @@ pub async fn handle(client: &reqwest::Client, base: &str) -> anyhow::Result<()> 
     let mut warns = 0u32;
     let mut fails = 0u32;
 
+    // Track which categories had issues for targeted summary hints
+    let mut need_caps = false;
+    let mut need_kernel = false;
+    let mut need_tools = false;
+
     // ── Server Connectivity ─────────────────────────────────────────
     println!("{BOLD}Server Connectivity{RESET}");
 
@@ -274,12 +279,6 @@ pub async fn handle(client: &reqwest::Client, base: &str) -> anyhow::Result<()> 
     // Kernel assets (vmlinux + initrd.img)
     let kernel_path = format!("{}/{}", data_dir, pkg_constants::vm::KERNEL_FILENAME);
     let initrd_path = format!("{}/{}", data_dir, pkg_constants::vm::INITRD_FILENAME);
-    let github_repo = pkg_constants::network::GITHUB_REPO;
-    let arch = match std::env::consts::ARCH {
-        "aarch64" => "arm64",
-        "x86_64" => "amd64",
-        other => other,
-    };
 
     if Path::new(&kernel_path).exists() {
         let size = std::fs::metadata(&kernel_path)
@@ -290,18 +289,7 @@ pub async fn handle(client: &reqwest::Client, base: &str) -> anyhow::Result<()> 
     } else {
         fail(&format!("Kernel not found: {kernel_path}"));
         fails += 1;
-        println!("         download:");
-        println!(
-            "           k3rsctl runtime kernel-download"
-        );
-        println!("         or manually:");
-        println!(
-            "           curl -fSL https://github.com/{github_repo}/releases/download/$(curl -sfL https://api.github.com/repos/{github_repo}/releases | grep -o '\"kernel-v[^\"]*\"' | head -1 | tr -d '\"')/vmlinux-{arch} -o {kernel_path}"
-        );
-        println!(
-            "         or build from source:"
-        );
-        println!("           ./scripts/build-kernel.sh");
+        need_kernel = true;
     }
 
     if Path::new(&initrd_path).exists() {
@@ -313,14 +301,7 @@ pub async fn handle(client: &reqwest::Client, base: &str) -> anyhow::Result<()> 
     } else {
         fail(&format!("Initrd not found: {initrd_path}"));
         fails += 1;
-        println!("         download:");
-        println!(
-            "           k3rsctl runtime kernel-download"
-        );
-        println!("         or manually:");
-        println!(
-            "           curl -fSL https://github.com/{github_repo}/releases/download/$(curl -sfL https://api.github.com/repos/{github_repo}/releases | grep -o '\"kernel-v[^\"]*\"' | head -1 | tr -d '\"')/initrd.img-{arch} -o {initrd_path}"
-        );
+        need_kernel = true;
     }
     println!();
 
@@ -338,32 +319,32 @@ pub async fn handle(client: &reqwest::Client, base: &str) -> anyhow::Result<()> 
     } else {
         warn("Not running as root — checking alternatives");
         warns += 1;
+        need_caps = true;
     }
 
     // Check required CLI tools
+    let mut missing_tools: Vec<&str> = Vec::new();
     for tool in &["ip", "nsenter", "wg", "setcap", "getcap"] {
         if which(tool) {
             pass(&format!("'{tool}' found in PATH"));
             passes += 1;
         } else {
-            let severity = match *tool {
+            missing_tools.push(tool);
+            need_tools = true;
+            match *tool {
                 "setcap" | "getcap" => {
-                    warn(&format!("'{tool}' not found (install libcap2-bin / libcap)"));
+                    warn(&format!("'{tool}' not found — install libcap2-bin (Debian/Ubuntu) or libcap (Fedora)"));
                     warns += 1;
-                    "warn"
                 }
                 "wg" => {
                     warn(&format!("'{tool}' not found (install wireguard-tools) — cross-node traffic disabled"));
                     warns += 1;
-                    "warn"
                 }
                 _ => {
                     fail(&format!("'{tool}' not found — required for pod networking"));
                     fails += 1;
-                    "fail"
                 }
-            };
-            let _ = severity;
+            }
         }
     }
 
@@ -453,26 +434,65 @@ pub async fn handle(client: &reqwest::Client, base: &str) -> anyhow::Result<()> 
         "  {GREEN}{passes} passed{RESET}, {YELLOW}{warns} warning(s){RESET}, {RED}{fails} failed{RESET}"
     );
 
-    if fails > 0 || warns > 0 {
+    let has_issues = fails > 0 || warns > 0;
+
+    if has_issues {
         println!();
         println!("  {BOLD}Quick fixes:{RESET}");
+    }
+
+    if need_caps {
         println!();
-        println!("  {BOLD}Development (run as root):{RESET}");
-        println!("    sudo cargo run -p k3rs-agent");
+        println!("  {BOLD}Capabilities (choose one):{RESET}");
+        println!("    a) Run as root:");
+        println!("       sudo k3rs-dev all");
+        println!("    b) Grant capabilities (once per build):");
+        println!("       sudo setcap 'cap_net_admin,cap_net_raw,cap_sys_admin,cap_sys_ptrace,cap_dac_override+eip' target/debug/k3rs-agent");
+        println!("       sudo setcap 'cap_net_admin,cap_bpf,cap_sys_admin,cap_perfmon+eip' target/debug/k3rs-vpc");
+        println!("    c) Production with systemd:");
+        println!("       k3rsctl pm install agent && k3rsctl pm startup");
+    }
+
+    if need_kernel {
         println!();
-        println!("  {BOLD}Development (without root):{RESET}");
-        println!("    cargo build --release -p k3rs-agent -p k3rs-vpc");
-        println!("    sudo setcap 'cap_net_admin,cap_net_raw,cap_sys_admin,cap_sys_ptrace,cap_dac_override+eip' target/release/k3rs-agent");
-        println!("    sudo setcap 'cap_net_admin,cap_bpf,cap_sys_admin,cap_perfmon+eip' target/release/k3rs-vpc");
-        println!();
-        println!("  {BOLD}Production (systemd):{RESET}");
-        println!("    k3rsctl pm install agent");
-        println!("    k3rsctl pm startup          # generates systemd units with AmbientCapabilities");
-        println!("    sudo systemctl start k3rs-agent");
+        println!("  {BOLD}Kernel assets:{RESET}");
+        println!("    k3rsctl runtime kernel-download");
+        println!("    or build from source: ./scripts/build-kernel.sh");
+    }
+
+    if need_tools {
         println!();
         println!("  {BOLD}Missing tools:{RESET}");
-        println!("    sudo apt install iproute2 libcap2-bin wireguard-tools  # Debian/Ubuntu");
-        println!("    sudo dnf install iproute libcap wireguard-tools        # Fedora");
+        let has_apt = which("apt");
+        let has_dnf = which("dnf");
+        let has_pacman = which("pacman");
+        if has_apt {
+            let pkgs: Vec<&str> = missing_tools.iter().map(|t| match *t {
+                "ip" | "nsenter" => "iproute2",
+                "setcap" | "getcap" => "libcap2-bin",
+                "wg" => "wireguard-tools",
+                other => other,
+            }).collect::<std::collections::HashSet<_>>().into_iter().collect();
+            println!("    sudo apt install {}", pkgs.join(" "));
+        } else if has_dnf {
+            let pkgs: Vec<&str> = missing_tools.iter().map(|t| match *t {
+                "ip" | "nsenter" => "iproute",
+                "setcap" | "getcap" => "libcap",
+                "wg" => "wireguard-tools",
+                other => other,
+            }).collect::<std::collections::HashSet<_>>().into_iter().collect();
+            println!("    sudo dnf install {}", pkgs.join(" "));
+        } else if has_pacman {
+            let pkgs: Vec<&str> = missing_tools.iter().map(|t| match *t {
+                "ip" | "nsenter" => "iproute2",
+                "setcap" | "getcap" => "libcap",
+                "wg" => "wireguard-tools",
+                other => other,
+            }).collect::<std::collections::HashSet<_>>().into_iter().collect();
+            println!("    sudo pacman -S {}", pkgs.join(" "));
+        } else {
+            println!("    Install: {}", missing_tools.join(", "));
+        }
     }
 
     if fails > 0 {
