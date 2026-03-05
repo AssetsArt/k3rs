@@ -85,6 +85,17 @@ pub async fn ensure_bridge(config: &BridgeConfig) -> Result<()> {
             );
         }
 
+        // Disable multicast snooping so NDP solicitations (solicited-node multicast)
+        // are flooded to all bridge ports. Without this, the bridge drops NDP for pods
+        // that haven't sent MLD reports, breaking cross-pod IPv6 routing.
+        let mcast_path = format!("/sys/class/net/{}/bridge/multicast_snooping", config.name);
+        if let Err(e) = tokio::fs::write(&mcast_path, "0").await {
+            warn!(
+                "[bridge] Failed to disable multicast_snooping on {}: {}",
+                config.name, e
+            );
+        }
+
         // Enable IPv6 forwarding
         let sysctl_path = format!("/proc/sys/net/ipv6/conf/{}/forwarding", config.name);
         if let Err(e) = tokio::fs::write(&sysctl_path, "1").await {
