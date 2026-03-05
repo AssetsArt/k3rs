@@ -328,7 +328,7 @@ fn has_all_caps(bin: &str, required: &[&str]) -> bool {
 }
 
 /// Download vmlinux + initrd.img from the latest kernel-v* GitHub release.
-async fn download_kernel(client: &reqwest::Client, dest_dir: &str) -> anyhow::Result<()> {
+async fn download_kernel(_client: &reqwest::Client, dest_dir: &str) -> anyhow::Result<()> {
     let repo = pkg_constants::network::GITHUB_REPO;
     let arch = match std::env::consts::ARCH {
         "aarch64" => "arm64",
@@ -336,13 +336,23 @@ async fn download_kernel(client: &reqwest::Client, dest_dir: &str) -> anyhow::Re
         other => other,
     };
 
-    let releases: Vec<serde_json::Value> = client
+    // Use a plain client without the k3rs auth token for GitHub API calls.
+    let github = reqwest::Client::new();
+
+    let resp = github
         .get(format!("https://api.github.com/repos/{}/releases", repo))
         .header("User-Agent", "k3rsctl")
         .send()
-        .await?
-        .json()
         .await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "GitHub API returned HTTP {} (rate limit? try again or set GITHUB_TOKEN)",
+            resp.status()
+        );
+    }
+
+    let releases: Vec<serde_json::Value> = resp.json().await?;
 
     let tag = releases
         .iter()
@@ -366,7 +376,7 @@ async fn download_kernel(client: &reqwest::Client, dest_dir: &str) -> anyhow::Re
         );
         let dest = format!("{}/{}", dest_dir, filename);
 
-        let resp = client
+        let resp = github
             .get(&url)
             .header("User-Agent", "k3rsctl")
             .send()

@@ -56,16 +56,29 @@ async fn kernel_download(client: &reqwest::Client, data_dir: Option<&str>) -> an
     // 1. Find the latest kernel-v* release tag
     println!("Fetching latest kernel release from github.com/{}...", repo);
 
-    let releases: Vec<serde_json::Value> = client
+    // Use a plain client without the k3rs auth token for GitHub API calls.
+    let github = reqwest::Client::new();
+
+    let resp = github
         .get(format!(
             "https://api.github.com/repos/{}/releases",
             repo
         ))
         .header("User-Agent", "k3rsctl")
         .send()
-        .await?
-        .json()
         .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "GitHub API returned HTTP {status}.\n\
+             This is likely a rate limit — try again in a minute or set GITHUB_TOKEN.\n\
+             Response: {body}"
+        );
+    }
+
+    let releases: Vec<serde_json::Value> = resp.json().await?;
 
     let kernel_release = releases
         .iter()
@@ -97,7 +110,7 @@ async fn kernel_download(client: &reqwest::Client, data_dir: Option<&str>) -> an
     let vmlinux_dest = format!("{}/{}", dest_dir, pkg_constants::vm::KERNEL_FILENAME);
 
     println!("Downloading {} -> {}...", vmlinux_name, vmlinux_dest);
-    download_file(client, &vmlinux_url, &vmlinux_dest).await?;
+    download_file(&github, &vmlinux_url, &vmlinux_dest).await?;
 
     // 4. Download initrd.img
     let initrd_name = format!("initrd.img-{}", arch);
@@ -108,7 +121,7 @@ async fn kernel_download(client: &reqwest::Client, data_dir: Option<&str>) -> an
     let initrd_dest = format!("{}/{}", dest_dir, pkg_constants::vm::INITRD_FILENAME);
 
     println!("Downloading {} -> {}...", initrd_name, initrd_dest);
-    download_file(client, &initrd_url, &initrd_dest).await?;
+    download_file(&github, &initrd_url, &initrd_dest).await?;
 
     println!();
     println!("Kernel assets installed to {}:", dest_dir);
