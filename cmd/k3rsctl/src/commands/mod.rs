@@ -66,7 +66,7 @@ pub async fn dispatch(cli: &Cli, client: &reqwest::Client) -> anyhow::Result<()>
             )
             .await
         }
-        Commands::Doctor => doctor::handle(client, base).await,
+        Commands::Doctor { fix } => doctor::handle(client, base, *fix).await,
         Commands::Runtime { action } => runtime::handle(client, &cli.server, action).await,
         Commands::Backup { action } => backup::handle_backup(client, base, action).await,
         Commands::Restore {

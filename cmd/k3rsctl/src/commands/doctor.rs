@@ -16,8 +16,11 @@ fn warn(msg: &str) {
 fn fail(msg: &str) {
     println!("  {RED}[FAIL]{RESET} {msg}");
 }
+fn fixed(msg: &str) {
+    println!("  {GREEN}[FIXED]{RESET} {msg}");
+}
 
-pub async fn handle(_client: &reqwest::Client, _base: &str) -> anyhow::Result<()> {
+pub async fn handle(client: &reqwest::Client, _base: &str, fix: bool) -> anyhow::Result<()> {
     let mut passes = 0u32;
     let mut warns = 0u32;
     let mut fails = 0u32;
@@ -63,8 +66,20 @@ pub async fn handle(_client: &reqwest::Client, _base: &str) -> anyhow::Result<()
     if has_cargo_watch {
         pass("'cargo-watch' found");
         passes += 1;
+    } else if fix {
+        println!("  Installing cargo-watch...");
+        let status = Command::new("cargo")
+            .args(["install", "cargo-watch"])
+            .status();
+        if status.map(|s| s.success()).unwrap_or(false) {
+            fixed("cargo-watch installed");
+            passes += 1;
+        } else {
+            fail("Failed to install cargo-watch");
+            fails += 1;
+        }
     } else {
-        warn("'cargo-watch' not found — needed for k3rs-dev (cargo install cargo-watch)");
+        warn("'cargo-watch' not found (cargo install cargo-watch)");
         warns += 1;
     }
     println!();
@@ -76,28 +91,78 @@ pub async fn handle(_client: &reqwest::Client, _base: &str) -> anyhow::Result<()
     let kernel_path = format!("{}/{}", data_dir, pkg_constants::vm::KERNEL_FILENAME);
     let initrd_path = format!("{}/{}", data_dir, pkg_constants::vm::INITRD_FILENAME);
 
-    if Path::new(&kernel_path).exists() {
-        let size = std::fs::metadata(&kernel_path)
-            .map(|m| format_size(m.len()))
-            .unwrap_or_default();
-        pass(&format!("vmlinux ({size})"));
-        passes += 1;
-    } else {
-        fail(&format!("vmlinux not found at {kernel_path}"));
-        fails += 1;
-        need_kernel = true;
-    }
+    let kernel_missing = !Path::new(&kernel_path).exists();
+    let initrd_missing = !Path::new(&initrd_path).exists();
 
-    if Path::new(&initrd_path).exists() {
-        let size = std::fs::metadata(&initrd_path)
+    if kernel_missing || initrd_missing {
+        if fix {
+            println!("  Downloading kernel assets...");
+            match download_kernel(client, data_dir).await {
+                Ok(()) => {
+                    // Re-check after download
+                    if Path::new(&kernel_path).exists() {
+                        let size = std::fs::metadata(&kernel_path)
+                            .map(|m| format_size(m.len()))
+                            .unwrap_or_default();
+                        fixed(&format!("vmlinux downloaded ({size})"));
+                        passes += 1;
+                    } else {
+                        fail("vmlinux download failed");
+                        fails += 1;
+                        need_kernel = true;
+                    }
+                    if Path::new(&initrd_path).exists() {
+                        let size = std::fs::metadata(&initrd_path)
+                            .map(|m| format_size(m.len()))
+                            .unwrap_or_default();
+                        fixed(&format!("initrd.img downloaded ({size})"));
+                        passes += 1;
+                    } else {
+                        fail("initrd.img download failed");
+                        fails += 1;
+                        need_kernel = true;
+                    }
+                }
+                Err(e) => {
+                    fail(&format!("Download failed: {e}"));
+                    fails += 1;
+                    need_kernel = true;
+                }
+            }
+        } else {
+            if kernel_missing {
+                fail(&format!("vmlinux not found at {kernel_path}"));
+                fails += 1;
+                need_kernel = true;
+            } else {
+                let size = std::fs::metadata(&kernel_path)
+                    .map(|m| format_size(m.len()))
+                    .unwrap_or_default();
+                pass(&format!("vmlinux ({size})"));
+                passes += 1;
+            }
+            if initrd_missing {
+                fail(&format!("initrd.img not found at {initrd_path}"));
+                fails += 1;
+                need_kernel = true;
+            } else {
+                let size = std::fs::metadata(&initrd_path)
+                    .map(|m| format_size(m.len()))
+                    .unwrap_or_default();
+                pass(&format!("initrd.img ({size})"));
+                passes += 1;
+            }
+        }
+    } else {
+        let ksize = std::fs::metadata(&kernel_path)
             .map(|m| format_size(m.len()))
             .unwrap_or_default();
-        pass(&format!("initrd.img ({size})"));
-        passes += 1;
-    } else {
-        fail(&format!("initrd.img not found at {initrd_path}"));
-        fails += 1;
-        need_kernel = true;
+        let isize = std::fs::metadata(&initrd_path)
+            .map(|m| format_size(m.len()))
+            .unwrap_or_default();
+        pass(&format!("vmlinux ({ksize})"));
+        pass(&format!("initrd.img ({isize})"));
+        passes += 2;
     }
     println!();
 
@@ -114,25 +179,58 @@ pub async fn handle(_client: &reqwest::Client, _base: &str) -> anyhow::Result<()
         pass("Running as root");
         passes += 1;
     } else {
-        // Check caps on target/debug binaries (dev workflow)
-        for (key, bin_name) in &[("agent", "k3rs-agent"), ("vpc", "k3rs-vpc")] {
-            let debug_bin = format!("target/debug/{}", bin_name);
-            if Path::new(&debug_bin).exists() {
-                let required = pkg_constants::capabilities::caps_for_component(key);
-                check_file_caps(
-                    Path::new(&debug_bin),
-                    required,
-                    &mut passes,
-                    &mut warns,
-                    &mut need_caps,
-                );
-            }
-            // not built yet — k3rs-dev will handle it
-        }
+        let cap_bins: &[(&str, &str)] = &[("agent", "k3rs-agent"), ("vpc", "k3rs-vpc")];
 
-        if !need_caps {
-            pass("Capabilities set on debug binaries");
-            passes += 1;
+        for &(key, bin_name) in cap_bins {
+            let debug_bin = format!("target/debug/{}", bin_name);
+            let required = pkg_constants::capabilities::caps_for_component(key);
+            if required.is_empty() {
+                continue;
+            }
+
+            if !Path::new(&debug_bin).exists() {
+                // Not built yet — skip, k3rs-dev will handle it
+                continue;
+            }
+
+            if has_all_caps(&debug_bin, required) {
+                pass(&format!("{debug_bin}: OK"));
+                passes += 1;
+            } else if fix {
+                // Run sudo setcap
+                let cap_str = required
+                    .iter()
+                    .map(|c| c.to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(",")
+                    + "+eip";
+
+                println!("  Setting capabilities on {debug_bin}...");
+                let status = Command::new("sudo")
+                    .args(["setcap", &cap_str, &debug_bin])
+                    .status();
+
+                if status.map(|s| s.success()).unwrap_or(false) {
+                    fixed(&format!("{debug_bin}: {cap_str}"));
+                    passes += 1;
+                } else {
+                    fail(&format!("{debug_bin}: sudo setcap failed"));
+                    fails += 1;
+                    need_caps = true;
+                }
+            } else {
+                let missing: Vec<&str> = required
+                    .iter()
+                    .filter(|cap| !has_cap(&debug_bin, cap))
+                    .copied()
+                    .collect();
+                warn(&format!(
+                    "{debug_bin}: missing {}",
+                    missing.join(", ")
+                ));
+                warns += 1;
+                need_caps = true;
+            }
         }
     }
     println!();
@@ -143,22 +241,11 @@ pub async fn handle(_client: &reqwest::Client, _base: &str) -> anyhow::Result<()
         "  {GREEN}{passes} passed{RESET}, {YELLOW}{warns} warning(s){RESET}, {RED}{fails} failed{RESET}"
     );
 
-    if need_caps || need_kernel || need_tools {
-        println!();
-        println!("  {BOLD}Quick fixes:{RESET}");
-    }
+    let has_fixable = need_caps || need_kernel || need_tools;
 
-    if need_caps {
+    if has_fixable && !fix {
         println!();
-        println!("  {BOLD}Capabilities:{RESET}");
-        println!("    k3rs-dev all              # auto-builds and runs sudo setcap");
-    }
-
-    if need_kernel {
-        println!();
-        println!("  {BOLD}Kernel assets:{RESET}");
-        println!("    k3rsctl runtime kernel-download");
-        println!("    or: ./scripts/build-kernel.sh");
+        println!("  Run {BOLD}k3rsctl doctor --fix{RESET} to auto-fix capabilities and download kernel.");
     }
 
     if need_tools {
@@ -210,46 +297,96 @@ pub async fn handle(_client: &reqwest::Client, _base: &str) -> anyhow::Result<()
 
 fn which(name: &str) -> bool {
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| dir.join(name).is_file())
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
+        .unwrap_or(false)
+}
+
+/// Check if a binary has a specific capability set.
+fn has_cap(bin: &str, cap: &str) -> bool {
+    Command::new("getcap")
+        .arg(bin)
+        .output()
+        .map(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout)
+                    .to_lowercase()
+                    .contains(&cap.to_lowercase())
         })
         .unwrap_or(false)
 }
 
-fn check_file_caps(bin: &Path, required: &[&str], passes: &mut u32, warns: &mut u32, need_caps: &mut bool) {
-    if required.is_empty() {
-        return;
-    }
-
-    let bin_display = bin.display();
+/// Check if a binary has all required capabilities.
+fn has_all_caps(bin: &str, required: &[&str]) -> bool {
     let output = Command::new("getcap").arg(bin).output();
-
     match output {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout).to_lowercase();
-            let missing: Vec<&&str> = required
-                .iter()
-                .filter(|cap| !stdout.contains(&cap.to_lowercase()))
-                .collect();
-
-            if missing.is_empty() {
-                pass(&format!("{bin_display}: OK"));
-                *passes += 1;
-            } else {
-                warn(&format!(
-                    "{bin_display}: missing {}",
-                    missing.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ")
-                ));
-                *warns += 1;
-                *need_caps = true;
-            }
+            required.iter().all(|cap| stdout.contains(&cap.to_lowercase()))
         }
-        _ => {
-            warn(&format!("{bin_display}: cannot verify (getcap failed)"));
-            *warns += 1;
-            *need_caps = true;
+        _ => false,
+    }
+}
+
+/// Download vmlinux + initrd.img from the latest kernel-v* GitHub release.
+async fn download_kernel(client: &reqwest::Client, dest_dir: &str) -> anyhow::Result<()> {
+    let repo = pkg_constants::network::GITHUB_REPO;
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        other => other,
+    };
+
+    let releases: Vec<serde_json::Value> = client
+        .get(format!("https://api.github.com/repos/{}/releases", repo))
+        .header("User-Agent", "k3rsctl")
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let tag = releases
+        .iter()
+        .find_map(|r| {
+            r["tag_name"]
+                .as_str()
+                .filter(|t| t.starts_with("kernel-v"))
+                .map(|t| t.to_string())
+        })
+        .ok_or_else(|| anyhow::anyhow!("No kernel-v* release found"))?;
+
+    std::fs::create_dir_all(dest_dir)?;
+
+    for (asset, filename) in &[
+        (format!("vmlinux-{}", arch), pkg_constants::vm::KERNEL_FILENAME),
+        (format!("initrd.img-{}", arch), pkg_constants::vm::INITRD_FILENAME),
+    ] {
+        let url = format!(
+            "https://github.com/{}/releases/download/{}/{}",
+            repo, tag, asset
+        );
+        let dest = format!("{}/{}", dest_dir, filename);
+
+        let resp = client
+            .get(&url)
+            .header("User-Agent", "k3rsctl")
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("HTTP {} for {}", resp.status(), url);
+        }
+
+        let bytes = resp.bytes().await?;
+        std::fs::write(&dest, &bytes)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
         }
     }
+
+    Ok(())
 }
 
 fn format_size(bytes: u64) -> String {
