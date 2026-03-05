@@ -154,9 +154,7 @@ fn main() {
                 .compact()
                 .with_line_number(true)
                 .with_thread_ids(true)
-                .with_filter(LevelFilter::INFO)
-                .with_filter(LevelFilter::ERROR)
-                .with_filter(LevelFilter::WARN),
+                .with_filter(LevelFilter::INFO),
         )
         .init();
 

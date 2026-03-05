@@ -36,9 +36,7 @@ async fn main() -> anyhow::Result<()> {
                 .json()
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::from_default_env()
-                        .add_directive(tracing::level_filters::LevelFilter::INFO.into())
-                        .add_directive(tracing::level_filters::LevelFilter::ERROR.into())
-                        .add_directive(tracing::level_filters::LevelFilter::WARN.into()),
+                        .add_directive(tracing::level_filters::LevelFilter::INFO.into()),
                 )
                 .init();
         }
@@ -46,9 +44,7 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::fmt()
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::from_default_env()
-                        .add_directive(tracing::level_filters::LevelFilter::INFO.into())
-                        .add_directive(tracing::level_filters::LevelFilter::ERROR.into())
-                        .add_directive(tracing::level_filters::LevelFilter::WARN.into()),
+                        .add_directive(tracing::level_filters::LevelFilter::INFO.into()),
                 )
                 .init();
         }
