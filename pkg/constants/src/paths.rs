@@ -20,4 +20,4 @@ pub const LOG_DIR: &str = "/tmp/k3rs-logs";
 
 /// Unix socket path for the VPC daemon.
 // pub const VPC_SOCKET: &str = "/run/k3rs-vpc.sock";
-pub const VPC_SOCKET: &str = "/tmp/k3rs-vpc.sock";
+pub const VPC_SOCKET: &str = "/tmp/k3rs-data/k3rs-vpc.sock";

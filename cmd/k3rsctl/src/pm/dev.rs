@@ -36,11 +36,11 @@ fn server_config() -> DevConfig {
         bin_name: "k3rs-server",
         args: [
             "--port",
-            "6443",
+            &pkg_constants::network::DEFAULT_API_PORT.to_string(),
             "--token",
-            "demo-token-123",
+            pkg_constants::auth::DEFAULT_JOIN_TOKEN,
             "--data-dir",
-            "/tmp/k3rs-data",
+            pkg_constants::paths::DATA_DIR,
             "--node-name",
             "master-1",
         ]
@@ -51,7 +51,7 @@ fn server_config() -> DevConfig {
         env: [("RUST_LOG".into(), "debug".into())].into(),
         url: "http://127.0.0.1:6443",
         color_idx: 0,
-        ports: vec![6443],
+        ports: vec![pkg_constants::network::DEFAULT_API_PORT],
     }
 }
 
@@ -61,19 +61,19 @@ fn agent_config() -> DevConfig {
         bin_name: "k3rs-agent",
         args: [
             "--server",
-            "http://127.0.0.1:6443",
+            pkg_constants::network::DEFAULT_API_ADDR,
             "--token",
-            "demo-token-123",
+            pkg_constants::auth::DEFAULT_JOIN_TOKEN,
             "--node-name",
             "node-1",
             "--proxy-port",
-            "6444",
+            &pkg_constants::network::DEFAULT_TUNNEL_PORT.to_string(),
             "--service-proxy-port",
-            "10256",
+            &pkg_constants::network::DEFAULT_SERVICE_PROXY_PORT.to_string(),
             "--dns-port",
-            "5353",
+            &pkg_constants::network::DEFAULT_DNS_PORT.to_string(),
             "--vpc-socket",
-            "/tmp/k3rs-data/k3rs-vpc.sock",
+            pkg_constants::paths::VPC_SOCKET,
         ]
         .iter()
         .map(|s| s.to_string())
@@ -82,30 +82,36 @@ fn agent_config() -> DevConfig {
         env: [("RUST_LOG".into(), "debug".into())].into(),
         url: "proxy :6444 | svc :10256 | dns :5353",
         color_idx: 1,
-        ports: vec![6444, 10256, 5353],
+        ports: vec![
+            pkg_constants::network::DEFAULT_TUNNEL_PORT,
+            pkg_constants::network::DEFAULT_SERVICE_PROXY_PORT,
+            pkg_constants::network::DEFAULT_DNS_PORT,
+        ],
     }
 }
 
 fn vpc_config() -> DevConfig {
+    let vpc_socket: &'static str =
+        format!("{}/k3rs-vpc.sock", pkg_constants::paths::DATA_DIR).leak();
     DevConfig {
         label: "vpc",
         bin_name: "k3rs-vpc",
         args: [
             "--server-url",
-            "http://127.0.0.1:6443",
+            pkg_constants::network::DEFAULT_API_ADDR,
             "--token",
-            "demo-token-123",
+            pkg_constants::auth::DEFAULT_JOIN_TOKEN,
             "--socket",
-            "/tmp/k3rs-data/k3rs-vpc.sock",
+            pkg_constants::paths::VPC_SOCKET,
             "--data-dir",
-            "/tmp/k3rs-data/vpc-state.db",
+            &format!("{}/vpc-state.db", pkg_constants::paths::DATA_DIR),
         ]
         .iter()
         .map(|s| s.to_string())
         .collect(),
         watch_dirs: vec!["pkg/", "cmd/k3rs-vpc"],
         env: [("RUST_LOG".into(), "debug".into())].into(),
-        url: "unix:///tmp/k3rs-data/k3rs-vpc.sock",
+        url: vpc_socket,
         color_idx: 2,
         ports: vec![],
     }

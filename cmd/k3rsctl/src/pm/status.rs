@@ -135,32 +135,36 @@ fn check_health(key: &str) -> String {
 /// Server health: GET /api/v1/cluster/info
 fn check_server_health() -> String {
     // Try to connect to the server API
+    let port = pkg_constants::network::DEFAULT_API_PORT;
+    let addr = format!("127.0.0.1:{}", port);
     match std::net::TcpStream::connect_timeout(
-        &"127.0.0.1:6443".parse().unwrap(),
+        &addr.parse().unwrap(),
         std::time::Duration::from_secs(2),
     ) {
-        Ok(_) => "\x1b[32m✓ API port 6443 reachable\x1b[0m".to_string(),
-        Err(_) => "\x1b[31m✕ API port 6443 not reachable\x1b[0m".to_string(),
+        Ok(_) => format!("\x1b[32m✓ API port {} reachable\x1b[0m", port),
+        Err(_) => format!("\x1b[31m✕ API port {} not reachable\x1b[0m", port),
     }
 }
 
 /// Agent health: check if it can reach the server
 fn check_agent_health() -> String {
+    let port = pkg_constants::network::DEFAULT_API_PORT;
+    let addr = format!("127.0.0.1:{}", port);
     match std::net::TcpStream::connect_timeout(
-        &"127.0.0.1:6443".parse().unwrap(),
+        &addr.parse().unwrap(),
         std::time::Duration::from_secs(2),
     ) {
-        Ok(_) => "\x1b[32m✓ Connected to server (127.0.0.1:6443)\x1b[0m".to_string(),
-        Err(_) => "\x1b[31m✕ Cannot reach server (127.0.0.1:6443)\x1b[0m".to_string(),
+        Ok(_) => format!("\x1b[32m✓ Connected to server ({})\x1b[0m", addr),
+        Err(_) => format!("\x1b[31m✕ Cannot reach server ({})\x1b[0m", addr),
     }
 }
 
 /// VPC health: check if the Unix socket responds
 fn check_vpc_health() -> String {
-    let sock_path = "/run/k3rs-vpc.sock";
+    let sock_path = pkg_constants::paths::VPC_SOCKET;
     if std::path::Path::new(sock_path).exists() {
-        "\x1b[32m✓ Socket exists (/run/k3rs-vpc.sock)\x1b[0m".to_string()
+        format!("\x1b[32m✓ Socket exists ({})\x1b[0m", sock_path)
     } else {
-        "\x1b[31m✕ Socket not found (/run/k3rs-vpc.sock)\x1b[0m".to_string()
+        format!("\x1b[31m✕ Socket not found ({})\x1b[0m", sock_path)
     }
 }
