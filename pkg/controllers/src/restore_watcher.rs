@@ -32,7 +32,7 @@ impl RestoreWatcher {
     pub fn start(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut last_epoch: Option<String> = self.read_epoch().await;
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            let mut interval = tokio::time::interval(Duration::from_secs(pkg_constants::timings::RESTORE_WATCHER_INTERVAL_SECS));
 
             info!("Restore watcher started (initial epoch: {:?})", last_epoch);
 

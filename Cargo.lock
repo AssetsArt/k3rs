@@ -5741,6 +5741,7 @@ dependencies = [
  "chrono",
  "flate2",
  "futures-util",
+ "pkg-constants",
  "pkg-controllers",
  "pkg-metrics",
  "pkg-pki",
@@ -5855,6 +5856,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "pkg-constants",
  "pkg-types",
  "serde",
  "tracing",

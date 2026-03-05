@@ -16,7 +16,7 @@ impl ImageManager {
         let images_dir = data_dir.join("images");
         let config = ClientConfig {
             protocol: oci_client::client::ClientProtocol::HttpsExcept(vec![
-                "localhost:5000".to_string(),
+                pkg_constants::network::LOCAL_REGISTRY.to_string(),
             ]),
             // Always resolve to linux/<host_arch> — container images are Linux-based,
             // even when running on macOS (VirtualizationBackend boots a Linux microVM).

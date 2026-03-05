@@ -385,8 +385,8 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
 
 /// Seed default and system namespaces on startup.
 async fn seed_default_namespaces(store: &StateStore) -> anyhow::Result<()> {
-    let namespaces = ["default", "k3rs-system"];
-    for name in &namespaces {
+    let namespaces = pkg_constants::network::SEED_NAMESPACES;
+    for name in namespaces {
         let key = format!("/registry/namespaces/{}", name);
         if store.get(&key).await?.is_none() {
             let ns = pkg_types::namespace::Namespace {
@@ -410,7 +410,7 @@ async fn seed_master_node(store: &StateStore, name: &str) -> anyhow::Result<()> 
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             address: "127.0.0.1".to_string(),
-            agent_api_port: 10250,
+            agent_api_port: pkg_constants::network::DEFAULT_AGENT_API_PORT,
             status: pkg_types::node::NodeStatus::Ready,
             registered_at: Utc::now(),
             last_heartbeat: Utc::now(),

@@ -145,7 +145,7 @@ mod tests {
             allocated: ResourceRequirements::default(),
             unschedulable: false,
             address: "127.0.0.1".to_string(),
-            agent_api_port: 10250,
+            agent_api_port: pkg_constants::network::DEFAULT_AGENT_API_PORT,
             wg_public_key: None,
             wg_endpoint: None,
         }

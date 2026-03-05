@@ -112,7 +112,7 @@ fn install_one(component: &ComponentName, from_source: bool, bin_path: Option<&s
     Ok(())
 }
 
-const GITHUB_REPO: &str = "AssetsArt/k3rs";
+const GITHUB_REPO: &str = pkg_constants::network::GITHUB_REPO;
 
 /// Download a pre-built binary from GitHub Releases.
 ///

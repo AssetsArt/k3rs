@@ -23,7 +23,7 @@ pub fn start(
     let in_flight: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(pkg_constants::timings::POD_SYNC_INTERVAL_SECS));
         loop {
             interval.tick().await;
 
@@ -395,7 +395,7 @@ async fn run_pod_lifecycle(
                 ghost_ipv6: ghost_ipv6.clone(),
                 guest_ipv4: guest_ipv4.clone(),
                 container_pid: pid,
-                bridge_name: "k3rs0".to_string(),
+                bridge_name: pkg_constants::network::BRIDGE_NAME.to_string(),
             };
             if let Err(e) = pkg_network::netns::setup_pod_network(&net_config).await {
                 warn!(

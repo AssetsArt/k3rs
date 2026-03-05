@@ -32,7 +32,7 @@ unsafe impl aya::Pod for PeeringKey {}
 unsafe impl aya::Pod for PeeringValue {}
 unsafe impl aya::Pod for Nat64Config {}
 
-const BPFFS_PIN_DIR: &str = "/sys/fs/bpf/k3rs_vpc";
+const BPFFS_PIN_DIR: &str = pkg_constants::vm::BPFFS_PIN_DIR;
 const EBPF_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/k3rs-vpc-ebpf"));
 
 pub struct EbpfEnforcer {

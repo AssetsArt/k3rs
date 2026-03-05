@@ -62,9 +62,9 @@ use tracing::{info, warn};
 use pkg_constants::paths::DATA_DIR;
 
 /// Kernel binary filename inside the kernel directory.
-const KERNEL_FILENAME: &str = "vmlinux";
+const KERNEL_FILENAME: &str = pkg_constants::vm::KERNEL_FILENAME;
 /// Initrd image filename inside the kernel directory.
-const INITRD_FILENAME: &str = "initrd.img";
+const INITRD_FILENAME: &str = pkg_constants::vm::INITRD_FILENAME;
 
 /// Manages kernel + initrd assets for microVM backends.
 pub struct KernelManager {

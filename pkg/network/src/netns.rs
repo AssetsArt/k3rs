@@ -6,6 +6,10 @@
 //! TAP setup pattern.
 
 use anyhow::Result;
+use pkg_constants::network::{
+    BRIDGE_GATEWAY_IPV6, DNS_NDOTS, DNS_VIP, GUEST_IFACE, NETKIT_HOST_PREFIX, NETKIT_PEER_PREFIX,
+    POD_IPV4_GATEWAY,
+};
 use tracing::{info, warn};
 
 /// Network configuration for a single pod.
@@ -26,13 +30,13 @@ impl PodNetworkConfig {
     /// Derive the host-side netkit name from the pod ID.
     fn nk_host(&self) -> String {
         let short = &self.pod_id[..8.min(self.pod_id.len())];
-        format!("nk-{}", short)
+        format!("{}{}", NETKIT_HOST_PREFIX, short)
     }
 
-    /// Derive the temporary peer name (moved into the netns, then renamed to eth0).
+    /// Derive the temporary peer name (moved into the netns, then renamed to GUEST_IFACE).
     fn nk_peer(&self) -> String {
         let short = &self.pod_id[..8.min(self.pod_id.len())];
-        format!("nktmp-{}", short)
+        format!("{}{}", NETKIT_PEER_PREFIX, short)
     }
 }
 
@@ -102,37 +106,38 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     run_ip(&["link", "set", &nk_host, "up"]).await?;
 
     // 4. Inside netns: rename peer → eth0, bring up lo + eth0
-    nsenter_run(pid, &["ip", "link", "set", &nk_peer, "name", "eth0"]).await?;
+    nsenter_run(pid, &["ip", "link", "set", &nk_peer, "name", GUEST_IFACE]).await?;
     nsenter_run(pid, &["ip", "link", "set", "lo", "up"]).await?;
-    nsenter_run(pid, &["ip", "link", "set", "eth0", "up"]).await?;
+    nsenter_run(pid, &["ip", "link", "set", GUEST_IFACE, "up"]).await?;
 
     // 5. Assign Ghost IPv6 (/128) and guest IPv4 (/32) to eth0
     let ipv6_cidr = format!("{}/128", config.ghost_ipv6);
-    nsenter_run(pid, &["ip", "-6", "addr", "add", &ipv6_cidr, "dev", "eth0"]).await?;
+    nsenter_run(pid, &["ip", "-6", "addr", "add", &ipv6_cidr, "dev", GUEST_IFACE]).await?;
 
     let ipv4_cidr = format!("{}/32", config.guest_ipv4);
-    nsenter_run(pid, &["ip", "addr", "add", &ipv4_cidr, "dev", "eth0"]).await?;
+    nsenter_run(pid, &["ip", "addr", "add", &ipv4_cidr, "dev", GUEST_IFACE]).await?;
 
-    // 6. Default IPv6 route via bridge gateway (fe80::1)
+    // 6. Default IPv6 route via bridge gateway
     nsenter_run(
         pid,
         &[
-            "ip", "-6", "route", "add", "default", "via", "fe80::1", "dev", "eth0",
+            "ip", "-6", "route", "add", "default", "via", BRIDGE_GATEWAY_IPV6, "dev", GUEST_IFACE,
         ],
     )
     .await?;
 
     // 7. IPv4 default route via link-local gateway (SIIT on host-side netkit)
     //    Add 169.254.1.1 as a directly-connected next-hop, then use it as default gw.
+    let gw_cidr = format!("{}/32", POD_IPV4_GATEWAY);
     nsenter_run(
         pid,
         &[
             "ip",
             "route",
             "add",
-            "169.254.1.1/32",
+            &gw_cidr,
             "dev",
-            "eth0",
+            GUEST_IFACE,
             "scope",
             "link",
         ],
@@ -146,9 +151,9 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
             "add",
             "default",
             "via",
-            "169.254.1.1",
+            POD_IPV4_GATEWAY,
             "dev",
-            "eth0",
+            GUEST_IFACE,
         ],
     )
     .await?;
@@ -165,8 +170,7 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     }
 
     // 9. Write /etc/resolv.conf pointing to the k3rs DNS VIP on the bridge
-    let dns_vip = pkg_constants::network::DNS_VIP;
-    let resolv_content = format!("nameserver {}\noptions ndots:5\n", dns_vip);
+    let resolv_content = format!("nameserver {}\noptions ndots:{}\n", DNS_VIP, DNS_NDOTS);
     if let Err(e) = nsenter_run(
         pid,
         &["sh", "-c", &format!("echo '{}' > /etc/resolv.conf", resolv_content.trim())],
@@ -185,7 +189,7 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
         &config.pod_id[..8.min(config.pod_id.len())],
         config.ghost_ipv6,
         config.guest_ipv4,
-        dns_vip
+        DNS_VIP
     );
     Ok(())
 }
@@ -194,7 +198,7 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
 /// The peer inside the netns is automatically removed by the kernel.
 pub async fn teardown_pod_network(pod_id: &str) {
     let short = &pod_id[..8.min(pod_id.len())];
-    let nk_host = format!("nk-{}", short);
+    let nk_host = format!("{}{}", NETKIT_HOST_PREFIX, short);
 
     let _ = tokio::process::Command::new("ip")
         .args(["link", "delete", &nk_host])

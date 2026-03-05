@@ -19,7 +19,7 @@ impl DaemonSetController {
     pub fn new(store: StateStore) -> Self {
         Self {
             store,
-            check_interval: Duration::from_secs(15),
+            check_interval: Duration::from_secs(pkg_constants::timings::DAEMONSET_CHECK_INTERVAL_SECS),
         }
     }
 

@@ -45,9 +45,9 @@ use crate::state::ContainerStateInfo;
 use pkg_constants::paths::DATA_DIR;
 
 /// Path where k3rs-init is injected inside the guest rootfs.
-const GUEST_INIT_PATH: &str = "sbin/k3rs-init";
+const GUEST_INIT_PATH: &str = pkg_constants::vm::GUEST_INIT_PATH;
 /// Standard config.json path inside guest rootfs (read by k3rs-init).
-const GUEST_CONFIG_PATH: &str = "config.json";
+const GUEST_CONFIG_PATH: &str = pkg_constants::vm::GUEST_CONFIG_PATH;
 use pkg_constants::runtime::{DEFAULT_CPU_COUNT, DEFAULT_MEMORY_MB};
 
 /// Per-VM resource configuration.

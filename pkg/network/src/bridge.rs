@@ -17,8 +17,8 @@ pub struct BridgeConfig {
 impl Default for BridgeConfig {
     fn default() -> Self {
         Self {
-            name: "k3rs0".to_string(),
-            gateway_ipv6: "fe80::1".to_string(),
+            name: pkg_constants::network::BRIDGE_NAME.to_string(),
+            gateway_ipv6: pkg_constants::network::BRIDGE_GATEWAY_IPV6.to_string(),
         }
     }
 }

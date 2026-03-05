@@ -13,6 +13,7 @@ anyhow = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tokio-stream = { workspace = true }
+pkg-constants = { path = "../constants" }
 pkg-types = { path = "../types" }
 pkg-vpc = { path = "../vpc" }
 pkg-pki = { path = "../pki" }

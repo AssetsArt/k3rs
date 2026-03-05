@@ -32,10 +32,10 @@ use objc2_virtualization::{VZVirtioSocketConnection, VZVirtioSocketDevice, VZVir
 use tracing::{error, info};
 
 /// vsock port k3rs-init listens on for exec commands.
-const VSOCK_EXEC_PORT: u32 = 5555;
+const VSOCK_EXEC_PORT: u32 = pkg_constants::vm::VSOCK_EXEC_PORT;
 
 /// How long to wait for a vsock connection to be established.
-const VSOCK_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const VSOCK_CONNECT_TIMEOUT: Duration = Duration::from_secs(pkg_constants::timings::VSOCK_CONNECT_TIMEOUT_SECS);
 
 /// Execute a command in the guest via vsock, returning combined stdout+stderr.
 ///

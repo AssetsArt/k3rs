@@ -8,18 +8,9 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-/// Default WireGuard interface name.
-pub const WG_INTERFACE: &str = "wg-k3rs";
-
-/// Default WireGuard listen port.
-pub const WG_DEFAULT_PORT: u16 = 51820;
-
-/// Default path for WireGuard key storage.
-pub const WG_DEFAULT_KEY_PATH: &str = "/var/lib/k3rs/wireguard";
-
-/// The Ghost IPv6 prefix route added to the WireGuard interface.
-/// Covers all pods on all nodes in all VPCs (fd6b:3372::/32).
-pub const GHOST_ROUTE_PREFIX: &str = "fd6b:3372::/32";
+pub use pkg_constants::network::{
+    GHOST_ROUTE_PREFIX, WG_DEFAULT_KEY_PATH, WG_DEFAULT_PORT, WG_INTERFACE,
+};
 
 /// A WireGuard peer as parsed from `wg show dump`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

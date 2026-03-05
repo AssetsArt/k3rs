@@ -347,12 +347,13 @@ pub async fn create_service(
     svc.created_at = Utc::now();
     // Default VPC to "default" if not specified
     if svc.vpc.is_none() {
-        svc.vpc = Some("default".to_string());
+        svc.vpc = Some(pkg_constants::network::DEFAULT_VPC_NAME.to_string());
     }
     // Assign a cluster IP (simple increment for now)
     if svc.cluster_ip.is_none() {
         svc.cluster_ip = Some(format!(
-            "10.43.0.{}",
+            "{}{}",
+            pkg_constants::network::CLUSTER_IP_PREFIX,
             (uuid::Uuid::new_v4().as_bytes()[0] % 250) + 2
         ));
     }

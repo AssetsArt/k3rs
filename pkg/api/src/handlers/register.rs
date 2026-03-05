@@ -56,7 +56,7 @@ pub async fn register_node(
         uuid::Uuid::new_v4().to_string()
     };
 
-    let agent_api_port = 10250; // Default kubelet-like port
+    let agent_api_port = pkg_constants::network::DEFAULT_AGENT_API_PORT;
 
     // Compute WireGuard endpoint from node address + listen port
     let wg_endpoint = payload.wg_listen_port.map(|port| {
@@ -119,7 +119,7 @@ pub async fn register_node(
         certificate: cert_pem,
         private_key: key_pem,
         server_ca: state.ca.ca_cert_pem().to_string(),
-        agent_api_port: 10250, // Default kubelet-like port
+        agent_api_port: pkg_constants::network::DEFAULT_AGENT_API_PORT,
     };
 
     (StatusCode::OK, Json(response)).into_response()

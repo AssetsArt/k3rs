@@ -17,9 +17,9 @@ impl NodeController {
     pub fn new(store: StateStore) -> Self {
         Self {
             store,
-            check_interval: Duration::from_secs(15),
-            not_ready_threshold: Duration::from_secs(30),
-            unknown_threshold: Duration::from_secs(60),
+            check_interval: Duration::from_secs(pkg_constants::timings::NODE_CHECK_INTERVAL_SECS),
+            not_ready_threshold: Duration::from_secs(pkg_constants::timings::NODE_NOT_READY_THRESHOLD_SECS),
+            unknown_threshold: Duration::from_secs(pkg_constants::timings::NODE_UNKNOWN_THRESHOLD_SECS),
         }
     }
 

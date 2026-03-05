@@ -85,7 +85,7 @@ pub async fn create_vpc(
 
     // Collect VpcIDs still in cooldown (Deleted < 300s ago)
     let now = Utc::now();
-    let cooldown = TimeDelta::seconds(300);
+    let cooldown = TimeDelta::seconds(pkg_constants::timings::VPC_DELETION_COOLDOWN_SECS);
     let reserved_ids: std::collections::HashSet<u16> = existing_vpcs
         .iter()
         .filter(|v| {

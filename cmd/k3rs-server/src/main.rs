@@ -41,7 +41,7 @@ struct Cli {
     enable_otel: bool,
 
     /// OpenTelemetry OTLP endpoint (gRPC)
-    #[arg(long, default_value = "http://localhost:4317")]
+    #[arg(long, default_value = pkg_constants::network::DEFAULT_OTEL_ENDPOINT)]
     otel_endpoint: String,
 
     /// Directory for automated backup files (backup disabled if not set)
