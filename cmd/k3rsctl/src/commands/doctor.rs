@@ -1,6 +1,7 @@
 use pkg_types::node::Node;
 use pkg_types::pod::{Pod, PodStatus};
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
 const GREEN: &str = "\x1b[32m";
@@ -271,6 +272,81 @@ pub async fn handle(client: &reqwest::Client, base: &str) -> anyhow::Result<()> 
     }
     println!();
 
+    // ── Privileges & Capabilities ─────────────────────────────────
+    println!("{BOLD}Privileges & Capabilities{RESET}");
+
+    let is_root = Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false);
+    if is_root {
+        pass("Running as root — all capabilities available");
+        passes += 1;
+    } else {
+        warn("Not running as root — checking alternatives");
+        warns += 1;
+    }
+
+    // Check required CLI tools
+    for tool in &["ip", "nsenter", "wg", "setcap", "getcap"] {
+        if which(tool) {
+            pass(&format!("'{tool}' found in PATH"));
+            passes += 1;
+        } else {
+            let severity = match *tool {
+                "setcap" | "getcap" => {
+                    warn(&format!("'{tool}' not found (install libcap2-bin / libcap)"));
+                    warns += 1;
+                    "warn"
+                }
+                "wg" => {
+                    warn(&format!("'{tool}' not found (install wireguard-tools) — cross-node traffic disabled"));
+                    warns += 1;
+                    "warn"
+                }
+                _ => {
+                    fail(&format!("'{tool}' not found — required for pod networking"));
+                    fails += 1;
+                    "fail"
+                }
+            };
+            let _ = severity;
+        }
+    }
+
+    // Check file capabilities on installed binaries (non-root only)
+    if !is_root {
+        let bins_dir = crate::pm::registry::bins_dir();
+        let components: &[(&str, &str)] = &[
+            ("agent", "k3rs-agent"),
+            ("vpc", "k3rs-vpc"),
+        ];
+
+        for (key, bin_name) in components {
+            let bin_path = bins_dir.join(bin_name);
+            if !bin_path.exists() {
+                // not installed via PM — check PATH
+                if let Some(path) = find_in_path(bin_name) {
+                    check_file_caps(&path, key, &mut passes, &mut warns, &mut fails);
+                }
+                // skip if not found at all — PM section will catch it
+            } else {
+                check_file_caps(&bin_path, key, &mut passes, &mut warns, &mut fails);
+            }
+        }
+
+        // Check if systemd is available as an alternative
+        if which("systemctl") {
+            pass("systemd available — can use AmbientCapabilities via 'k3rsctl pm startup'");
+            passes += 1;
+        } else {
+            warn("systemd not found — binaries need file capabilities (setcap) or run as root");
+            warns += 1;
+        }
+    }
+    println!();
+
     // ── PM Components ───────────────────────────────────────────────
     println!("{BOLD}Process Manager{RESET}");
 
@@ -325,6 +401,28 @@ pub async fn handle(client: &reqwest::Client, base: &str) -> anyhow::Result<()> 
         "  {GREEN}{passes} passed{RESET}, {YELLOW}{warns} warning(s){RESET}, {RED}{fails} failed{RESET}"
     );
 
+    if fails > 0 || warns > 0 {
+        println!();
+        println!("  {BOLD}Quick fixes:{RESET}");
+        println!();
+        println!("  {BOLD}Development (run as root):{RESET}");
+        println!("    sudo cargo run -p k3rs-agent");
+        println!();
+        println!("  {BOLD}Development (without root):{RESET}");
+        println!("    cargo build --release -p k3rs-agent -p k3rs-vpc");
+        println!("    sudo setcap 'cap_net_admin,cap_net_raw,cap_sys_admin,cap_sys_ptrace,cap_dac_override+eip' target/release/k3rs-agent");
+        println!("    sudo setcap 'cap_net_admin,cap_bpf,cap_sys_admin,cap_perfmon+eip' target/release/k3rs-vpc");
+        println!();
+        println!("  {BOLD}Production (systemd):{RESET}");
+        println!("    k3rsctl pm install agent");
+        println!("    k3rsctl pm startup          # generates systemd units with AmbientCapabilities");
+        println!("    sudo systemctl start k3rs-agent");
+        println!();
+        println!("  {BOLD}Missing tools:{RESET}");
+        println!("    sudo apt install iproute2 libcap2-bin wireguard-tools  # Debian/Ubuntu");
+        println!("    sudo dnf install iproute libcap wireguard-tools        # Fedora");
+    }
+
     if fails > 0 {
         println!();
         println!("  Run with {BOLD}--server <url>{RESET} if the server is on a different host.");
@@ -341,9 +439,77 @@ pub async fn handle(client: &reqwest::Client, base: &str) -> anyhow::Result<()> 
 }
 
 fn which(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| dir.join(name).is_file())
-        })
-        .unwrap_or(false)
+    find_in_path(name).is_some()
+}
+
+fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(name))
+            .find(|p| p.is_file())
+    })
+}
+
+/// Check file capabilities on a binary using `getcap` and compare with required caps.
+fn check_file_caps(
+    bin: &Path,
+    component_key: &str,
+    passes: &mut u32,
+    warns: &mut u32,
+    fails: &mut u32,
+) {
+    let required = pkg_constants::capabilities::caps_for_component(component_key);
+    if required.is_empty() {
+        return;
+    }
+
+    let bin_display = bin.display();
+
+    let output = Command::new("getcap").arg(bin).output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stdout_lower = stdout.to_lowercase();
+
+            let mut missing: Vec<&str> = Vec::new();
+            for cap in required {
+                if !stdout_lower.contains(&cap.to_lowercase()) {
+                    missing.push(cap);
+                }
+            }
+
+            if missing.is_empty() {
+                pass(&format!("{bin_display}: all capabilities set"));
+                *passes += 1;
+            } else {
+                let missing_str = missing.join(", ");
+                fail(&format!("{bin_display}: missing capabilities: {missing_str}"));
+                *fails += 1;
+                let cap_str = required
+                    .iter()
+                    .map(|c| c.to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!(
+                    "         fix: sudo setcap '{cap_str}+eip' {bin_display}"
+                );
+            }
+        }
+        Ok(_) => {
+            warn(&format!("{bin_display}: getcap failed (binary may need setcap)"));
+            *warns += 1;
+            let cap_str = required
+                .iter()
+                .map(|c| c.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                "         fix: sudo setcap '{cap_str}+eip' {bin_display}"
+            );
+        }
+        Err(_) => {
+            warn(&format!("{bin_display}: getcap not available, cannot verify capabilities"));
+            *warns += 1;
+        }
+    }
 }

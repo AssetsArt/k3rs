@@ -54,6 +54,20 @@ pub fn startup(user: bool, enable: bool) -> Result<()> {
             exec_start.push_str(&format!(" \\\n  {}", arg));
         }
 
+        // Build capability directives (only for system-level services)
+        let caps = pkg_constants::capabilities::caps_for_component(key);
+        let caps_section = if !user && !caps.is_empty() {
+            let caps_str = caps.join(" ");
+            format!(
+                "AmbientCapabilities={caps}\n\
+                 CapabilityBoundingSet={caps}\n\
+                 NoNewPrivileges=true\n",
+                caps = caps_str,
+            )
+        } else {
+            String::new()
+        };
+
         let unit = format!(
             "\
 [Unit]
@@ -66,6 +80,7 @@ Type=simple
 ExecStart={exec_start}
 Restart=on-failure
 RestartSec={restart_sec}
+{caps_section}\
 StandardOutput=append:{stdout}
 StandardError=append:{stderr}
 
@@ -75,6 +90,7 @@ WantedBy={wanted_by}
             description = description,
             exec_start = exec_start,
             restart_sec = pkg_constants::timings::SYSTEMD_RESTART_SECS,
+            caps_section = caps_section,
             stdout = entry.stdout_log.display(),
             stderr = entry.stderr_log.display(),
             wanted_by = wanted_by,

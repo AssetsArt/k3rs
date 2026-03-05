@@ -9,6 +9,9 @@ ExecStart=/usr/local/bin/k3rs-vpc --config /etc/k3rs/vpc-config.yaml
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535
+AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_SYS_ADMIN CAP_PERFMON
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_SYS_ADMIN CAP_PERFMON
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target

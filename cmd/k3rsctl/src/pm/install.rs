@@ -77,6 +77,9 @@ fn install_one(component: &ComponentName, from_source: bool, bin_path: Option<&s
         download_from_github(component, &dest)?;
     }
 
+    // Apply Linux capabilities so the binary can run without root
+    apply_capabilities(&dest, component);
+
     // Verify binary runs (--version check)
     verify_binary(&dest, component)?;
 
@@ -217,6 +220,50 @@ fn verify_binary(bin: &Path, component: &ComponentName) -> Result<()> {
                 e
             );
             Ok(()) // non-fatal
+        }
+    }
+}
+
+/// Apply Linux file capabilities via `setcap` so the binary can perform
+/// privileged operations (network config, eBPF, etc.) without running as root.
+///
+/// Non-fatal: prints a warning if `setcap` is not available or fails (e.g. not root).
+/// In that case the user can either run as root or use systemd AmbientCapabilities.
+fn apply_capabilities(bin: &Path, component: &ComponentName) {
+    let caps = pkg_constants::capabilities::caps_for_component(component.key());
+    if caps.is_empty() {
+        return;
+    }
+
+    // Build setcap string: "cap_net_admin,cap_bpf+eip"
+    let cap_str = caps
+        .iter()
+        .map(|c| c.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(",")
+        + "+eip";
+
+    let status = Command::new("setcap")
+        .arg(&cap_str)
+        .arg(bin)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            println!("  Applied capabilities: {}", cap_str);
+        }
+        Ok(_) => {
+            eprintln!(
+                "  Warning: setcap failed for {} (try running install with sudo, \
+                 or use systemd AmbientCapabilities via `k3rsctl pm startup`)",
+                component.bin_name()
+            );
+        }
+        Err(_) => {
+            eprintln!(
+                "  Warning: setcap not found. Install libcap (e.g. `apt install libcap2-bin`) \
+                 or run the binary as root."
+            );
         }
     }
 }
