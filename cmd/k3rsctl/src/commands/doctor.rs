@@ -270,6 +270,58 @@ pub async fn handle(client: &reqwest::Client, base: &str) -> anyhow::Result<()> 
             warns += 1;
         }
     }
+
+    // Kernel assets (vmlinux + initrd.img)
+    let kernel_path = format!("{}/{}", data_dir, pkg_constants::vm::KERNEL_FILENAME);
+    let initrd_path = format!("{}/{}", data_dir, pkg_constants::vm::INITRD_FILENAME);
+    let github_repo = pkg_constants::network::GITHUB_REPO;
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        other => other,
+    };
+
+    if Path::new(&kernel_path).exists() {
+        let size = std::fs::metadata(&kernel_path)
+            .map(|m| format_size(m.len()))
+            .unwrap_or_default();
+        pass(&format!("Kernel found: {kernel_path} ({size})"));
+        passes += 1;
+    } else {
+        fail(&format!("Kernel not found: {kernel_path}"));
+        fails += 1;
+        println!("         download:");
+        println!(
+            "           k3rsctl runtime kernel-download"
+        );
+        println!("         or manually:");
+        println!(
+            "           curl -fSL https://github.com/{github_repo}/releases/download/$(curl -sfL https://api.github.com/repos/{github_repo}/releases | grep -o '\"kernel-v[^\"]*\"' | head -1 | tr -d '\"')/vmlinux-{arch} -o {kernel_path}"
+        );
+        println!(
+            "         or build from source:"
+        );
+        println!("           ./scripts/build-kernel.sh");
+    }
+
+    if Path::new(&initrd_path).exists() {
+        let size = std::fs::metadata(&initrd_path)
+            .map(|m| format_size(m.len()))
+            .unwrap_or_default();
+        pass(&format!("Initrd found: {initrd_path} ({size})"));
+        passes += 1;
+    } else {
+        fail(&format!("Initrd not found: {initrd_path}"));
+        fails += 1;
+        println!("         download:");
+        println!(
+            "           k3rsctl runtime kernel-download"
+        );
+        println!("         or manually:");
+        println!(
+            "           curl -fSL https://github.com/{github_repo}/releases/download/$(curl -sfL https://api.github.com/repos/{github_repo}/releases | grep -o '\"kernel-v[^\"]*\"' | head -1 | tr -d '\"')/initrd.img-{arch} -o {initrd_path}"
+        );
+    }
     println!();
 
     // ── Privileges & Capabilities ─────────────────────────────────
@@ -511,5 +563,15 @@ fn check_file_caps(
             warn(&format!("{bin_display}: getcap not available, cannot verify capabilities"));
             *warns += 1;
         }
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1_000 {
+        format!("{:.0} KB", bytes as f64 / 1_024.0)
+    } else {
+        format!("{} B", bytes)
     }
 }

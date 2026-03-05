@@ -156,6 +156,12 @@ pub enum RuntimeAction {
     Info,
     /// Upgrade/download the latest container runtime (Linux only)
     Upgrade,
+    /// Download vmlinux + initrd.img from the latest kernel release
+    KernelDownload {
+        /// Override data directory
+        #[arg(long)]
+        data_dir: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

@@ -264,11 +264,151 @@ fn check_tools(components: &[Component]) -> Result<()> {
     Ok(())
 }
 
+// ── Preflight checks ─────────────────────────────────────────────
+
+/// Verify we're running inside the k3rs workspace root (has Cargo.toml with [workspace]).
+fn check_workspace_root() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let manifest = cwd.join("Cargo.toml");
+
+    if !manifest.exists() {
+        bail!(
+            "Not in a Rust project directory.\n\n\
+             To get started:\n\
+             \n\
+             git clone https://github.com/{} k3rs\n\
+             cd k3rs\n\
+             k3rs-dev all\n",
+            pkg_constants::network::GITHUB_REPO
+        );
+    }
+
+    let content = std::fs::read_to_string(&manifest)?;
+    if !content.contains("[workspace]") {
+        bail!(
+            "Not in the k3rs workspace root (found Cargo.toml but no [workspace] section).\n\n\
+             cd into the root of the k3rs repo:\n\
+             \n\
+             cd /path/to/k3rs\n\
+             k3rs-dev all\n"
+        );
+    }
+
+    // Sanity check: make sure it's actually the k3rs workspace (has cmd/k3rs-server)
+    if !cwd.join("cmd/k3rs-server").is_dir() {
+        bail!(
+            "This workspace does not look like the k3rs project.\n\n\
+             Clone the official repo:\n\
+             \n\
+             git clone https://github.com/{} k3rs\n\
+             cd k3rs\n\
+             k3rs-dev all\n",
+            pkg_constants::network::GITHUB_REPO
+        );
+    }
+
+    Ok(())
+}
+
+/// Check Linux capabilities / root for components that need privileged operations.
+fn check_permissions(components: &[Component]) -> Result<()> {
+    let needs_caps = components.iter().any(|c| {
+        matches!(c, Component::Agent | Component::Vpc)
+    });
+
+    if !needs_caps {
+        return Ok(());
+    }
+
+    // Running as root is always fine
+    let is_root = Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false);
+
+    if is_root {
+        return Ok(());
+    }
+
+    // Check if the built binaries have capabilities set
+    let mut missing: Vec<(&str, &str)> = Vec::new();
+
+    for comp in components {
+        let (key, bin_name) = match comp {
+            Component::Agent => ("agent", "k3rs-agent"),
+            Component::Vpc => ("vpc", "k3rs-vpc"),
+            _ => continue,
+        };
+
+        let required = pkg_constants::capabilities::caps_for_component(key);
+        if required.is_empty() {
+            continue;
+        }
+
+        // Check target/debug binary (dev builds)
+        let debug_bin = format!("target/debug/{}", bin_name);
+        let has_caps = if std::path::Path::new(&debug_bin).exists() {
+            check_file_has_caps(&debug_bin, required)
+        } else {
+            false
+        };
+
+        if !has_caps {
+            missing.push((key, bin_name));
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg = String::from(
+        "Missing permissions — agent/vpc need network capabilities to run.\n\n",
+    );
+    msg.push_str("Choose one:\n\n");
+    msg.push_str("  1. Run as root:\n");
+    msg.push_str("     sudo k3rs-dev all\n\n");
+    msg.push_str("  2. Grant capabilities after building (once per build):\n");
+
+    for (key, bin_name) in &missing {
+        let caps = pkg_constants::capabilities::caps_for_component(key);
+        let cap_str = caps
+            .iter()
+            .map(|c| c.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(",");
+        msg.push_str(&format!(
+            "     sudo setcap '{cap_str}+eip' target/debug/{bin_name}\n"
+        ));
+    }
+
+    msg.push_str("\n  3. Or run only the server (no caps needed):\n");
+    msg.push_str("     k3rs-dev server\n");
+
+    bail!("{}", msg);
+}
+
+/// Check if a binary has the required capabilities set via getcap.
+fn check_file_has_caps(path: &str, required: &[&str]) -> bool {
+    let output = Command::new("getcap").arg(path).output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout).to_lowercase();
+            required.iter().all(|cap| stdout.contains(&cap.to_lowercase()))
+        }
+        _ => false,
+    }
+}
+
 // ── Main ────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let components = cli.component.resolve();
+
+    check_workspace_root()?;
+    check_permissions(&components)?;
     check_tools(&components)?;
 
     let configs: Vec<DevConfig> = components
