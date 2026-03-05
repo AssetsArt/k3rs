@@ -4,8 +4,10 @@
 //! Change a value in one place and it applies everywhere.
 
 pub mod auth;
+pub mod dns;
 pub mod network;
 pub mod paths;
 pub mod runtime;
 pub mod state;
+pub mod timings;
 pub mod vm;

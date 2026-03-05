@@ -7,7 +7,7 @@ use crate::is_initrd_mode;
 use crate::VSOCK_EXEC_PORT;
 
 /// Byte prefix that switches vsock exec into streaming PTY mode (must match k3rs-vmm).
-const STREAM_PREFIX: u8 = 0x01;
+const STREAM_PREFIX: u8 = pkg_constants::vm::VSOCK_STREAM_PREFIX;
 
 /// Start a vsock listener for exec commands from the host (k3rs-vmm).
 ///

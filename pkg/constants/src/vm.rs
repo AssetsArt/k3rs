@@ -8,3 +8,6 @@ pub const VIRTIOFS_TAG: &str = "rootfs";
 
 /// Default hostname assigned to guest VMs.
 pub const DEFAULT_VM_HOSTNAME: &str = "k3rs-guest";
+
+/// Byte prefix that switches vsock exec into streaming PTY mode.
+pub const VSOCK_STREAM_PREFIX: u8 = 0x01;

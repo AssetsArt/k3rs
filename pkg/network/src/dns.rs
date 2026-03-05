@@ -5,31 +5,19 @@ use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+use pkg_constants::dns::{
+    NAT64_PREFIX, QTYPE_A, QTYPE_AAAA, UPSTREAM_DNS_TIMEOUT_SECS,
+};
+use pkg_constants::network::{DEFAULT_VPC_ID, GHOST_VERSION, PLATFORM_PREFIX};
+
 /// FQDN → (ClusterIP, vpc_name, vpc_id) shared map.
 type VpcRecords = Arc<RwLock<HashMap<String, (String, String, u16)>>>;
 
 use pkg_types::vpc::{PeeringDirection, PeeringStatus, VpcPeering};
 
-/// DNS query type: A record (IPv4).
-const QTYPE_A: u16 = 1;
-
-/// DNS query type: AAAA record (IPv6).
-const QTYPE_AAAA: u16 = 28;
-
-/// NAT64 well-known prefix (first 12 bytes): `64:ff9b::/96` (RFC 6052).
-const NAT64_PREFIX: [u8; 12] = [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0];
-
-/// Ghost IPv6 address layout version.
-const GHOST_VERSION: u8 = 1;
-
-/// Default platform prefix: ULA encoding of "k3rs" → `fd6b:3372`.
-const DEFAULT_PLATFORM_PREFIX: u32 = 0xfd6b_3372;
-
-/// Default VPC ID for services without explicit VPC membership.
-const DEFAULT_VPC_ID: u16 = 1;
-
 /// Upstream forwarding timeout.
-const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const UPSTREAM_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(UPSTREAM_DNS_TIMEOUT_SECS);
 
 /// Lightweight embedded DNS server with DNS64 support.
 ///
@@ -68,10 +56,10 @@ impl DnsServer {
             vpc_members: Arc::new(RwLock::new(HashMap::new())),
             peered_vpcs: Arc::new(RwLock::new(HashSet::new())),
             listen_addr,
-            domain_suffix: "svc.cluster.local".to_string(),
-            platform_prefix: DEFAULT_PLATFORM_PREFIX,
+            domain_suffix: pkg_constants::dns::DNS_DOMAIN_SUFFIX.to_string(),
+            platform_prefix: PLATFORM_PREFIX,
             cluster_id: 0,
-            upstream: "8.8.8.8:53".parse().unwrap(),
+            upstream: pkg_constants::dns::DEFAULT_UPSTREAM_DNS.parse().unwrap(),
         }
     }
 

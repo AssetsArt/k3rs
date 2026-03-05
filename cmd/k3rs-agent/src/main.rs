@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
     let node_name = cli
         .node_name
         .or(file_cfg.node_name)
-        .unwrap_or_else(|| "node-1".to_string());
+        .unwrap_or_else(|| pkg_constants::auth::DEFAULT_NODE_NAME.to_string());
     let proxy_port = cli
         .proxy_port
         .or(file_cfg.proxy_port)

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+pkg-constants = { path = "../constants" }
 serde = { workspace = true }
 anyhow = { workspace = true }
 rand = "0.9"

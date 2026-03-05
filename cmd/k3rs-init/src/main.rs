@@ -45,13 +45,13 @@ mod vsock;
 // Constants
 // ============================================================
 
-const DEFAULT_HOSTNAME: &str = "k3rs-guest";
+const DEFAULT_HOSTNAME: &str = pkg_constants::vm::DEFAULT_VM_HOSTNAME;
 
 /// virtio-fs tag used by k3rs-vmm for rootfs sharing.
-const VIRTIOFS_TAG: &str = "rootfs";
+const VIRTIOFS_TAG: &str = pkg_constants::vm::VIRTIOFS_TAG;
 
 /// vsock port for exec commands from host (k3rs-vmm).
-const VSOCK_EXEC_PORT: u32 = 5555;
+const VSOCK_EXEC_PORT: u32 = pkg_constants::vm::VSOCK_EXEC_PORT;
 
 // ============================================================
 // Boot mode detection

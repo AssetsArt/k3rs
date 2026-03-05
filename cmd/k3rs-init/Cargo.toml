@@ -10,6 +10,7 @@ description = "Guest PID 1 init for k3rs microVMs — mounts pseudo-fs, reaps zo
 
 [dependencies]
 # Minimal deps — no tokio, no async, no networking libraries
+pkg-constants = { path = "../../pkg/constants" }
 nix = { version = "0.30", features = ["fs", "mount", "hostname", "signal", "net", "process"] }
 libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }

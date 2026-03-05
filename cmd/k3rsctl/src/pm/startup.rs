@@ -65,7 +65,7 @@ Wants=network-online.target
 Type=simple
 ExecStart={exec_start}
 Restart=on-failure
-RestartSec=5
+RestartSec={restart_sec}
 StandardOutput=append:{stdout}
 StandardError=append:{stderr}
 
@@ -74,6 +74,7 @@ WantedBy={wanted_by}
 ",
             description = description,
             exec_start = exec_start,
+            restart_sec = pkg_constants::timings::SYSTEMD_RESTART_SECS,
             stdout = entry.stdout_log.display(),
             stderr = entry.stderr_log.display(),
             wanted_by = wanted_by,

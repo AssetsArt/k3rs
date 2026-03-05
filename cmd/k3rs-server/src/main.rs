@@ -48,12 +48,12 @@ struct Cli {
     #[arg(long)]
     backup_dir: Option<String>,
 
-    /// Interval between automated backups in seconds (default: 3600)
-    #[arg(long, default_value_t = 3600)]
+    /// Interval between automated backups in seconds
+    #[arg(long, default_value_t = pkg_constants::timings::DEFAULT_BACKUP_INTERVAL_SECS)]
     backup_interval_secs: u64,
 
-    /// Number of backup files to keep (default: 5)
-    #[arg(long, default_value_t = 5)]
+    /// Number of backup files to keep
+    #[arg(long, default_value_t = pkg_constants::timings::DEFAULT_BACKUP_RETENTION)]
     backup_retention: usize,
 }
 

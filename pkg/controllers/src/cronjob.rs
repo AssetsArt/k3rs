@@ -16,7 +16,7 @@ impl CronJobController {
     pub fn new(store: StateStore) -> Self {
         Self {
             store,
-            check_interval: Duration::from_secs(30),
+            check_interval: Duration::from_secs(pkg_constants::timings::CRONJOB_CHECK_INTERVAL_SECS),
         }
     }
 

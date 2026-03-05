@@ -78,8 +78,8 @@ impl ConnectivityManager {
     /// u64 shift-overflow panic when `attempt` is very large (e.g. many hours
     /// of server downtime where the reconnect loop keeps incrementing).
     pub fn backoff_duration(attempt: u32) -> std::time::Duration {
-        let shift = attempt.min(30); // 2^30 >> 30s cap; safe for u64 (64 bits)
-        let secs = std::cmp::min(1u64 << shift, 30);
+        let shift = attempt.min(pkg_constants::timings::BACKOFF_SHIFT_CAP);
+        let secs = std::cmp::min(1u64 << shift, pkg_constants::timings::BACKOFF_MAX_SECS);
         std::time::Duration::from_secs(secs)
     }
 }

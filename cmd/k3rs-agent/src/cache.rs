@@ -102,7 +102,7 @@ impl AgentStateCache {
     /// This is a pure computation — no I/O. Called by `AgentStore::save()`
     /// to write the derived `/agent/dns-records` key in the same `WriteBatch`.
     pub fn derive_dns_map(&self) -> HashMap<String, String> {
-        let domain_suffix = "svc.cluster.local";
+        let domain_suffix = pkg_constants::dns::DNS_DOMAIN_SUFFIX;
         let mut records: HashMap<String, String> = HashMap::new();
 
         for svc in &self.services {

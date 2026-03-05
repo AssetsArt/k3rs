@@ -27,7 +27,7 @@ use tracing::{error, info};
 use pkg_constants::paths::DATA_DIR;
 
 /// Byte prefix that distinguishes streaming exec from regular one-shot exec.
-const STREAM_PREFIX: u8 = 0x01;
+const STREAM_PREFIX: u8 = pkg_constants::vm::VSOCK_STREAM_PREFIX;
 
 /// Read timeout for one-shot exec (waiting for the guest command to finish).
 const EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);

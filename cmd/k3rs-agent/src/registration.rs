@@ -66,7 +66,7 @@ pub async fn try_connect(
         match client
             .put(&probe_url)
             .header("Authorization", format!("Bearer {}", token))
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(pkg_constants::timings::HEARTBEAT_TIMEOUT_SECS))
             .send()
             .await
         {

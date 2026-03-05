@@ -91,7 +91,7 @@ pub fn exec_streaming_via_vsock(
 
     // Send streaming prefix + NUL-delimited command + newline.
     // The `\x01` byte tells k3rs-init to use PTY streaming mode.
-    let mut cmd_bytes = vec![0x01u8];
+    let mut cmd_bytes = vec![pkg_constants::vm::VSOCK_STREAM_PREFIX];
     cmd_bytes.extend_from_slice(command.join("\0").as_bytes());
     cmd_bytes.push(b'\n');
 

@@ -27,7 +27,7 @@ pub fn start_heartbeat_loop(
                 // the 0-based index that `backoff_duration` expects, ensuring
                 // the first retry fires after 1s (not 2s).
                 let delay = if fail_count == 0 {
-                    std::time::Duration::from_secs(10)
+                    std::time::Duration::from_secs(pkg_constants::timings::HEARTBEAT_INTERVAL_SECS)
                 } else {
                     ConnectivityManager::backoff_duration(fail_count.saturating_sub(1))
                 };
@@ -47,7 +47,7 @@ pub fn start_heartbeat_loop(
                 match client
                     .put(&url)
                     .header("Authorization", format!("Bearer {}", token))
-                    .timeout(std::time::Duration::from_secs(5))
+                    .timeout(std::time::Duration::from_secs(pkg_constants::timings::HEARTBEAT_TIMEOUT_SECS))
                     .send()
                     .await
                 {
