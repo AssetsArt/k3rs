@@ -1,0 +1,175 @@
+name: Kernel
+
+on:
+  push:
+    tags:
+      - "kernel-v*"
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: "Linux kernel version"
+        default: "6.12"
+      arch:
+        description: "Target architecture"
+        type: choice
+        options:
+          - both
+          - arm64
+          - amd64
+        default: both
+
+env:
+  KERNEL_VERSION: ${{ inputs.kernel_version || '6.12' }}
+
+jobs:
+  build-kernel:
+    name: Build Kernel (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            kernel_arch: arm64
+            cross_compile: aarch64-linux-gnu-
+            kernel_image: arch/arm64/boot/Image
+            rust_target: aarch64-unknown-linux-musl
+            cross_packages: gcc-aarch64-linux-gnu
+          - arch: amd64
+            kernel_arch: x86_64
+            cross_compile: ""
+            kernel_image: arch/x86/boot/bzImage
+            rust_target: x86_64-unknown-linux-musl
+            cross_packages: ""
+        exclude:
+          - arch: ${{ inputs.arch == 'amd64' && 'arm64' || 'none' }}
+          - arch: ${{ inputs.arch == 'arm64' && 'amd64' || 'none' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install kernel build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc flex bison libelf-dev libssl-dev \
+            curl xz-utils cpio musl-tools \
+            ${{ matrix.cross_packages }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install Rust (nightly, for eBPF in k3rs-init)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install cargo-zigbuild
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+
+      - name: Download and extract kernel source
+        run: |
+          KERNEL_MAJOR="v6.x"
+          KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/${KERNEL_MAJOR}/linux-${KERNEL_VERSION}.tar.xz"
+          echo "Downloading linux-${KERNEL_VERSION}..."
+          curl -fSL "$KERNEL_URL" | tar xJ -C /tmp
+
+      - name: Configure kernel
+        run: |
+          cd /tmp/linux-${KERNEL_VERSION}
+          make ARCH=${{ matrix.kernel_arch }} defconfig
+
+          scripts/config \
+            -e VIRTIO -e VIRTIO_PCI -e VIRTIO_MMIO \
+            -e VIRTIO_BLK -e VIRTIO_NET -e VIRTIO_CONSOLE \
+            -e DAX -e FS_DAX -e FUSE_FS -e VIRTIO_FS \
+            -e VIRTIO_VSOCKETS -e VSOCKETS -e VHOST_VSOCK \
+            -e NET -e INET -e EXT4_FS -e TMPFS \
+            -e DEVTMPFS -e DEVTMPFS_MOUNT \
+            -e PROC_FS -e SYSFS \
+            -e OVERLAY_FS \
+            -e CGROUPS -e CGROUP_CPUACCT -e CGROUP_DEVICE \
+            -e CGROUP_FREEZER -e CGROUP_SCHED -e MEMCG -e CGROUP_PIDS \
+            -e NAMESPACES -e NET_NS -e PID_NS -e USER_NS -e IPC_NS -e UTS_NS \
+            -e BPF -e BPF_SYSCALL \
+            -e NET_CLS_BPF -e NET_CLS_ACT -e NET_SCH_CLSACT \
+            -e BPF_JIT \
+            -d MODULES -d SOUND -d DRM -d USB_SUPPORT -d WIRELESS \
+            -d BLUETOOTH -d NFC -d INPUT_JOYSTICK -d INPUT_TABLET
+
+          make ARCH=${{ matrix.kernel_arch }} olddefconfig
+
+      - name: Build kernel
+        run: |
+          cd /tmp/linux-${KERNEL_VERSION}
+          make ARCH=${{ matrix.kernel_arch }} \
+               CROSS_COMPILE="${{ matrix.cross_compile }}" \
+               -j$(nproc)
+
+      - name: Build k3rs-init and create initrd
+        run: |
+          cargo zigbuild --release --target ${{ matrix.rust_target }} -p k3rs-init
+
+          INITRD_ROOT="/tmp/initrd-$$"
+          mkdir -p "$INITRD_ROOT"/{sbin,dev,proc,sys,tmp,run,mnt/rootfs,etc}
+          cp "target/${{ matrix.rust_target }}/release/k3rs-init" "$INITRD_ROOT/sbin/k3rs-init"
+          chmod 755 "$INITRD_ROOT/sbin/k3rs-init"
+
+          cd "$INITRD_ROOT"
+          find . | cpio -o -H newc --quiet | gzip > /tmp/initrd.img
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p dist
+          cp "/tmp/linux-${KERNEL_VERSION}/${{ matrix.kernel_image }}" dist/vmlinux
+          cp /tmp/initrd.img dist/initrd.img
+
+          cd dist && sha256sum * > checksums.sha256
+
+          echo "Kernel: $(du -h vmlinux | cut -f1)"
+          echo "Initrd: $(du -h initrd.img | cut -f1)"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: k3rs-kernel-${{ matrix.arch }}
+          path: dist/
+
+  release:
+    name: Create Kernel Release
+    needs: build-kernel
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          for dir in artifacts/*/; do
+            arch=$(basename "$dir" | sed 's/k3rs-kernel-//')
+            for file in "$dir"*; do
+              [ -f "$file" ] || continue
+              name=$(basename "$file")
+              [ "$name" = "checksums.sha256" ] && continue
+              mv "$file" "release-assets/${name}-${arch}"
+            done
+          done
+
+          cd release-assets && sha256sum * > checksums.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
