@@ -35,92 +35,116 @@ pub async fn bridge_exists(name: &str) -> bool {
 
 /// Create the k3rs0 bridge, assign the link-local gateway, bring it up,
 /// and enable IPv6 forwarding. Idempotent — skips creation if the bridge
-/// already exists.
+/// already exists. Always ensures the ghost route and DNS VIP are present.
 pub async fn ensure_bridge(config: &BridgeConfig) -> Result<()> {
-    // Skip if bridge already exists
-    if bridge_exists(&config.name).await {
+    let already_exists = bridge_exists(&config.name).await;
+
+    if already_exists {
         info!("[bridge] {} already exists, skipping creation", config.name);
-        return Ok(());
     }
 
-    // Create bridge
-    let output = tokio::process::Command::new("ip")
-        .args(["link", "add", &config.name, "type", "bridge"])
-        .output()
-        .await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.contains("File exists") {
-            anyhow::bail!(
-                "[bridge] Failed to create {}: {}",
-                config.name,
-                stderr.trim()
-            );
+    if !already_exists {
+        // Create bridge
+        let output = tokio::process::Command::new("ip")
+            .args(["link", "add", &config.name, "type", "bridge"])
+            .output()
+            .await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("File exists") {
+                anyhow::bail!(
+                    "[bridge] Failed to create {}: {}",
+                    config.name,
+                    stderr.trim()
+                );
+            }
         }
-    }
 
-    // Assign link-local IPv6 gateway
-    let gw_cidr = format!("{}/64", config.gateway_ipv6);
-    let output = tokio::process::Command::new("ip")
-        .args(["-6", "addr", "add", &gw_cidr, "dev", &config.name])
-        .output()
-        .await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.contains("File exists") {
-            warn!("[bridge] ip -6 addr add warning: {}", stderr.trim());
+        // Assign link-local IPv6 gateway
+        let gw_cidr = format!("{}/64", config.gateway_ipv6);
+        let output = tokio::process::Command::new("ip")
+            .args(["-6", "addr", "add", &gw_cidr, "dev", &config.name])
+            .output()
+            .await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.contains("File exists") {
+                warn!("[bridge] ip -6 addr add warning: {}", stderr.trim());
+            }
         }
-    }
 
-    // Bring bridge up
-    let output = tokio::process::Command::new("ip")
-        .args(["link", "set", &config.name, "up"])
-        .output()
-        .await?;
-    if !output.status.success() {
-        warn!(
-            "[bridge] ip link set up warning: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    // Enable IPv6 forwarding
-    let sysctl_path = format!("/proc/sys/net/ipv6/conf/{}/forwarding", config.name);
-    if let Err(e) = tokio::fs::write(&sysctl_path, "1").await {
-        warn!(
-            "[bridge] Failed to enable IPv6 forwarding on {}: {} (may need root)",
-            config.name, e
-        );
-    }
-    // Also enable globally
-    if let Err(e) = tokio::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1").await {
-        warn!(
-            "[bridge] Failed to enable global IPv6 forwarding: {} (may need root)",
-            e
-        );
-    }
-
-    // Add route for Ghost IPv6 prefix via the bridge so the host can reach pods
-    let ghost_prefix = crate::wireguard::GHOST_ROUTE_PREFIX;
-    let route_output = tokio::process::Command::new("ip")
-        .args(["-6", "route", "add", ghost_prefix, "dev", &config.name])
-        .output()
-        .await?;
-    if !route_output.status.success() {
-        let stderr = String::from_utf8_lossy(&route_output.stderr);
-        if !stderr.contains("File exists") {
+        // Bring bridge up
+        let output = tokio::process::Command::new("ip")
+            .args(["link", "set", &config.name, "up"])
+            .output()
+            .await?;
+        if !output.status.success() {
             warn!(
-                "[bridge] Failed to add ghost route {} dev {}: {}",
-                ghost_prefix,
-                config.name,
-                stderr.trim()
+                "[bridge] ip link set up warning: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        // Enable IPv6 forwarding
+        let sysctl_path = format!("/proc/sys/net/ipv6/conf/{}/forwarding", config.name);
+        if let Err(e) = tokio::fs::write(&sysctl_path, "1").await {
+            warn!(
+                "[bridge] Failed to enable IPv6 forwarding on {}: {} (may need root)",
+                config.name, e
+            );
+        }
+        if let Err(e) = tokio::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1").await {
+            warn!(
+                "[bridge] Failed to enable global IPv6 forwarding: {} (may need root)",
+                e
             );
         }
     }
+
+    // Ensure ghost route (idempotent — always run in case route was lost)
+    let ghost_prefix = crate::wireguard::GHOST_ROUTE_PREFIX;
+    ensure_addr_or_route(&config.name, AddrOrRoute::Route(ghost_prefix)).await;
+
+    // Ensure DNS VIP on bridge so pods can reach the DNS server
+    let dns_vip = pkg_constants::network::DNS_VIP;
+    let dns_cidr = format!("{}/128", dns_vip);
+    ensure_addr_or_route(&config.name, AddrOrRoute::Addr(&dns_cidr)).await;
 
     info!(
-        "[bridge] {} created (gateway: {}/64, route: {}, IPv6 forwarding enabled)",
-        config.name, config.gateway_ipv6, ghost_prefix
+        "[bridge] {} ready (gateway: {}/64, route: {}, dns: {})",
+        config.name, config.gateway_ipv6, ghost_prefix, dns_vip
     );
     Ok(())
+}
+
+enum AddrOrRoute<'a> {
+    Addr(&'a str),
+    Route(&'a str),
+}
+
+async fn ensure_addr_or_route(bridge: &str, kind: AddrOrRoute<'_>) {
+    let (args, label): (Vec<&str>, &str) = match &kind {
+        AddrOrRoute::Addr(cidr) => (
+            vec!["-6", "addr", "add", cidr, "dev", bridge],
+            cidr,
+        ),
+        AddrOrRoute::Route(prefix) => (
+            vec!["-6", "route", "add", prefix, "dev", bridge],
+            prefix,
+        ),
+    };
+    let output = tokio::process::Command::new("ip")
+        .args(&args)
+        .output()
+        .await;
+    match output {
+        Ok(o) if !o.status.success() => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stderr.contains("File exists") {
+                warn!("[bridge] ip {} failed: {}", label, stderr.trim());
+            }
+        }
+        Err(e) => warn!("[bridge] ip {} failed: {}", label, e),
+        _ => {}
+    }
 }

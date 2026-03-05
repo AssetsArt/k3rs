@@ -17,3 +17,7 @@ pub const DEFAULT_SERVICE_PROXY_PORT: u16 = 10256;
 
 /// Default embedded DNS server port.
 pub const DEFAULT_DNS_PORT: u16 = 5353;
+
+/// Well-known DNS virtual IP assigned to the k3rs0 bridge.
+/// Pods use this as their nameserver in `/etc/resolv.conf`.
+pub const DNS_VIP: &str = "fd6b:3372::53";

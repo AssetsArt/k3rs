@@ -5803,6 +5803,7 @@ name = "pkg-network"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pkg-constants",
  "pkg-types",
  "serde",
  "serde_json",

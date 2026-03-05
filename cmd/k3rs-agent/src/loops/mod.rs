@@ -67,6 +67,18 @@ pub fn start_controller_loops(
                                     e
                                 );
                             }
+
+                            // Start DNS listener on bridge VIP (port 53) so pods can resolve
+                            let dns_vip_addr: std::net::SocketAddr =
+                                format!("[{}]:53", pkg_constants::network::DNS_VIP)
+                                    .parse()
+                                    .expect("invalid DNS_VIP");
+                            if let Err(e) = dns_server.start_on(dns_vip_addr).await {
+                                warn!(
+                                    "DNS VIP listener on {} failed: {} (pod DNS may not work)",
+                                    dns_vip_addr, e
+                                );
+                            }
                         }
 
                         // Start Agent API server for exec/logs (if we know the port)

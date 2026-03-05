@@ -234,6 +234,55 @@ impl DnsServer {
         Ok(())
     }
 
+    /// Start an additional DNS listener on the given address, sharing state
+    /// with the primary listener. Used for the bridge DNS VIP on port 53.
+    pub async fn start_on(&self, addr: SocketAddr) -> anyhow::Result<()> {
+        info!("Starting additional DNS listener on {}", addr);
+
+        let socket = UdpSocket::bind(addr).await?;
+        let records = self.records.clone();
+        let vpc_records = self.vpc_records.clone();
+        let vpc_members = self.vpc_members.clone();
+        let peered_vpcs = self.peered_vpcs.clone();
+        let platform_prefix = self.platform_prefix;
+        let cluster_id = self.cluster_id;
+        let upstream = self.upstream;
+        let domain_suffix = self.domain_suffix.clone();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                match socket.recv_from(&mut buf).await {
+                    Ok((len, src)) => {
+                        if let Some(response) = Self::handle_dns_query(
+                            &buf[..len],
+                            &records,
+                            &vpc_records,
+                            &vpc_members,
+                            &peered_vpcs,
+                            &src,
+                            platform_prefix,
+                            cluster_id,
+                            upstream,
+                            &domain_suffix,
+                        )
+                        .await
+                            && let Err(e) = socket.send_to(&response, src).await
+                        {
+                            warn!("DNS send error on {}: {}", addr, e);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("DNS recv error on {}: {}", addr, e);
+                    }
+                }
+            }
+        });
+
+        info!("Additional DNS listener running on {}", addr);
+        Ok(())
+    }
+
     // ─── Query Handler ──────────────────────────────────────────────
 
     /// Parse a DNS query and generate the appropriate response.

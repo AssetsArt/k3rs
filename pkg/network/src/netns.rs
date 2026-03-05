@@ -164,11 +164,28 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
         );
     }
 
+    // 9. Write /etc/resolv.conf pointing to the k3rs DNS VIP on the bridge
+    let dns_vip = pkg_constants::network::DNS_VIP;
+    let resolv_content = format!("nameserver {}\noptions ndots:5\n", dns_vip);
+    if let Err(e) = nsenter_run(
+        pid,
+        &["sh", "-c", &format!("echo '{}' > /etc/resolv.conf", resolv_content.trim())],
+    )
+    .await
+    {
+        warn!(
+            "[netns:{}] Failed to write resolv.conf: {}",
+            &config.pod_id[..8.min(config.pod_id.len())],
+            e
+        );
+    }
+
     info!(
-        "[netns:{}] Pod network configured: eth0={} + {}",
+        "[netns:{}] Pod network configured: eth0={} + {}, dns={}",
         &config.pod_id[..8.min(config.pod_id.len())],
         config.ghost_ipv6,
-        config.guest_ipv4
+        config.guest_ipv4,
+        dns_vip
     );
     Ok(())
 }
