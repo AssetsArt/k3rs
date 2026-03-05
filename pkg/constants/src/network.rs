@@ -16,7 +16,8 @@ pub const DEFAULT_AGENT_API_PORT: u16 = 10250;
 pub const DEFAULT_SERVICE_PROXY_PORT: u16 = 10256;
 
 /// Default embedded DNS server port.
-pub const DEFAULT_DNS_PORT: u16 = 5353;
+/// Avoids 5353 which is the well-known mDNS port used by Avahi/systemd-resolved.
+pub const DEFAULT_DNS_PORT: u16 = 10053;
 
 /// Well-known DNS virtual IP assigned to the k3rs0 bridge.
 /// Pods use this as their nameserver in `/etc/resolv.conf`.

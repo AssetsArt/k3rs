@@ -75,6 +75,29 @@ async fn nsenter_run(pid: u32, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Run a command inside the container's network + mount namespaces via nsenter.
+/// Needed for operations that write to the container's filesystem (e.g. /etc/resolv.conf).
+async fn nsenter_run_with_mount(pid: u32, args: &[&str]) -> Result<()> {
+    let pid_str = pid.to_string();
+    let mut cmd_args = vec!["-t", &pid_str, "-n", "-m", "--"];
+    cmd_args.extend_from_slice(args);
+
+    let output = tokio::process::Command::new("nsenter")
+        .args(&cmd_args)
+        .output()
+        .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "nsenter -t {} -n -m -- {} failed: {}",
+            pid,
+            args.join(" "),
+            stderr.trim()
+        );
+    }
+    Ok(())
+}
+
 /// Create netkit pair (L2 mode), move peer into container netns, attach host
 /// side to bridge, and configure IPv6/IPv4 addresses + routes inside the container.
 pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
@@ -112,7 +135,7 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
 
     // 5. Assign Ghost IPv6 (/128) and guest IPv4 (/32) to eth0
     let ipv6_cidr = format!("{}/128", config.ghost_ipv6);
-    nsenter_run(pid, &["ip", "-6", "addr", "add", &ipv6_cidr, "dev", GUEST_IFACE]).await?;
+    nsenter_run(pid, &["ip", "-6", "addr", "add", &ipv6_cidr, "dev", GUEST_IFACE, "nodad"]).await?;
 
     let ipv4_cidr = format!("{}/32", config.guest_ipv4);
     nsenter_run(pid, &["ip", "addr", "add", &ipv4_cidr, "dev", GUEST_IFACE]).await?;
@@ -170,8 +193,9 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     }
 
     // 9. Write /etc/resolv.conf pointing to the k3rs DNS VIP on the bridge
+    //    Uses mount namespace (-m) so we write to the container's filesystem, not the host's.
     let resolv_content = format!("nameserver {}\noptions ndots:{}\n", DNS_VIP, DNS_NDOTS);
-    if let Err(e) = nsenter_run(
+    if let Err(e) = nsenter_run_with_mount(
         pid,
         &["sh", "-c", &format!("echo '{}' > /etc/resolv.conf", resolv_content.trim())],
     )
