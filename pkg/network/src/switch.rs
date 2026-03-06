@@ -22,10 +22,10 @@ mod inner {
     use tracing::{debug, info, trace, warn};
 
     /// Well-known gateway MAC used by k3rs VMs (matches k3rs.gw_mac kernel param).
-    const GATEWAY_MAC: [u8; 6] = [0x02, 0xfc, 0x00, 0x00, 0x00, 0x01];
+    const GATEWAY_MAC: [u8; 6] = pkg_constants::network::GATEWAY_MAC;
 
     /// DNS proxy IP inside the VM's link-local range.
-    const DNS_PROXY_IP: Ipv4Addr = Ipv4Addr::new(169, 254, 0, 53);
+    const DNS_PROXY_IP: Ipv4Addr = Ipv4Addr::new(169, 254, 0, 53); // matches pkg_constants::network::DNS_PROXY_IPV4
 
     /// EtherType constants
     const ETH_P_ARP: u16 = 0x0806;

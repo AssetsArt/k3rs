@@ -155,7 +155,7 @@ async fn check_running_pods(
                     .vpc_name
                     .as_deref()
                     .or(pod.spec.vpc.as_deref())
-                    .unwrap_or("default");
+                    .unwrap_or(pkg_constants::network::DEFAULT_VPC_NAME);
                 if let Err(e) = vpc_client.release(&pod.id, vpc_name).await {
                     warn!("[pod:{}] VPC release failed: {}", pod.name, e);
                 }
@@ -210,7 +210,7 @@ async fn check_running_pods(
                     .vpc_name
                     .as_deref()
                     .or(pod.spec.vpc.as_deref())
-                    .unwrap_or("default");
+                    .unwrap_or(pkg_constants::network::DEFAULT_VPC_NAME);
                 if let Err(e) = vpc_client.release(&pod.id, vpc_name).await {
                     warn!("[pod:{}] VPC release failed: {}", pod.name, e);
                 }
@@ -347,7 +347,7 @@ async fn run_pod_lifecycle(
     let mut env = container_spec.map(|c| c.env.clone()).unwrap_or_default();
 
     // 0. Allocate VPC address
-    let vpc_name = pod.spec.vpc.as_deref().unwrap_or("default");
+    let vpc_name = pod.spec.vpc.as_deref().unwrap_or(pkg_constants::network::DEFAULT_VPC_NAME);
     let vpc_alloc = match vpc_client.allocate(&pod.id, vpc_name).await {
         Ok(alloc) => {
             info!(
@@ -467,7 +467,7 @@ async fn run_pod_lifecycle(
             guest_ipv6: ghost_ipv6.clone(),
             vpc_id,
             vpc_cidr: vpc_cidr.clone(),
-            gw_mac: "02:fc:00:00:00:01".to_string(),
+            gw_mac: pkg_constants::network::GATEWAY_MAC_STR.to_string(),
             platform_prefix: pkg_constants::network::PLATFORM_PREFIX,
             cluster_id: 0, // TODO: get from cluster registration
         };

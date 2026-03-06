@@ -66,6 +66,20 @@ pub const DEFAULT_OTEL_ENDPOINT: &str = "http://localhost:4317";
 /// GitHub repository for binary releases.
 pub const GITHUB_REPO: &str = "AssetsArt/k3rs";
 
+// ─── macOS VPC / Switch ──────────────────────────────────────────
+
+/// Well-known gateway MAC used by VMs for static ARP entries.
+/// Guest configures `arp -s <gateway> 02:fc:00:00:00:01` so all outbound
+/// Ethernet frames arrive at the host-side switch/TAP.
+pub const GATEWAY_MAC_STR: &str = "02:fc:00:00:00:01";
+
+/// Gateway MAC as raw bytes for Ethernet frame construction.
+pub const GATEWAY_MAC: [u8; 6] = [0x02, 0xfc, 0x00, 0x00, 0x00, 0x01];
+
+/// Link-local IPv4 address the userspace switch listens on for DNS proxying.
+/// VMs write `nameserver 169.254.0.53` in `/etc/resolv.conf`.
+pub const DNS_PROXY_IPV4: &str = "169.254.0.53";
+
 // ─── Pod netns ────────────────────────────────────────────────────
 
 /// Interface name assigned inside the container network namespace.

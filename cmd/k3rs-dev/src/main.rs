@@ -310,8 +310,69 @@ fn check_workspace_root() -> Result<()> {
     Ok(())
 }
 
+/// macOS: codesign k3rs-vmm with Virtualization.framework entitlements.
+/// The agent spawns k3rs-vmm as a child process, so it must be signed.
+#[cfg(target_os = "macos")]
+fn ensure_entitlements(components: &[Component]) -> Result<()> {
+    if !components.iter().any(|c| matches!(c, Component::Agent)) {
+        return Ok(());
+    }
+
+    let vmm_bin = "target/debug/k3rs-vmm";
+    let entitlements = "cmd/k3rs-vmm/k3rs-vmm.entitlements";
+
+    // Build k3rs-vmm if needed
+    if !std::path::Path::new(vmm_bin).exists() {
+        println!("Building k3rs-vmm for codesigning...");
+        let status = Command::new("cargo")
+            .args(["build", "-p", "k3rs-vmm"])
+            .status()?;
+        if !status.success() {
+            bail!("cargo build -p k3rs-vmm failed");
+        }
+    }
+
+    // Check if already signed with correct entitlements
+    let already_signed = Command::new("codesign")
+        .args(["-d", "--entitlements", "-", vmm_bin])
+        .output()
+        .map(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout).contains("com.apple.security.virtualization")
+        })
+        .unwrap_or(false);
+
+    if already_signed {
+        return Ok(());
+    }
+
+    println!("Signing k3rs-vmm with Virtualization.framework entitlements...");
+    let status = Command::new("codesign")
+        .args([
+            "--entitlements",
+            entitlements,
+            "--force",
+            "-s",
+            "-",
+            vmm_bin,
+        ])
+        .status()?;
+
+    if !status.success() {
+        bail!(
+            "codesign failed for {}.\n\
+             Ensure Xcode command-line tools are installed: xcode-select --install",
+            vmm_bin
+        );
+    }
+
+    println!("  {} signed with {}", vmm_bin, entitlements);
+    Ok(())
+}
+
 /// Ensure Linux capabilities are set on binaries that need privileged operations.
 /// Automatically builds and runs `sudo setcap` so the user just runs `k3rs-dev all`.
+#[cfg(target_os = "linux")]
 fn ensure_capabilities(components: &[Component]) -> Result<()> {
     let privileged: Vec<(&str, &str)> = components
         .iter()
@@ -405,6 +466,7 @@ fn ensure_capabilities(components: &[Component]) -> Result<()> {
 }
 
 /// Check if a binary has the required capabilities set via getcap.
+#[cfg(target_os = "linux")]
 fn check_file_has_caps(path: &str, required: &[&str]) -> bool {
     let output = Command::new("getcap").arg(path).output();
     match output {
@@ -424,7 +486,12 @@ fn main() -> Result<()> {
 
     check_workspace_root()?;
     check_tools(&components)?;
+
+    #[cfg(target_os = "linux")]
     ensure_capabilities(&components)?;
+
+    #[cfg(target_os = "macos")]
+    ensure_entitlements(&components)?;
 
     let configs: Vec<DevConfig> = components
         .iter()

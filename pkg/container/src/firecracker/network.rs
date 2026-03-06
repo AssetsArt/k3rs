@@ -11,7 +11,7 @@ pub struct FcNetworkManager;
 
 /// Well-known MAC address for the host TAP side.
 /// Matches the static ARP entry configured by k3rs-init in the guest.
-pub const TAP_WELL_KNOWN_MAC: &str = "02:fc:00:00:00:01";
+pub const TAP_WELL_KNOWN_MAC: &str = pkg_constants::network::GATEWAY_MAC_STR;
 
 impl FcNetworkManager {
     /// Create and configure a TAP device for a VM.
