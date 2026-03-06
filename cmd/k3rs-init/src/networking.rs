@@ -178,8 +178,12 @@ fn write_resolv_conf(dns_servers: &[String]) {
         + "\n";
 
     match std::fs::write("/etc/resolv.conf", &content) {
-        Ok(_) => log_info!("wrote /etc/resolv.conf: {:?}", servers),
-        Err(e) => log_error!("failed to write /etc/resolv.conf: {}", e),
+        Ok(_) => {
+            log_info!("wrote /etc/resolv.conf: {:?}", servers);
+        }
+        Err(e) => {
+            log_error!("failed to write /etc/resolv.conf: {}", e);
+        }
     }
 }
 
