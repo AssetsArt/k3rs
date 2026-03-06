@@ -57,38 +57,16 @@ impl ContainerRuntime {
             })?;
 
         let backend: Arc<dyn RuntimeBackend> = if cfg!(target_os = "macos") {
-            // macOS: use Virtualization.framework microVM backend
-            match crate::virt::VirtualizationBackend::new(&data_dir).await {
-                Ok(virt) => {
-                    info!(
-                        "Using Virtualization.framework runtime: {} ({})",
-                        virt.name(),
-                        virt.version()
-                    );
-                    Arc::new(virt)
-                }
-                Err(e) => {
-                    info!(
-                        "Virtualization.framework not available ({}), trying OCI fallback",
-                        e
-                    );
-                    // Fallback to OCI if available
-                    match OciBackend::detect(&data_dir) {
-                        Ok(oci) => {
-                            info!("Using OCI runtime: {} ({})", oci.name(), oci.version());
-                            Arc::new(oci)
-                        }
-                        Err(e2) => {
-                            anyhow::bail!(
-                                "No container runtime available. \
-                                 Virtualization.framework: {}. OCI: {}",
-                                e,
-                                e2
-                            );
-                        }
-                    }
-                }
-            }
+            // macOS: Virtualization.framework microVM is the only supported backend.
+            // OCI runtimes (youki/crun) require Linux namespaces/cgroups which are
+            // not available on macOS.
+            let virt = crate::virt::VirtualizationBackend::new(&data_dir).await?;
+            info!(
+                "Using Virtualization.framework runtime: {} ({})",
+                virt.name(),
+                virt.version()
+            );
+            Arc::new(virt)
         } else {
             // Linux: prefer OCI runtimes; Firecracker is only a fallback when
             // no OCI runtime is available but KVM is present.
@@ -229,7 +207,10 @@ impl ContainerRuntime {
         env: &HashMap<String, String>,
         runtime_name: Option<&str>,
     ) -> Result<()> {
-        let backend = if let Some(name) = runtime_name {
+        let backend = if cfg!(target_os = "macos") {
+            // macOS: always use VM backend — OCI runtimes are not supported.
+            self.get_or_init_vm_backend().await?
+        } else if let Some(name) = runtime_name {
             if name == "vm" {
                 self.get_or_init_vm_backend().await?
             } else if name == "youki" || name == "crun" {
