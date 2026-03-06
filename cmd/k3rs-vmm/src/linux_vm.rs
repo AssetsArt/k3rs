@@ -15,13 +15,15 @@ use std::path::Path;
 use objc2::AllocAnyThread;
 use objc2::rc::Retained;
 use objc2_foundation::{NSArray, NSString, NSURL};
+use objc2_foundation::NSFileHandle;
 use objc2_virtualization::{
-    VZFileSerialPortAttachment, VZLinuxBootLoader, VZNATNetworkDeviceAttachment,
-    VZSerialPortConfiguration, VZSharedDirectory, VZSingleDirectoryShare,
-    VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioEntropyDeviceConfiguration,
-    VZVirtioFileSystemDeviceConfiguration, VZVirtioNetworkDeviceConfiguration,
-    VZVirtioSocketDeviceConfiguration, VZVirtioTraditionalMemoryBalloonDeviceConfiguration,
-    VZVirtualMachine, VZVirtualMachineConfiguration,
+    VZFileHandleNetworkDeviceAttachment, VZFileSerialPortAttachment, VZLinuxBootLoader,
+    VZNATNetworkDeviceAttachment, VZSerialPortConfiguration, VZSharedDirectory,
+    VZSingleDirectoryShare, VZVirtioConsoleDeviceSerialPortConfiguration,
+    VZVirtioEntropyDeviceConfiguration, VZVirtioFileSystemDeviceConfiguration,
+    VZVirtioNetworkDeviceConfiguration, VZVirtioSocketDeviceConfiguration,
+    VZVirtioTraditionalMemoryBalloonDeviceConfiguration, VZVirtualMachine,
+    VZVirtualMachineConfiguration,
 };
 use tracing::info;
 
@@ -54,9 +56,22 @@ fn create_vm_config(config: &VmConfig) -> Retained<VZVirtualMachineConfiguration
         // --- Boot Loader ---
         vz_config.setBootLoader(Some(&boot_loader(config)));
 
-        // --- Network: virtio-net with NAT ---
+        // --- Network: virtio-net ---
         let net = VZVirtioNetworkDeviceConfiguration::new();
-        net.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
+        if let Some(fd) = config.net_fd {
+            // VPC mode: raw Ethernet frames via datagram socket
+            let file_handle = NSFileHandle::initWithFileDescriptor(NSFileHandle::alloc(), fd);
+            let attachment = VZFileHandleNetworkDeviceAttachment::initWithFileHandle(
+                VZFileHandleNetworkDeviceAttachment::alloc(),
+                &file_handle,
+            );
+            net.setAttachment(Some(&Retained::into_super(attachment)));
+            info!("network: VPC mode (fd={})", fd);
+        } else {
+            // Legacy NAT mode
+            net.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
+            info!("network: NAT mode");
+        }
         vz_config.setNetworkDevices(&NSArray::from_retained_slice(&[Retained::into_super(net)]));
 
         // --- Filesystem: virtio-fs rootfs share ---
@@ -106,12 +121,27 @@ fn boot_loader(config: &VmConfig) -> Retained<VZLinuxBootLoader> {
         let loader = VZLinuxBootLoader::initWithKernelURL(VZLinuxBootLoader::alloc(), &kernel_url);
         // With initrd: k3rs-init boots from initrd, mounts virtiofs at /mnt/rootfs.
         // Without initrd: kernel mounts virtiofs directly as root (requires CONFIG_VIRTIO_FS=y).
-        let cmdline = if config.initrd_path.is_some() {
-            "console=hvc0 rdinit=/sbin/k3rs-init rw loglevel=7"
+        let mut cmdline = if config.initrd_path.is_some() {
+            "console=hvc0 rdinit=/sbin/k3rs-init rw loglevel=7".to_string()
         } else {
             "console=hvc0 root=virtiofs:rootfs rw rootwait init=/sbin/k3rs-init loglevel=7"
+                .to_string()
         };
-        loader.setCommandLine(&NSString::from_str(cmdline));
+
+        // Append VPC parameters for k3rs-init to configure networking
+        if let Some(ref vpc) = config.vpc {
+            use std::fmt::Write;
+            write!(cmdline, " k3rs.ipv4={}", vpc.guest_ipv4).unwrap();
+            write!(cmdline, " k3rs.ipv6={}", vpc.guest_ipv6).unwrap();
+            write!(cmdline, " k3rs.vpc_id={}", vpc.vpc_id).unwrap();
+            write!(cmdline, " k3rs.vpc_cidr={}", vpc.vpc_cidr).unwrap();
+            write!(cmdline, " k3rs.gw_mac={}", vpc.gw_mac).unwrap();
+            write!(cmdline, " k3rs.platform_prefix=0x{:08x}", vpc.platform_prefix).unwrap();
+            write!(cmdline, " k3rs.cluster_id={}", vpc.cluster_id).unwrap();
+            info!("kernel cmdline VPC params appended");
+        }
+
+        loader.setCommandLine(&NSString::from_str(&cmdline));
         if let Some(ref initrd) = config.initrd_path {
             loader.setInitialRamdiskURL(Some(&path_to_ns_url(initrd)));
         }

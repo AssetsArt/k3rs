@@ -38,6 +38,23 @@ pub struct VmConfig {
     pub cpu_count: usize,
     pub memory_mb: u64,
     pub log_path: Option<String>,
+    /// Raw FD for VZFileHandleNetworkDeviceAttachment (VPC mode).
+    /// When None, falls back to VZNATNetworkDeviceAttachment.
+    pub net_fd: Option<i32>,
+    /// VPC networking parameters (appended to kernel cmdline for k3rs-init).
+    pub vpc: Option<VmVpcConfig>,
+}
+
+/// VPC networking parameters for a VM.
+#[derive(Debug, Clone)]
+pub struct VmVpcConfig {
+    pub guest_ipv4: String,
+    pub guest_ipv6: String,
+    pub vpc_id: u16,
+    pub vpc_cidr: String,
+    pub gw_mac: String,
+    pub platform_prefix: u32,
+    pub cluster_id: u32,
 }
 
 #[derive(Parser)]
@@ -97,6 +114,31 @@ struct BootArgs {
     /// Run in foreground (block until VM exits)
     #[arg(long, default_value_t = false)]
     foreground: bool,
+    /// Raw FD number for VPC networking (VZFileHandleNetworkDeviceAttachment).
+    /// When set, uses the datagram socket for raw Ethernet frame I/O instead of NAT.
+    #[arg(long)]
+    net_fd: Option<i32>,
+    /// Guest IPv4 address for VPC mode (k3rs.ipv4 kernel param)
+    #[arg(long)]
+    guest_ipv4: Option<String>,
+    /// Guest Ghost IPv6 address for VPC mode (k3rs.ipv6 kernel param)
+    #[arg(long)]
+    guest_ipv6: Option<String>,
+    /// VPC ID (k3rs.vpc_id kernel param)
+    #[arg(long)]
+    vpc_id: Option<u16>,
+    /// VPC CIDR (k3rs.vpc_cidr kernel param)
+    #[arg(long)]
+    vpc_cidr: Option<String>,
+    /// Gateway MAC address (k3rs.gw_mac kernel param)
+    #[arg(long)]
+    gw_mac: Option<String>,
+    /// Platform prefix for Ghost IPv6 (k3rs.platform_prefix kernel param)
+    #[arg(long)]
+    platform_prefix: Option<u32>,
+    /// Cluster ID (k3rs.cluster_id kernel param)
+    #[arg(long)]
+    cluster_id: Option<u32>,
 }
 
 // ── Stop ────────────────────────────────────────────────────────────────
@@ -178,6 +220,30 @@ fn cmd_boot(args: BootArgs) {
         args.id, args.kernel, args.rootfs, args.cpus, args.memory
     );
 
+    // Build VPC config if all required params are present
+    let vpc = match (
+        &args.guest_ipv4,
+        &args.guest_ipv6,
+        args.vpc_id,
+        &args.vpc_cidr,
+        &args.gw_mac,
+        args.platform_prefix,
+        args.cluster_id,
+    ) {
+        (Some(ipv4), Some(ipv6), Some(vid), Some(cidr), Some(mac), Some(pp), Some(cid)) => {
+            Some(VmVpcConfig {
+                guest_ipv4: ipv4.clone(),
+                guest_ipv6: ipv6.clone(),
+                vpc_id: vid,
+                vpc_cidr: cidr.clone(),
+                gw_mac: mac.clone(),
+                platform_prefix: pp,
+                cluster_id: cid,
+            })
+        }
+        _ => None,
+    };
+
     let config = VmConfig {
         id: args.id.clone(),
         kernel_path: args.kernel,
@@ -186,6 +252,8 @@ fn cmd_boot(args: BootArgs) {
         cpu_count: args.cpus,
         memory_mb: args.memory,
         log_path: args.log,
+        net_fd: args.net_fd,
+        vpc,
     };
 
     // MainThreadMarker is required for Virtualization.framework

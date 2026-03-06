@@ -557,4 +557,41 @@ impl ContainerRuntime {
     pub async fn delete_image(&self, image_id: &str) -> Result<()> {
         self.image_manager.delete_image(image_id).await
     }
+
+    /// Set VPC network config for a VM before start_container() (macOS only).
+    /// This is used by pod_sync to configure the socketpair and kernel cmdline
+    /// VPC parameters for the VM.
+    #[cfg(target_os = "macos")]
+    pub async fn set_vm_network_config(
+        &self,
+        id: &str,
+        config: crate::virt::VmNetworkConfig,
+    ) {
+        // Try the main backend first, then the VM backend
+        if let Some(virt) = self.backend.as_any().downcast_ref::<crate::virt::VirtualizationBackend>() {
+            virt.set_vm_network_config(id, config).await;
+        } else if let Some(vm) = self.vm_backend.get() {
+            if let Some(virt) = vm.as_any().downcast_ref::<crate::virt::VirtualizationBackend>() {
+                virt.set_vm_network_config(id, config).await;
+            }
+        }
+    }
+
+    /// Take the host-side network socket for a VM (macOS only).
+    /// Used by pod_sync to register the socket with the userspace switch.
+    #[cfg(target_os = "macos")]
+    pub async fn take_vm_net_socket(
+        &self,
+        id: &str,
+    ) -> Option<std::os::unix::io::OwnedFd> {
+        if let Some(virt) = self.backend.as_any().downcast_ref::<crate::virt::VirtualizationBackend>() {
+            return virt.take_net_socket(id).await;
+        }
+        if let Some(vm) = self.vm_backend.get() {
+            if let Some(virt) = vm.as_any().downcast_ref::<crate::virt::VirtualizationBackend>() {
+                return virt.take_net_socket(id).await;
+            }
+        }
+        None
+    }
 }

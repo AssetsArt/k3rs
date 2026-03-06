@@ -34,6 +34,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
+use std::os::unix::io::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -86,6 +88,18 @@ enum VmState {
     Stopped,
 }
 
+/// VPC networking parameters for a VM (passed to k3rs-vmm as CLI args).
+#[derive(Debug, Clone)]
+pub struct VmNetworkConfig {
+    pub guest_ipv4: String,
+    pub guest_ipv6: String,
+    pub vpc_id: u16,
+    pub vpc_cidr: String,
+    pub gw_mac: String,
+    pub platform_prefix: u32,
+    pub cluster_id: u32,
+}
+
 /// Apple Virtualization.framework backend.
 ///
 /// Each container runs inside a lightweight Linux microVM using virtio-fs
@@ -103,6 +117,14 @@ pub struct VirtualizationBackend {
     instances: Arc<RwLock<HashMap<String, VmInstance>>>,
     /// Kernel asset manager
     kernel_manager: KernelManager,
+    /// Host-side datagram sockets for VPC networking (macOS only).
+    /// Each entry is the host end of a socketpair; the VMM end is passed to
+    /// VZFileHandleNetworkDeviceAttachment for raw Ethernet frame I/O.
+    #[cfg(target_os = "macos")]
+    net_sockets: Arc<RwLock<HashMap<String, OwnedFd>>>,
+    /// Pending VPC configs set before start_container is called.
+    #[cfg(target_os = "macos")]
+    pending_vpc_configs: Arc<RwLock<HashMap<String, VmNetworkConfig>>>,
 }
 
 impl VirtualizationBackend {
@@ -153,6 +175,10 @@ impl VirtualizationBackend {
                 vm_config: VmConfig::default(),
                 instances: Arc::new(RwLock::new(HashMap::new())),
                 kernel_manager,
+                #[cfg(target_os = "macos")]
+                net_sockets: Arc::new(RwLock::new(HashMap::new())),
+                #[cfg(target_os = "macos")]
+                pending_vpc_configs: Arc::new(RwLock::new(HashMap::new())),
             })
         }
     }
@@ -303,7 +329,16 @@ impl VirtualizationBackend {
     /// from the initrd and starts the vsock listener + virtiofs mount.
     /// Without initrd, the kernel mounts virtiofs directly as root (requires
     /// CONFIG_VIRTIO_FS=y built into the kernel).
-    async fn boot_vm(&self, id: &str, rootfs_dir: &Path) -> Result<Option<u32>> {
+    ///
+    /// When `vpc_config` is provided, creates a socketpair for VPC networking:
+    /// one end is passed to k3rs-vmm (VZFileHandleNetworkDeviceAttachment),
+    /// the other is stored in `net_sockets` for the userspace switch.
+    async fn boot_vm(
+        &self,
+        id: &str,
+        rootfs_dir: &Path,
+        vpc_config: Option<&VmNetworkConfig>,
+    ) -> Result<Option<u32>> {
         let log_path = self.log_path(id);
         let vmm = which_vmm().await.ok_or_else(|| {
             anyhow::anyhow!("k3rs-vmm not found — build with `cargo build -p k3rs-vmm --release`")
@@ -333,6 +368,83 @@ impl VirtualizationBackend {
             boot_args.push("--initrd".to_string());
             boot_args.push(initrd.to_string_lossy().to_string());
         }
+
+        // Create socketpair for VPC networking (macOS only)
+        #[cfg(target_os = "macos")]
+        let vmm_net_fd: Option<i32> = if let Some(vpc) = vpc_config {
+            use std::os::unix::io::{AsRawFd, FromRawFd};
+
+            let mut fds: [libc::c_int; 2] = [0; 2];
+            let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+            if ret != 0 {
+                anyhow::bail!(
+                    "socketpair() failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+
+            let host_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+            let vmm_fd_raw = fds[1];
+
+            // Set socket buffer sizes (Apple recommends RCVBUF = 4 × SNDBUF)
+            let sndbuf: libc::c_int = 1024 * 1024; // 1MB
+            let rcvbuf: libc::c_int = 4 * 1024 * 1024; // 4MB
+            for fd in [host_fd.as_raw_fd(), vmm_fd_raw] {
+                unsafe {
+                    libc::setsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_SNDBUF,
+                        &sndbuf as *const _ as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    );
+                    libc::setsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_RCVBUF,
+                        &rcvbuf as *const _ as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    );
+                }
+            }
+
+            // Store host-side socket for the userspace switch
+            self.net_sockets
+                .write()
+                .await
+                .insert(id.to_string(), host_fd);
+
+            // Add VPC CLI args for k3rs-vmm → kernel cmdline
+            boot_args.extend([
+                "--net-fd".to_string(),
+                vmm_fd_raw.to_string(),
+                "--guest-ipv4".to_string(),
+                vpc.guest_ipv4.clone(),
+                "--guest-ipv6".to_string(),
+                vpc.guest_ipv6.clone(),
+                "--vpc-id".to_string(),
+                vpc.vpc_id.to_string(),
+                "--vpc-cidr".to_string(),
+                vpc.vpc_cidr.clone(),
+                "--gw-mac".to_string(),
+                vpc.gw_mac.clone(),
+                "--platform-prefix".to_string(),
+                vpc.platform_prefix.to_string(),
+                "--cluster-id".to_string(),
+                vpc.cluster_id.to_string(),
+            ]);
+
+            tracing::info!(
+                "[virt] VPC socketpair created for VM {} (host_fd={}, vmm_fd={})",
+                id,
+                fds[0],
+                vmm_fd_raw
+            );
+            Some(vmm_fd_raw)
+        } else {
+            None
+        };
+
         cmd.args(&boot_args)
             .stdout(log_file)
             .stderr(stderr_file)
@@ -355,9 +467,16 @@ impl VirtualizationBackend {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
+            #[cfg(target_os = "macos")]
+            let vmm_net_fd = vmm_net_fd;
             unsafe {
-                cmd.pre_exec(|| {
+                cmd.pre_exec(move || {
                     libc::setsid();
+                    // Clear close-on-exec on the VMM network FD so it's inherited
+                    #[cfg(target_os = "macos")]
+                    if let Some(fd) = vmm_net_fd {
+                        libc::fcntl(fd, libc::F_SETFD, 0);
+                    }
                     Ok(())
                 });
             }
@@ -367,6 +486,12 @@ impl VirtualizationBackend {
         // std::process::Child::id() returns u32 (unlike tokio's Option<u32>)
         let pid: u32 = child.id();
 
+        // Close VMM-side FD in the parent (agent keeps only host-side)
+        #[cfg(target_os = "macos")]
+        if let Some(fd) = vmm_net_fd {
+            unsafe { libc::close(fd) };
+        }
+
         // Write PID file so restore_from_pid_files() can re-discover this VM
         // after an agent restart without relying on pgrep or k3rs-vmm ls.
         if let Err(e) = std::fs::write(self.pid_file_path(id), format!("{}\n", pid)) {
@@ -374,14 +499,33 @@ impl VirtualizationBackend {
         }
 
         tracing::info!(
-            "[virt] VM {} booted (pid={}, cpus={}, mem={}MB, rootfs={})",
+            "[virt] VM {} booted (pid={}, cpus={}, mem={}MB, rootfs={}, vpc={})",
             id,
             pid,
             self.vm_config.cpu_count,
             self.vm_config.memory_mb,
-            rootfs_dir.display()
+            rootfs_dir.display(),
+            vpc_config.is_some()
         );
         Ok(Some(pid))
+    }
+
+    /// Take the host-side network socket for a VM (used by the userspace switch).
+    /// Returns `None` if the VM was booted without VPC networking.
+    #[cfg(target_os = "macos")]
+    pub async fn take_net_socket(&self, id: &str) -> Option<OwnedFd> {
+        self.net_sockets.write().await.remove(id)
+    }
+
+    /// Set VPC networking config for a VM before start_container() is called.
+    /// The config will be consumed by boot_vm() to create a socketpair and
+    /// pass VPC parameters to k3rs-vmm → kernel cmdline → k3rs-init.
+    #[cfg(target_os = "macos")]
+    pub async fn set_vm_network_config(&self, id: &str, config: VmNetworkConfig) {
+        self.pending_vpc_configs
+            .write()
+            .await
+            .insert(id.to_string(), config);
     }
 
     /// Stop a VM via k3rs-vmm, falling back to SIGTERM/SIGKILL.
@@ -556,6 +700,10 @@ impl VirtualizationBackend {
 
 #[async_trait]
 impl RuntimeBackend for VirtualizationBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn name(&self) -> &str {
         "vm"
     }
@@ -652,7 +800,12 @@ impl RuntimeBackend for VirtualizationBackend {
         };
 
         let boot_start = std::time::Instant::now();
-        let pid = self.boot_vm(id, &rootfs_dir).await?;
+        // VPC config is set externally via set_vm_network_config() before start
+        #[cfg(target_os = "macos")]
+        let vpc_config = self.pending_vpc_configs.write().await.remove(id);
+        #[cfg(not(target_os = "macos"))]
+        let vpc_config: Option<VmNetworkConfig> = None;
+        let pid = self.boot_vm(id, &rootfs_dir, vpc_config.as_ref()).await?;
         let boot_elapsed = boot_start.elapsed();
 
         tracing::info!(

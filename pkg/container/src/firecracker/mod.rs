@@ -672,6 +672,10 @@ impl FirecrackerBackend {
 
 #[async_trait]
 impl RuntimeBackend for FirecrackerBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn name(&self) -> &str {
         "vm"
     }

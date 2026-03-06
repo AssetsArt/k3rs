@@ -3,6 +3,8 @@ use crate::connectivity::ConnectivityManager;
 use crate::store::AgentStore;
 use crate::vpc_client::VpcClient;
 use chrono::Utc;
+#[cfg(target_os = "macos")]
+use pkg_network::switch::MacSwitch;
 use pkg_container::ContainerRuntime;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -19,6 +21,7 @@ pub fn start(
     connectivity: Arc<ConnectivityManager>,
     store: AgentStore,
     vpc_client: Arc<VpcClient>,
+    #[cfg(target_os = "macos")] mac_switch: Option<Arc<MacSwitch>>,
 ) {
     let in_flight: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
@@ -72,8 +75,17 @@ pub fn start(
 
                     // --- Health monitoring: check Running pods ---
                     if let Some(ref runtime) = runtime {
-                        check_running_pods(&pods, runtime, &client, &server, &token, &vpc_client)
-                            .await;
+                        check_running_pods(
+                            &pods,
+                            runtime,
+                            &client,
+                            &server,
+                            &token,
+                            &vpc_client,
+                            #[cfg(target_os = "macos")]
+                            &mac_switch,
+                        )
+                        .await;
                     }
 
                     // --- Schedule new pods ---
@@ -85,6 +97,8 @@ pub fn start(
                         &token,
                         &in_flight,
                         &vpc_client,
+                        #[cfg(target_os = "macos")]
+                        &mac_switch,
                     );
                 }
                 Err(e) => {
@@ -103,6 +117,7 @@ async fn check_running_pods(
     server: &str,
     token: &str,
     vpc_client: &Arc<VpcClient>,
+    #[cfg(target_os = "macos")] mac_switch: &Option<Arc<MacSwitch>>,
 ) {
     for pod in pods
         .iter()
@@ -111,6 +126,12 @@ async fn check_running_pods(
         match runtime.container_state(&pod.id).await {
             Ok(state) if state.status == "stopped" || state.status == "exited" => {
                 warn!("[pod:{}] Container stopped unexpectedly", pod.name);
+
+                // Unregister VM from userspace switch (macOS only)
+                #[cfg(target_os = "macos")]
+                if let Some(switch) = mac_switch {
+                    switch.remove_vm(&pod.id).await;
+                }
 
                 // Detach eBPF classifiers (best-effort)
                 #[cfg(target_os = "linux")]
@@ -160,6 +181,12 @@ async fn check_running_pods(
             }
             Err(_) => {
                 warn!("[pod:{}] Container not found in runtime", pod.name);
+
+                // Unregister VM from userspace switch (macOS only)
+                #[cfg(target_os = "macos")]
+                if let Some(switch) = mac_switch {
+                    switch.remove_vm(&pod.id).await;
+                }
 
                 // Detach eBPF classifiers (best-effort)
                 #[cfg(target_os = "linux")]
@@ -215,6 +242,7 @@ fn schedule_new_pods(
     token: &str,
     in_flight: &std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     vpc_client: &Arc<VpcClient>,
+    #[cfg(target_os = "macos")] mac_switch: &Option<Arc<MacSwitch>>,
 ) {
     for pod in pods {
         if pod.status == pkg_types::pod::PodStatus::Scheduled
@@ -258,6 +286,8 @@ fn schedule_new_pods(
             let pod_in_flight = in_flight.clone();
             let pod_vpc = vpc_client.clone();
             let pod = pod.clone();
+            #[cfg(target_os = "macos")]
+            let pod_switch = mac_switch.clone();
 
             {
                 let mut set = pod_in_flight.lock().unwrap();
@@ -276,6 +306,8 @@ fn schedule_new_pods(
                     pod_token,
                     pod_in_flight,
                     pod_vpc,
+                    #[cfg(target_os = "macos")]
+                    pod_switch,
                 )
                 .await;
             });
@@ -292,6 +324,7 @@ async fn run_pod_lifecycle(
     token: String,
     in_flight: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     vpc_client: Arc<VpcClient>,
+    #[cfg(target_os = "macos")] mac_switch: Option<Arc<MacSwitch>>,
 ) {
     let status_url = format!(
         "{}/api/v1/namespaces/{}/pods/{}/status",
@@ -423,6 +456,24 @@ async fn run_pod_lifecycle(
         }
     }
 
+    // 2d. Set VPC config on VM backend before start (macOS only)
+    // This creates a socketpair and passes VPC params to the VMM process.
+    #[cfg(target_os = "macos")]
+    if runtime.backend_name_for(&pod.id) == "vm"
+        && let Some((ref guest_ipv4, ref ghost_ipv6, vpc_id, ref vpc_cidr)) = vpc_alloc
+    {
+        let vpc_config = pkg_container::virt::VmNetworkConfig {
+            guest_ipv4: guest_ipv4.clone(),
+            guest_ipv6: ghost_ipv6.clone(),
+            vpc_id,
+            vpc_cidr: vpc_cidr.clone(),
+            gw_mac: "02:fc:00:00:00:01".to_string(),
+            platform_prefix: pkg_constants::network::PLATFORM_PREFIX,
+            cluster_id: 0, // TODO: get from cluster registration
+        };
+        runtime.set_vm_network_config(&pod.id, vpc_config).await;
+    }
+
     // 3. Start Container
     info!("[pod:{}] Starting container: {}", pod.name, pod.id);
     if let Err(e) = runtime.start_container(&pod.id).await {
@@ -453,6 +504,24 @@ async fn run_pod_lifecycle(
                 "[pod:{}] eBPF attach_tap failed: {} (continuing without VPC enforcement)",
                 pod.name, e
             );
+        }
+    }
+
+    // 3c. Register VM with userspace switch (macOS only)
+    #[cfg(target_os = "macos")]
+    if runtime.backend_name_for(&pod.id) == "vm"
+        && let Some((ref guest_ipv4, _, vpc_id, _)) = vpc_alloc
+        && let Some(switch) = &mac_switch
+    {
+        if let Some(socket) = runtime.take_vm_net_socket(&pod.id).await {
+            if let Ok(ip) = guest_ipv4.parse() {
+                if let Err(e) = switch.add_vm(pod.id.clone(), socket, ip, vpc_id).await {
+                    warn!(
+                        "[pod:{}] Failed to register VM with switch: {}",
+                        pod.name, e
+                    );
+                }
+            }
         }
     }
 

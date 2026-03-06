@@ -234,6 +234,9 @@ fn configure_vpc_networking(
     add_ipv6_addr("eth0", ipv6)?;
     log_info!("eth0: IPv6 address set to {}", ipv6);
 
+    // 6. Write /etc/resolv.conf to use the switch DNS proxy (169.254.0.53)
+    write_resolv_conf(&["169.254.0.53".to_string()]);
+
     Ok(())
 }
 

@@ -7,7 +7,9 @@ use crate::state::ContainerStateInfo;
 /// Pluggable runtime backend trait.
 /// Implementations: Virtualization (macOS), OCI (youki/crun on Linux).
 #[async_trait]
-pub trait RuntimeBackend: Send + Sync {
+pub trait RuntimeBackend: Send + Sync + 'static {
+    /// Downcast to concrete type (for accessing backend-specific methods).
+    fn as_any(&self) -> &dyn std::any::Any;
     /// Human-readable name of this runtime backend.
     fn name(&self) -> &str;
 
@@ -233,6 +235,10 @@ impl OciBackend {
 
 #[async_trait]
 impl RuntimeBackend for OciBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn name(&self) -> &str {
         &self.runtime_name
     }

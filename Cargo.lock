@@ -5816,6 +5816,7 @@ name = "pkg-network"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "pkg-constants",
  "pkg-types",
  "serde",

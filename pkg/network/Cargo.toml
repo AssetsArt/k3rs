@@ -11,3 +11,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 pkg-types = { path = "../types" }
 pkg-constants = { workspace = true }
+libc = "*"

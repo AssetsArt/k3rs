@@ -139,6 +139,15 @@ pub fn start_controller_loops(
                 store.clone(),
             );
 
+            // macOS: create userspace switch for VM VPC networking
+            #[cfg(target_os = "macos")]
+            let mac_switch: Option<Arc<pkg_network::switch::MacSwitch>> = {
+                let switch = Arc::new(pkg_network::switch::MacSwitch::new(53));
+                switch.clone().start();
+                info!("macOS userspace switch started");
+                Some(switch)
+            };
+
             pod_sync::start(
                 runtime,
                 client.clone(),
@@ -149,6 +158,8 @@ pub fn start_controller_loops(
                 connectivity.clone(),
                 store.clone(),
                 vpc_client.clone(),
+                #[cfg(target_os = "macos")]
+                mac_switch,
             );
 
             route_sync::start(
