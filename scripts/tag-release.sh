@@ -1,13 +1,15 @@
 #!/bin/bash
-# Create and push a release or kernel tag.
+# Create and push a release, kernel, or initrd tag.
 #
 # Usage:
 #   ./scripts/tag-release.sh 0.1.0              # creates and pushes v0.1.0
 #   ./scripts/tag-release.sh 0.1.0 --kernel     # creates and pushes kernel-v0.1.0
+#   ./scripts/tag-release.sh 0.1.0 --initrd     # creates and pushes initrd-v0.1.0
 #   ./scripts/tag-release.sh 0.1.0 --dry-run    # show what would happen
 #
 # Options:
 #   --kernel    Use kernel-v prefix instead of v
+#   --initrd    Use initrd-v prefix instead of v
 #   --dry-run   Print commands without executing
 #   --force     Overwrite existing tag
 
@@ -21,6 +23,7 @@ FORCE=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --kernel)  PREFIX="kernel-v"; shift ;;
+        --initrd)  PREFIX="initrd-v"; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --force)   FORCE=true; shift ;;
         --help|-h) sed -n '2,12p' "$0" | sed 's/^# \?//'; exit 0 ;;

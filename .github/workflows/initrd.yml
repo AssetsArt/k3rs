@@ -1,0 +1,122 @@
+name: Initrd
+
+on:
+  push:
+    tags:
+      - "initrd-v*"
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "Target architecture"
+        type: choice
+        options:
+          - both
+          - arm64
+          - amd64
+        default: both
+
+jobs:
+  build-initrd:
+    name: Build Initrd (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, amd64]
+        include:
+          - arch: arm64
+            rust_target: aarch64-unknown-linux-musl
+            cross_packages: gcc-aarch64-linux-gnu
+          - arch: amd64
+            rust_target: x86_64-unknown-linux-musl
+            cross_packages: ""
+        exclude:
+          - arch: ${{ inputs.arch == 'amd64' && 'arm64' || 'none' }}
+          - arch: ${{ inputs.arch == 'arm64' && 'amd64' || 'none' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cpio musl-tools \
+            ${{ matrix.cross_packages }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install Rust (nightly, for eBPF in k3rs-init)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install cargo-zigbuild
+        run: |
+          pip3 install ziglang
+          cargo install cargo-zigbuild
+
+      - name: Build k3rs-init and create initrd
+        run: |
+          cargo +stable zigbuild --release --target ${{ matrix.rust_target }} -p k3rs-init
+
+          INITRD_ROOT="/tmp/initrd-$$"
+          mkdir -p "$INITRD_ROOT"/{sbin,dev,proc,sys,tmp,run,mnt/rootfs,etc}
+          cp "target/${{ matrix.rust_target }}/release/k3rs-init" "$INITRD_ROOT/sbin/k3rs-init"
+          chmod 755 "$INITRD_ROOT/sbin/k3rs-init"
+
+          cd "$INITRD_ROOT"
+          find . | cpio -o -H newc --quiet | gzip > /tmp/initrd.img
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p dist
+          cp /tmp/initrd.img dist/initrd.img
+
+          cd dist && sha256sum * > checksums.sha256
+
+          echo "Initrd: $(du -h initrd.img | cut -f1)"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: k3rs-initrd-${{ matrix.arch }}
+          path: dist/
+
+  release:
+    name: Create Initrd Release
+    needs: build-initrd
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          for dir in artifacts/*/; do
+            arch=$(basename "$dir" | sed 's/k3rs-initrd-//')
+            for file in "$dir"*; do
+              [ -f "$file" ] || continue
+              name=$(basename "$file")
+              [ "$name" = "checksums.sha256" ] && continue
+              mv "$file" "release-assets/${name}-${arch}"
+            done
+          done
+
+          cd release-assets && sha256sum * > checksums.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

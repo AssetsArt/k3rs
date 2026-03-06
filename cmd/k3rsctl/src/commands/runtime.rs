@@ -43,8 +43,12 @@ pub async fn handle(
     Ok(())
 }
 
-/// Download vmlinux + initrd.img from the latest kernel-v* release on GitHub.
-async fn kernel_download(client: &reqwest::Client, data_dir: Option<&str>) -> anyhow::Result<()> {
+/// Download vmlinux + initrd.img from their respective GitHub releases.
+///
+/// Kernel assets are published as separate releases:
+///   - `kernel-v*` releases contain `vmlinux-{arch}`
+///   - `initrd-v*` releases contain `initrd.img-{arch}`
+async fn kernel_download(_client: &reqwest::Client, data_dir: Option<&str>) -> anyhow::Result<()> {
     let dest_dir = data_dir.unwrap_or(pkg_constants::paths::DATA_DIR);
     let repo = pkg_constants::network::GITHUB_REPO;
     let arch = match std::env::consts::ARCH {
@@ -53,17 +57,13 @@ async fn kernel_download(client: &reqwest::Client, data_dir: Option<&str>) -> an
         other => other,
     };
 
-    // 1. Find the latest kernel-v* release tag
-    println!("Fetching latest kernel release from github.com/{}...", repo);
+    println!("Fetching releases from github.com/{}...", repo);
 
     // Use a plain client without the k3rs auth token for GitHub API calls.
     let github = reqwest::Client::new();
 
     let resp = github
-        .get(format!(
-            "https://api.github.com/repos/{}/releases",
-            repo
-        ))
+        .get(format!("https://api.github.com/repos/{}/releases", repo))
         .header("User-Agent", "k3rsctl")
         .send()
         .await?;
@@ -80,43 +80,45 @@ async fn kernel_download(client: &reqwest::Client, data_dir: Option<&str>) -> an
 
     let releases: Vec<serde_json::Value> = resp.json().await?;
 
-    let kernel_release = releases
-        .iter()
-        .find(|r| {
-            r["tag_name"]
-                .as_str()
-                .is_some_and(|t| t.starts_with("kernel-v"))
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No kernel-v* release found in github.com/{}.\n\
-                 Build from source instead: ./scripts/build-kernel.sh",
-                repo
-            )
-        })?;
-
-    let tag = kernel_release["tag_name"].as_str().unwrap();
-    println!("Found release: {}", tag);
-
-    // 2. Create destination directory
+    // Create destination directory
     std::fs::create_dir_all(dest_dir)?;
 
-    // 3. Download vmlinux
+    // 1. Download vmlinux from the latest kernel-v* release
+    let kernel_tag = find_release_tag(&releases, "kernel-v").ok_or_else(|| {
+        anyhow::anyhow!(
+            "No kernel-v* release found in github.com/{}.\n\
+                 Build from source instead: ./scripts/build-kernel.sh",
+            repo
+        )
+    })?;
+
+    println!("Found kernel release: {}", kernel_tag);
+
     let vmlinux_name = format!("vmlinux-{}", arch);
     let vmlinux_url = format!(
         "https://github.com/{}/releases/download/{}/{}",
-        repo, tag, vmlinux_name
+        repo, kernel_tag, vmlinux_name
     );
     let vmlinux_dest = format!("{}/{}", dest_dir, pkg_constants::vm::KERNEL_FILENAME);
 
     println!("Downloading {} -> {}...", vmlinux_name, vmlinux_dest);
     download_file(&github, &vmlinux_url, &vmlinux_dest).await?;
 
-    // 4. Download initrd.img
+    // 2. Download initrd.img from the latest initrd-v* release
+    let initrd_tag = find_release_tag(&releases, "initrd-v").ok_or_else(|| {
+        anyhow::anyhow!(
+            "No initrd-v* release found in github.com/{}.\n\
+                 Build from source instead: ./scripts/build-kernel.sh",
+            repo
+        )
+    })?;
+
+    println!("Found initrd release: {}", initrd_tag);
+
     let initrd_name = format!("initrd.img-{}", arch);
     let initrd_url = format!(
         "https://github.com/{}/releases/download/{}/{}",
-        repo, tag, initrd_name
+        repo, initrd_tag, initrd_name
     );
     let initrd_dest = format!("{}/{}", dest_dir, pkg_constants::vm::INITRD_FILENAME);
 
@@ -125,18 +127,32 @@ async fn kernel_download(client: &reqwest::Client, data_dir: Option<&str>) -> an
 
     println!();
     println!("Kernel assets installed to {}:", dest_dir);
-    println!("  {} ({})", pkg_constants::vm::KERNEL_FILENAME, file_size(&vmlinux_dest));
-    println!("  {} ({})", pkg_constants::vm::INITRD_FILENAME, file_size(&initrd_dest));
+    println!(
+        "  {} ({})",
+        pkg_constants::vm::KERNEL_FILENAME,
+        file_size(&vmlinux_dest)
+    );
+    println!(
+        "  {} ({})",
+        pkg_constants::vm::INITRD_FILENAME,
+        file_size(&initrd_dest)
+    );
 
     Ok(())
 }
 
+/// Find the latest release tag matching a given prefix.
+fn find_release_tag(releases: &[serde_json::Value], prefix: &str) -> Option<String> {
+    releases.iter().find_map(|r| {
+        r["tag_name"]
+            .as_str()
+            .filter(|t| t.starts_with(prefix))
+            .map(|t| t.to_string())
+    })
+}
+
 /// Download a file from a URL, following redirects.
-async fn download_file(
-    client: &reqwest::Client,
-    url: &str,
-    dest: &str,
-) -> anyhow::Result<()> {
+async fn download_file(client: &reqwest::Client, url: &str, dest: &str) -> anyhow::Result<()> {
     let resp = client
         .get(url)
         .header("User-Agent", "k3rsctl")

@@ -42,11 +42,15 @@ pub async fn handle(client: &reqwest::Client, _base: &str, fix: bool) -> anyhow:
             need_tools = true;
             match *tool {
                 "setcap" | "getcap" => {
-                    warn(&format!("'{tool}' not found — install libcap2-bin (Debian/Ubuntu) or libcap (Fedora)"));
+                    warn(&format!(
+                        "'{tool}' not found — install libcap2-bin (Debian/Ubuntu) or libcap (Fedora)"
+                    ));
                     warns += 1;
                 }
                 "wg" => {
-                    warn(&format!("'{tool}' not found — cross-node traffic disabled without wireguard-tools"));
+                    warn(&format!(
+                        "'{tool}' not found — cross-node traffic disabled without wireguard-tools"
+                    ));
                     warns += 1;
                 }
                 _ => {
@@ -224,10 +228,7 @@ pub async fn handle(client: &reqwest::Client, _base: &str, fix: bool) -> anyhow:
                     .filter(|cap| !has_cap(&debug_bin, cap))
                     .copied()
                     .collect();
-                warn(&format!(
-                    "{debug_bin}: missing {}",
-                    missing.join(", ")
-                ));
+                warn(&format!("{debug_bin}: missing {}", missing.join(", ")));
                 warns += 1;
                 need_caps = true;
             }
@@ -245,7 +246,9 @@ pub async fn handle(client: &reqwest::Client, _base: &str, fix: bool) -> anyhow:
 
     if has_fixable && !fix {
         println!();
-        println!("  Run {BOLD}k3rsctl doctor --fix{RESET} to auto-fix capabilities and download kernel.");
+        println!(
+            "  Run {BOLD}k3rsctl doctor --fix{RESET} to auto-fix capabilities and download kernel."
+        );
     }
 
     if need_tools {
@@ -258,10 +261,18 @@ pub async fn handle(client: &reqwest::Client, _base: &str, fix: bool) -> anyhow:
             .iter()
             .map(|t| match *t {
                 "ip" | "nsenter" => {
-                    if has_apt { "iproute2" } else { "iproute" }
+                    if has_apt {
+                        "iproute2"
+                    } else {
+                        "iproute"
+                    }
                 }
                 "setcap" | "getcap" => {
-                    if has_apt { "libcap2-bin" } else { "libcap" }
+                    if has_apt {
+                        "libcap2-bin"
+                    } else {
+                        "libcap"
+                    }
                 }
                 "wg" => "wireguard-tools",
                 other => other,
@@ -321,13 +332,19 @@ fn has_all_caps(bin: &str, required: &[&str]) -> bool {
     match output {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout).to_lowercase();
-            required.iter().all(|cap| stdout.contains(&cap.to_lowercase()))
+            required
+                .iter()
+                .all(|cap| stdout.contains(&cap.to_lowercase()))
         }
         _ => false,
     }
 }
 
-/// Download vmlinux + initrd.img from the latest kernel-v* GitHub release.
+/// Download vmlinux + initrd.img from their respective GitHub releases.
+///
+/// Kernel assets are published as separate releases:
+///   - `kernel-v*` releases contain `vmlinux-{arch}`
+///   - `initrd-v*` releases contain `initrd.img-{arch}`
 async fn download_kernel(_client: &reqwest::Client, dest_dir: &str) -> anyhow::Result<()> {
     let repo = pkg_constants::network::GITHUB_REPO;
     let arch = match std::env::consts::ARCH {
@@ -354,46 +371,77 @@ async fn download_kernel(_client: &reqwest::Client, dest_dir: &str) -> anyhow::R
 
     let releases: Vec<serde_json::Value> = resp.json().await?;
 
-    let tag = releases
-        .iter()
-        .find_map(|r| {
-            r["tag_name"]
-                .as_str()
-                .filter(|t| t.starts_with("kernel-v"))
-                .map(|t| t.to_string())
-        })
-        .ok_or_else(|| anyhow::anyhow!("No kernel-v* release found"))?;
-
     std::fs::create_dir_all(dest_dir)?;
 
-    for (asset, filename) in &[
-        (format!("vmlinux-{}", arch), pkg_constants::vm::KERNEL_FILENAME),
-        (format!("initrd.img-{}", arch), pkg_constants::vm::INITRD_FILENAME),
-    ] {
-        let url = format!(
-            "https://github.com/{}/releases/download/{}/{}",
-            repo, tag, asset
-        );
-        let dest = format!("{}/{}", dest_dir, filename);
+    // Download vmlinux from kernel-v* release
+    let kernel_tag = find_release_tag(&releases, "kernel-v")
+        .ok_or_else(|| anyhow::anyhow!("No kernel-v* release found"))?;
 
-        let resp = github
-            .get(&url)
-            .header("User-Agent", "k3rsctl")
-            .send()
-            .await?;
+    download_asset(
+        &github,
+        repo,
+        &kernel_tag,
+        &format!("vmlinux-{}", arch),
+        &format!("{}/{}", dest_dir, pkg_constants::vm::KERNEL_FILENAME),
+    )
+    .await?;
 
-        if !resp.status().is_success() {
-            anyhow::bail!("HTTP {} for {}", resp.status(), url);
-        }
+    // Download initrd.img from initrd-v* release
+    let initrd_tag = find_release_tag(&releases, "initrd-v")
+        .ok_or_else(|| anyhow::anyhow!("No initrd-v* release found"))?;
 
-        let bytes = resp.bytes().await?;
-        std::fs::write(&dest, &bytes)?;
+    download_asset(
+        &github,
+        repo,
+        &initrd_tag,
+        &format!("initrd.img-{}", arch),
+        &format!("{}/{}", dest_dir, pkg_constants::vm::INITRD_FILENAME),
+    )
+    .await?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
-        }
+    Ok(())
+}
+
+/// Find the latest release tag matching a given prefix.
+fn find_release_tag(releases: &[serde_json::Value], prefix: &str) -> Option<String> {
+    releases.iter().find_map(|r| {
+        r["tag_name"]
+            .as_str()
+            .filter(|t| t.starts_with(prefix))
+            .map(|t| t.to_string())
+    })
+}
+
+/// Download a single asset from a GitHub release.
+async fn download_asset(
+    client: &reqwest::Client,
+    repo: &str,
+    tag: &str,
+    asset: &str,
+    dest: &str,
+) -> anyhow::Result<()> {
+    let url = format!(
+        "https://github.com/{}/releases/download/{}/{}",
+        repo, tag, asset
+    );
+
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "k3rsctl")
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("HTTP {} for {}", resp.status(), url);
+    }
+
+    let bytes = resp.bytes().await?;
+    std::fs::write(dest, &bytes)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))?;
     }
 
     Ok(())
