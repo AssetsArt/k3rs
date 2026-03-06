@@ -287,6 +287,13 @@ impl VirtualizationBackend {
             .with_context(|| format!("write config.json to {}", config_dest.display()))?;
 
         tracing::debug!("[virt] config.json written to {}", config_dest.display());
+
+        // ── 4. Write /etc/resolv.conf (DNS fallback) ──────────────────────
+        let resolv_dest = rootfs.join("etc/resolv.conf");
+        tokio::fs::write(&resolv_dest, "nameserver 8.8.8.8\nnameserver 8.8.4.4\n")
+            .await
+            .ok();
+
         Ok(())
     }
 

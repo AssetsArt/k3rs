@@ -35,6 +35,7 @@ mod oci_spec;
 #[macro_use]
 mod logging;
 mod container;
+mod dhcp;
 mod ebpf;
 mod filesystem;
 mod networking;

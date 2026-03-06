@@ -95,11 +95,92 @@ pub fn setup_networking() -> Result<(), Box<dyn std::error::Error>> {
         if let Err(e) = configure_vpc_networking(ipv4, ipv6, vpc_cidr, gw_mac) {
             log_error!("failed to configure VPC networking: {}", e);
         }
+    } else if has_kernel_ip_param() {
+        // Kernel ip= parameter handles networking (Firecracker legacy path)
+        log_info!("kernel ip= parameter present — skipping DHCP");
     } else {
-        log_info!("no VPC boot params — skipping VPC network config");
+        // No VPC params, no kernel ip= → use DHCP (macOS Virtualization.framework NAT)
+        log_info!("no VPC boot params — attempting DHCP on eth0");
+        match crate::dhcp::do_dhcp("eth0") {
+            Ok(lease) => {
+                // Apply the lease to eth0
+                if let Err(e) = apply_dhcp_lease(&lease) {
+                    log_error!("failed to apply DHCP lease: {}", e);
+                }
+            }
+            Err(e) => {
+                log_error!("DHCP failed: {} — networking may be unavailable", e);
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Check if the kernel ip= parameter was given on the cmdline.
+#[cfg(target_os = "linux")]
+fn has_kernel_ip_param() -> bool {
+    std::fs::read_to_string("/proc/cmdline")
+        .map(|s| s.split_whitespace().any(|tok| tok.starts_with("ip=")))
+        .unwrap_or(false)
+}
+
+/// Apply a DHCP lease: set IP + netmask, add default route, write /etc/resolv.conf.
+#[cfg(target_os = "linux")]
+fn apply_dhcp_lease(lease: &crate::dhcp::DhcpLease) -> Result<(), Box<dyn std::error::Error>> {
+    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    if sock < 0 {
+        return Err("socket() failed".into());
+    }
+
+    // 1. Set IPv4 address
+    set_ipv4_addr(sock, "eth0", &lease.ip)?;
+    log_info!("eth0: IP set to {}", lease.ip);
+
+    // 2. Set netmask
+    let mask = if lease.prefix_len == 0 {
+        0u32
+    } else {
+        !0u32 << (32 - lease.prefix_len)
+    };
+    set_ipv4_netmask(sock, "eth0", mask)?;
+    log_info!("eth0: netmask set to /{}", lease.prefix_len);
+
+    // 3. Add default route via gateway
+    if let Some(ref gw) = lease.gateway {
+        add_default_route(sock, gw)?;
+        log_info!("eth0: default route via {}", gw);
+    }
+
+    unsafe { libc::close(sock) };
+
+    // 4. Write /etc/resolv.conf
+    write_resolv_conf(&lease.dns_servers);
+
+    Ok(())
+}
+
+/// Write /etc/resolv.conf with the given DNS servers.
+/// Falls back to 8.8.8.8 + 8.8.4.4 if no servers provided.
+#[cfg(target_os = "linux")]
+fn write_resolv_conf(dns_servers: &[String]) {
+    let servers = if dns_servers.is_empty() {
+        vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()]
+    } else {
+        dns_servers.to_vec()
+    };
+
+    let content: String = servers
+        .iter()
+        .map(|s| format!("nameserver {}", s))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+
+    match std::fs::write("/etc/resolv.conf", &content) {
+        Ok(_) => log_info!("wrote /etc/resolv.conf: {:?}", servers),
+        Err(e) => log_error!("failed to write /etc/resolv.conf: {}", e),
+    }
 }
 
 /// Configure eth0 with VPC IPv4/IPv6 addresses, default route, and static ARP.
