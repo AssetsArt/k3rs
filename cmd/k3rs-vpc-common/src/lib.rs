@@ -58,6 +58,27 @@ pub struct PeeringValue {
     pub allowed: u32,
 }
 
+// ─── Endpoint Map Types (redirect_peer routing) ─────────────────
+
+/// Key for the ENDPOINTS BPF hash map.
+/// Maps a Ghost IPv6 address to the host-side netkit ifindex for `bpf_redirect_peer` delivery.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EndpointKey {
+    /// Ghost IPv6 address (16 bytes, network byte order on wire).
+    pub ghost_ipv6: [u8; 16],
+}
+
+/// Value for the ENDPOINTS BPF hash map.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EndpointValue {
+    /// ifindex of the host-side netkit device (`nk-<pod>`).
+    /// `bpf_redirect_peer(ifindex, 0)` delivers to the peer (pod's eth0).
+    pub nk_ifindex: u32,
+    pub _pad: u32,
+}
+
 // ─── SIIT BPF Map Types (remaining) ─────────────────────────────
 
 // ─── NAT64 BPF Map Types ────────────────────────────────────────
@@ -93,6 +114,10 @@ pub struct Nat64Value {
 }
 
 /// Configuration for the NAT64 eBPF programs (BPF array, index 0).
+///
+/// Return traffic (nat64_ingress) uses the ENDPOINTS map to find the
+/// destination pod's netkit ifindex and calls `bpf_redirect_peer` directly,
+/// so no bridge interface index is needed.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Nat64Config {
@@ -100,7 +125,5 @@ pub struct Nat64Config {
     pub node_ipv4: u32,
     /// Physical/external interface index (for redirect after IPv6→IPv4).
     pub phys_ifindex: u32,
-    /// k3rs0 bridge interface index (for redirect after IPv4→IPv6).
-    pub bridge_ifindex: u32,
-    pub _pad: u32,
+    pub _pad: [u32; 2],
 }

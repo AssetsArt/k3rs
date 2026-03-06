@@ -2,6 +2,7 @@
 //!
 //! **Host-side classifiers** — attached to pod TAP/netkit host interfaces:
 //!   IPv6 (tc_egress_v6, tc_ingress_v6): VPC isolation via Ghost IPv6 header (VPC ID at bytes 10-11).
+//!   tc_ingress_v6 also performs `bpf_redirect_peer` for same-node pod-to-pod delivery via ENDPOINTS map.
 //!   No IPv4 classifiers — all pod-to-pod traffic is IPv6 after SIIT translation.
 //!
 //! **Pod/VM-side translators** — attached inside pod netns (eth0) or on TAP ingress:
@@ -9,9 +10,9 @@
 //!   siit_out:  IPv6 ingress → IPv4 (Ghost IPv6 arrives, delivered as IPv4 to app).
 //!   tap_guard: TAP ingress anti-spoofing (VM → host), IPv6 only.
 //!
-//! **NAT64** — attached to k3rs0 bridge + physical interface:
+//! **NAT64** — attached to k3rs0 dummy device + physical interface:
 //!   nat64_egress: IPv6 `64:ff9b::x` → IPv4, SNAT to node IPv4, redirect to phys.
-//!   nat64_ingress: IPv4 return → IPv6, reverse SNAT, redirect to bridge.
+//!   nat64_ingress: IPv4 return → IPv6, reverse SNAT, redirect_peer to pod eth0.
 
 #![no_std]
 #![no_main]
@@ -24,10 +25,17 @@ use aya_ebpf::{
 };
 use aya_ebpf_bindings::helpers::bpf_redirect;
 use k3rs_vpc_common::{
-    GHOST_PREFIX, NAT64_PREFIX_U32, Nat64Config, Nat64Key, Nat64Value, PeeringKey, PeeringValue,
-    VpcCidrKey, VpcCidrValue,
+    EndpointKey, EndpointValue, GHOST_PREFIX, NAT64_PREFIX_U32, Nat64Config, Nat64Key, Nat64Value,
+    PeeringKey, PeeringValue, VpcCidrKey, VpcCidrValue,
 };
 use network_types::eth::EthHdr;
+
+// bpf_redirect_peer (helper #155) — delivers packet to the peer side of a
+// netkit/veth device, bypassing the host-side interface entirely.
+// Available since Linux 5.13 (veth) / 6.7 (netkit).
+extern "C" {
+    fn bpf_redirect_peer(ifindex: u32, flags: u64) -> core::ffi::c_long;
+}
 
 const TC_ACT_SHOT: i32 = 2;
 const ETH_P_IP: u16 = 0x0800;
@@ -65,6 +73,12 @@ static VPC_CIDRS: HashMap<VpcCidrKey, VpcCidrValue> = HashMap::pinned(256, 0);
 #[map]
 static PEERINGS: HashMap<PeeringKey, PeeringValue> = HashMap::pinned(1024, 0);
 
+/// BPF HashMap: Ghost IPv6 → host-side netkit ifindex (pinned, shared).
+/// Used by `tc_ingress_v6` for same-node pod-to-pod `bpf_redirect_peer` delivery,
+/// and by `nat64_ingress` for return-path delivery directly to pod eth0.
+#[map]
+static ENDPOINTS: HashMap<EndpointKey, EndpointValue> = HashMap::pinned(4096, 0);
+
 // ─── IPv6 Host-side Isolation Classifiers ───────────────────────
 
 /// Check if 4 bytes at `offset` in the packet match the Ghost IPv6 prefix.
@@ -85,6 +99,22 @@ fn is_ghost_prefix(ctx: &TcContext, addr_offset: usize) -> Result<bool, ()> {
 fn extract_vpc_id(ctx: &TcContext, addr_offset: usize) -> Result<u16, ()> {
     let raw: u16 = ctx.load(addr_offset + 10).map_err(|_| ())?;
     Ok(u16::from_be(raw))
+}
+
+/// Read 16 bytes of an IPv6 address from the packet at the given offset.
+/// Returns the raw wire bytes suitable for BPF map lookups (e.g. ENDPOINTS).
+#[inline(always)]
+fn read_ipv6_addr(ctx: &TcContext, offset: usize) -> Result<[u8; 16], ()> {
+    let w0: u32 = ctx.load(offset).map_err(|_| ())?;
+    let w1: u32 = ctx.load(offset + 4).map_err(|_| ())?;
+    let w2: u32 = ctx.load(offset + 8).map_err(|_| ())?;
+    let w3: u32 = ctx.load(offset + 12).map_err(|_| ())?;
+    let mut addr = [0u8; 16];
+    addr[0..4].copy_from_slice(&w0.to_ne_bytes());
+    addr[4..8].copy_from_slice(&w1.to_ne_bytes());
+    addr[8..12].copy_from_slice(&w2.to_ne_bytes());
+    addr[12..16].copy_from_slice(&w3.to_ne_bytes());
+    Ok(addr)
 }
 
 /// Shared IPv6 VPC enforcement logic used by both egress and ingress.
@@ -122,6 +152,11 @@ fn enforce_v6(ctx: &TcContext) -> Result<i32, ()> {
     let src_vpc_id = extract_vpc_id(ctx, IPV6_SRC_ADDR_OFF)?;
     let dst_vpc_id = extract_vpc_id(ctx, IPV6_DST_ADDR_OFF)?;
 
+    // VPC 0 = infrastructure (DNS VIP, etc.) — always allow regardless of peering
+    if src_vpc_id == 0 || dst_vpc_id == 0 {
+        return Ok(TC_ACT_OK);
+    }
+
     // Same VPC → allow
     if src_vpc_id == dst_vpc_id {
         return Ok(TC_ACT_OK);
@@ -156,13 +191,47 @@ pub fn tc_egress_v6(ctx: TcContext) -> i32 {
     }
 }
 
-/// TC ingress classifier for IPv6 — mirror of egress v6 logic for inbound traffic.
+/// TC ingress classifier for IPv6 on host-side netkit.
+///
+/// Packets arrive here from the pod (pod eth0 → nk-host ingress).
+/// 1. VPC isolation check (shared enforce_v6 logic).
+/// 2. Same-node destination: ENDPOINTS lookup → `bpf_redirect_peer` (direct delivery to pod eth0).
+/// 3. Cross-node or non-Ghost destination: `TC_ACT_OK` (kernel routing → WireGuard or NAT64).
 #[classifier]
 pub fn tc_ingress_v6(ctx: TcContext) -> i32 {
-    match enforce_v6(&ctx) {
+    match try_tc_ingress_v6(&ctx) {
         Ok(action) => action,
         Err(_) => TC_ACT_OK, // fail-open
     }
+}
+
+fn try_tc_ingress_v6(ctx: &TcContext) -> Result<i32, ()> {
+    // 1. VPC isolation check
+    let vpc_result = enforce_v6(ctx)?;
+    if vpc_result != TC_ACT_OK {
+        return Ok(vpc_result);
+    }
+
+    // 2. Only redirect Ghost IPv6 traffic — non-Ghost (e.g. 64:ff9b::) goes to kernel routing
+    let etype: u16 = ctx.load(12).map_err(|_| ())?;
+    if etype != ETH_P_IPV6.to_be() {
+        return Ok(TC_ACT_OK);
+    }
+    if !is_ghost_prefix(ctx, IPV6_DST_ADDR_OFF)? {
+        return Ok(TC_ACT_OK);
+    }
+
+    // 3. Read dst Ghost IPv6 address for ENDPOINTS lookup
+    let dst_ipv6 = read_ipv6_addr(ctx, IPV6_DST_ADDR_OFF)?;
+
+    // 4. Same-node delivery via bpf_redirect_peer (bypasses host-side tc_egress_v6)
+    let ep_key = EndpointKey { ghost_ipv6: dst_ipv6 };
+    if let Some(ep) = unsafe { ENDPOINTS.get(&ep_key) } {
+        return Ok(unsafe { bpf_redirect_peer(ep.nk_ifindex, 0) } as i32);
+    }
+
+    // 5. Not on this node — fall through to kernel routing (WireGuard)
+    Ok(TC_ACT_OK)
 }
 
 // ─── Ghost IPv6 Construction ────────────────────────────────────
@@ -461,7 +530,7 @@ fn try_tap_guard(ctx: &TcContext) -> Result<i32, ()> {
 #[map]
 static NAT64_CONNTRACK: LruHashMap<Nat64Key, Nat64Value> = LruHashMap::pinned(65536, 0);
 
-/// NAT64 configuration (index 0): node IPv4, physical/bridge interface indices (pinned, shared).
+/// NAT64 configuration (index 0): node IPv4, physical interface index (pinned, shared).
 #[map]
 static NAT64_CONFIG: Array<Nat64Config> = Array::pinned(1, 0);
 
@@ -570,9 +639,9 @@ fn csum_4to6(
     Ok(())
 }
 
-// ─── NAT64 Egress: IPv6 64:ff9b:: → IPv4 (on k3rs0 bridge) ──
+// ─── NAT64 Egress: IPv6 64:ff9b:: → IPv4 (on k3rs0 dummy device) ──
 
-/// TC classifier on k3rs0 bridge egress: translates outbound IPv6 NAT64 traffic
+/// TC classifier on k3rs0 dummy device egress: translates outbound IPv6 NAT64 traffic
 /// (dst in `64:ff9b::/96`) to IPv4 with SNAT to node IPv4, then redirects to
 /// the physical interface.
 #[classifier]
@@ -702,7 +771,7 @@ fn try_nat64_egress(ctx: &mut TcContext) -> Result<i32, ()> {
 
 /// TC classifier on physical interface ingress: translates return IPv4 traffic
 /// matching a NAT64 conntrack entry back to IPv6, restoring the pod's Ghost IPv6
-/// destination, then redirects to the k3rs0 bridge ingress.
+/// destination, then delivers directly to pod eth0 via `bpf_redirect_peer`.
 #[classifier]
 pub fn nat64_ingress(mut ctx: TcContext) -> i32 {
     match try_nat64_ingress(&mut ctx) {
@@ -740,7 +809,6 @@ fn try_nat64_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
     if dst_ip != cfg.node_ipv4 {
         return Ok(TC_ACT_OK);
     }
-    let bridge_ifindex = cfg.bridge_ifindex;
 
     // 4. Read L4 ports
     let l4 = EthHdr::LEN + IPV4_HDR_LEN;
@@ -802,8 +870,14 @@ fn try_nat64_ingress(ctx: &mut TcContext) -> Result<i32, ()> {
         };
     csum_4to6(ctx, csum_off, src_raw, dst_raw, s6, d6)?;
 
-    // 11. Redirect to k3rs0 bridge ingress
-    Ok(unsafe { bpf_redirect(bridge_ifindex, 1) } as i32) // BPF_F_INGRESS
+    // 11. Deliver directly to pod via redirect_peer (bypasses host-side tc_egress_v6)
+    let ep_key = EndpointKey { ghost_ipv6: pod_ipv6 };
+    if let Some(ep) = unsafe { ENDPOINTS.get(&ep_key) } {
+        Ok(unsafe { bpf_redirect_peer(ep.nk_ifindex, 0) } as i32)
+    } else {
+        // Fallback: kernel routing (shouldn't happen — conntrack implies local pod)
+        Ok(TC_ACT_OK)
+    }
 }
 
 #[panic_handler]

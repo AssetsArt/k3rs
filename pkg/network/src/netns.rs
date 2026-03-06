@@ -1,9 +1,10 @@
 //! Per-pod netkit setup — creates netkit pairs (L2 mode), assigns Ghost IPv6 +
 //! guest IPv4, and configures routes inside the container network namespace.
 //!
-//! Uses `ip` commands and `nsenter` to configure networking inside the
-//! container's network namespace, consistent with the existing Firecracker
-//! TAP setup pattern.
+//! Each pod gets a dedicated netkit pair. The host-side device gets a per-pod
+//! fe80::1/128 gateway and a host route for the pod's Ghost IPv6. Pod-to-pod
+//! traffic is forwarded by BPF `redirect_peer` in `tc_ingress_v6`, not through
+//! a bridge.
 
 use anyhow::Result;
 use pkg_constants::network::{
@@ -22,8 +23,6 @@ pub struct PodNetworkConfig {
     pub guest_ipv4: String,
     /// PID of the container's init process (from OCI create --pid-file).
     pub container_pid: u32,
-    /// Bridge to attach the host-side netkit to.
-    pub bridge_name: String,
 }
 
 impl PodNetworkConfig {
@@ -98,8 +97,8 @@ async fn nsenter_run_with_mount(pid: u32, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Create netkit pair (L2 mode), move peer into container netns, attach host
-/// side to bridge, and configure IPv6/IPv4 addresses + routes inside the container.
+/// Create netkit pair (L2 mode), move peer into container netns, configure
+/// host-side gateway + host route, and set up IPv6/IPv4 inside the container.
 pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     let nk_host = config.nk_host();
     let nk_peer = config.nk_peer();
@@ -124,9 +123,27 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     let pid_str = pid.to_string();
     run_ip(&["link", "set", &nk_peer, "netns", &pid_str]).await?;
 
-    // 3. Attach host side to bridge and bring up
-    run_ip(&["link", "set", &nk_host, "master", &config.bridge_name]).await?;
+    // 3. Bring up host-side netkit, assign gateway, add host route, enable forwarding
     run_ip(&["link", "set", &nk_host, "up"]).await?;
+
+    // Assign fe80::1/128 on host-side so the pod can resolve its default gateway via NDP
+    let gw_on_host = format!("{}/128", BRIDGE_GATEWAY_IPV6);
+    run_ip(&["-6", "addr", "add", &gw_on_host, "dev", &nk_host, "nodad"]).await?;
+
+    // Per-pod host route so kernel/WireGuard can deliver to this pod
+    let host_route = format!("{}/128", config.ghost_ipv6);
+    run_ip(&["-6", "route", "add", &host_route, "dev", &nk_host]).await?;
+
+    // Enable IPv6 forwarding on host-side netkit
+    let fwd_path = format!("/proc/sys/net/ipv6/conf/{}/forwarding", nk_host);
+    if let Err(e) = tokio::fs::write(&fwd_path, "1").await {
+        warn!(
+            "[netns:{}] Failed to enable IPv6 forwarding on {}: {}",
+            &config.pod_id[..8.min(config.pod_id.len())],
+            nk_host,
+            e
+        );
+    }
 
     // 4. Inside netns: rename peer → eth0, bring up lo + eth0
     nsenter_run(pid, &["ip", "link", "set", &nk_peer, "name", GUEST_IFACE]).await?;
@@ -140,7 +157,7 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     let ipv4_cidr = format!("{}/32", config.guest_ipv4);
     nsenter_run(pid, &["ip", "addr", "add", &ipv4_cidr, "dev", GUEST_IFACE]).await?;
 
-    // 6. Default IPv6 route via bridge gateway
+    // 6. Default IPv6 route via fe80::1 (assigned to host-side netkit above)
     nsenter_run(
         pid,
         &[
@@ -192,7 +209,7 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
         );
     }
 
-    // 9. Write /etc/resolv.conf pointing to the k3rs DNS VIP on the bridge
+    // 9. Write /etc/resolv.conf pointing to the k3rs DNS VIP (on k3rs0 dummy device)
     //    Uses mount namespace (-m) so we write to the container's filesystem, not the host's.
     let resolv_content = format!("nameserver {}\noptions ndots:{}\n", DNS_VIP, DNS_NDOTS);
     if let Err(e) = nsenter_run_with_mount(
@@ -218,11 +235,21 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     Ok(())
 }
 
-/// Tear down pod networking by deleting the host-side netkit device.
-/// The peer inside the netns is automatically removed by the kernel.
-pub async fn teardown_pod_network(pod_id: &str) {
+/// Tear down pod networking by removing the host route and deleting the host-side
+/// netkit device. The peer inside the netns is automatically removed by the kernel.
+pub async fn teardown_pod_network(pod_id: &str, ghost_ipv6: Option<&str>) {
     let short = &pod_id[..8.min(pod_id.len())];
     let nk_host = format!("{}{}", NETKIT_HOST_PREFIX, short);
+
+    // Remove per-pod host route (kernel would clean it up when the device is deleted,
+    // but being explicit avoids a brief window where the route points to a dead device).
+    if let Some(ipv6) = ghost_ipv6 {
+        let host_route = format!("{}/128", ipv6);
+        let _ = tokio::process::Command::new("ip")
+            .args(["-6", "route", "del", &host_route])
+            .output()
+            .await;
+    }
 
     let _ = tokio::process::Command::new("ip")
         .args(["link", "delete", &nk_host])

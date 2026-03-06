@@ -22,7 +22,9 @@ use aya::programs::tc::{self, SchedClassifier, TcAttachType};
 use tracing::{debug, info, warn};
 
 use k3rs_vpc::enforcer::NetworkEnforcer;
-use k3rs_vpc_common::{Nat64Config, PeeringKey, PeeringValue, VpcCidrKey, VpcCidrValue};
+use k3rs_vpc_common::{
+    EndpointKey, EndpointValue, Nat64Config, PeeringKey, PeeringValue, VpcCidrKey, VpcCidrValue,
+};
 use pkg_types::vpc::{PeeringDirection, PeeringStatus, Vpc, VpcPeering};
 
 // Safety: these #[repr(C)] types are Copy + 'static with no padding issues.
@@ -30,6 +32,8 @@ unsafe impl aya::Pod for VpcCidrKey {}
 unsafe impl aya::Pod for VpcCidrValue {}
 unsafe impl aya::Pod for PeeringKey {}
 unsafe impl aya::Pod for PeeringValue {}
+unsafe impl aya::Pod for EndpointKey {}
+unsafe impl aya::Pod for EndpointValue {}
 unsafe impl aya::Pod for Nat64Config {}
 
 const BPFFS_PIN_DIR: &str = pkg_constants::vm::BPFFS_PIN_DIR;
@@ -46,8 +50,8 @@ pub struct EbpfEnforcer {
     peering_to_keys: HashMap<String, Vec<PeeringKey>>,
     /// Per-netkit Ebpf instances: nk_name → Ebpf (holds SIIT programs with baked-in .rodata)
     pod_bpf: HashMap<String, Ebpf>,
-    /// Reverse lookup: nk_name → (guest_ipv4_host_order, vpc_id, vpc_network, vpc_mask)
-    nk_info: HashMap<String, (u32, u16, u32, u32)>,
+    /// Reverse lookup: nk_name → (guest_ipv4_host_order, vpc_id, vpc_network, vpc_mask, ghost_ipv6_bytes)
+    nk_info: HashMap<String, (u32, u16, u32, u32, [u8; 16])>,
     /// Per-TAP Ebpf instances: tap_name → Ebpf (holds tap_guard + IPv6 classifiers)
     tap_bpf: HashMap<String, Ebpf>,
     /// Reverse lookup: tap_name → (guest_ipv4_host_order, vpc_id)
@@ -166,6 +170,18 @@ impl NetworkEnforcer for EbpfEnforcer {
                     }
                 }
                 info!("ebpf: found {} peering entries in pinned maps", count);
+            }
+
+            // Recover ENDPOINTS count from pinned map
+            if let Ok(map) =
+                BpfHashMap::<&aya::maps::MapData, EndpointKey, EndpointValue>::try_from(
+                    self.bpf.map("ENDPOINTS").unwrap(),
+                )
+            {
+                let count = map.iter().filter(|i| i.is_ok()).count();
+                if count > 0 {
+                    info!("ebpf: found {} endpoint entries in pinned maps", count);
+                }
             }
         } else {
             info!("ebpf: fresh start, pin dir={}", BPFFS_PIN_DIR);
@@ -443,23 +459,50 @@ impl NetworkEnforcer for EbpfEnforcer {
             .attach(nk_name, TcAttachType::Egress)
             .with_context(|| format!("failed to attach tc_egress_v6 to {}", nk_name))?;
 
+        // Insert ENDPOINTS entry: ghost_ipv6 → nk_ifindex (for bpf_redirect_peer)
+        let nk_ifindex = Self::ifindex(nk_name)?;
+        let ep_key = EndpointKey {
+            ghost_ipv6: ipv6_bytes,
+        };
+        let ep_value = EndpointValue {
+            nk_ifindex,
+            _pad: 0,
+        };
+        let mut ep_map: BpfHashMap<&mut aya::maps::MapData, EndpointKey, EndpointValue> =
+            BpfHashMap::try_from(
+                self.bpf
+                    .map_mut("ENDPOINTS")
+                    .context("ENDPOINTS map not found")?,
+            )?;
+        ep_map.insert(ep_key, ep_value, 0)?;
+
         self.pod_bpf.insert(nk_name.to_string(), pod_ebpf);
         self.nk_info.insert(
             nk_name.to_string(),
-            (ip_host, vpc_id, vpc_network, vpc_mask),
+            (ip_host, vpc_id, vpc_network, vpc_mask, ipv6_bytes),
         );
 
         debug!(
-            "ebpf: installed SIIT (pod netns pid={}) + IPv6 isolation on nk={} ipv4={} ipv6={} vpc_id={}",
+            "ebpf: installed SIIT (pod netns pid={}) + IPv6 isolation + ENDPOINT on nk={} ipv4={} ipv6={} vpc_id={}",
             container_pid, nk_name, guest_ipv4, ghost_ipv6, vpc_id
         );
         Ok(())
     }
 
     async fn remove_netkit_rules(&mut self, nk_name: &str) -> Result<()> {
-        if self.nk_info.remove(nk_name).is_some() {
+        if let Some((_, _, _, _, ipv6_bytes)) = self.nk_info.remove(nk_name) {
+            // Remove ENDPOINTS entry
+            let ep_key = EndpointKey {
+                ghost_ipv6: ipv6_bytes,
+            };
+            if let Ok(mut ep_map) = BpfHashMap::<&mut aya::maps::MapData, EndpointKey, EndpointValue>::try_from(
+                self.bpf.map_mut("ENDPOINTS").unwrap(),
+            ) {
+                ep_map.remove(&ep_key).ok();
+            }
+
             self.pod_bpf.remove(nk_name);
-            debug!("ebpf: removed netkit rules for nk={}", nk_name);
+            debug!("ebpf: removed netkit rules + ENDPOINT for nk={}", nk_name);
         }
         Ok(())
     }
@@ -555,13 +598,11 @@ impl NetworkEnforcer for EbpfEnforcer {
         let addr: Ipv4Addr = node_ipv4.parse().context("invalid node IPv4 for NAT64")?;
         let node_ip = u32::from(addr);
         let phys_ifindex = Self::ifindex(phys_name)?;
-        let bridge_ifindex = Self::ifindex(bridge_name)?;
 
         let config = Nat64Config {
             node_ipv4: node_ip,
             phys_ifindex,
-            bridge_ifindex,
-            _pad: 0,
+            _pad: [0; 2],
         };
         let mut map: BpfArray<&mut aya::maps::MapData, Nat64Config> = BpfArray::try_from(
             self.bpf
@@ -610,8 +651,7 @@ impl NetworkEnforcer for EbpfEnforcer {
         let config = Nat64Config {
             node_ipv4: 0,
             phys_ifindex: 0,
-            bridge_ifindex: 0,
-            _pad: 0,
+            _pad: [0; 2],
         };
         if let Ok(map_data) = self.bpf.map_mut("NAT64_CONFIG") {
             if let Ok(mut map) =
@@ -661,9 +701,25 @@ impl NetworkEnforcer for EbpfEnforcer {
             }
         }
 
+        // Endpoints
+        out.push_str("\n[Endpoints (redirect_peer)]\n");
+        if let Ok(map) = BpfHashMap::<&aya::maps::MapData, EndpointKey, EndpointValue>::try_from(
+            self.bpf.map("ENDPOINTS").unwrap(),
+        ) {
+            for item in map.iter() {
+                if let Ok((k, v)) = item {
+                    let ipv6 = std::net::Ipv6Addr::from(k.ghost_ipv6);
+                    out.push_str(&format!(
+                        "  {} → ifindex={}\n",
+                        ipv6, v.nk_ifindex
+                    ));
+                }
+            }
+        }
+
         // Per-netkit SIIT instances
         out.push_str("\n[Per-Netkit SIIT Instances]\n");
-        for (nk, (ipv4, vpc_id, _, _)) in &self.nk_info {
+        for (nk, (ipv4, vpc_id, _, _, _)) in &self.nk_info {
             let addr = Ipv4Addr::from(*ipv4);
             out.push_str(&format!("  nk={} ipv4={} vpc_id={}\n", nk, addr, vpc_id));
         }

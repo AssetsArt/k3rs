@@ -127,7 +127,7 @@ async fn check_running_pods(
 
                 // Tear down pod network (best-effort)
                 #[cfg(target_os = "linux")]
-                pkg_network::netns::teardown_pod_network(&pod.id).await;
+                pkg_network::netns::teardown_pod_network(&pod.id, None).await;
 
                 // Release VPC allocation (best-effort)
                 let vpc_name = pod
@@ -176,7 +176,7 @@ async fn check_running_pods(
 
                 // Tear down pod network (best-effort)
                 #[cfg(target_os = "linux")]
-                pkg_network::netns::teardown_pod_network(&pod.id).await;
+                pkg_network::netns::teardown_pod_network(&pod.id, None).await;
 
                 // Release VPC allocation (best-effort)
                 let vpc_name = pod
@@ -395,7 +395,6 @@ async fn run_pod_lifecycle(
                 ghost_ipv6: ghost_ipv6.clone(),
                 guest_ipv4: guest_ipv4.clone(),
                 container_pid: pid,
-                bridge_name: pkg_constants::network::BRIDGE_NAME.to_string(),
             };
             if let Err(e) = pkg_network::netns::setup_pod_network(&net_config).await {
                 warn!(

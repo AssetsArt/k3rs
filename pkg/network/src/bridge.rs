@@ -1,29 +1,30 @@
-//! k3rs0 bridge manager — creates and manages the pod network bridge.
+//! k3rs0 dummy device manager — creates and manages the pod network anchor device.
 //!
-//! Called once at agent startup (idempotent). All pods on the same node
-//! attach their netkit host-side to this bridge for same-node connectivity.
+//! Called once at agent startup (idempotent). The dummy device hosts the DNS VIP
+//! (`fd6b:3372::53`) and serves as the routing anchor for the ghost prefix
+//! (`fd6b:3372::/32`) and NAT64 egress (`64:ff9b::/96`).
+//!
+//! Pod-to-pod traffic does NOT flow through this device — it uses BPF
+//! `redirect_peer` for same-node delivery or WireGuard for cross-node.
 
 use anyhow::Result;
 use tracing::{info, warn};
 
-/// Configuration for the k3rs0 bridge.
+/// Configuration for the k3rs0 dummy device.
 pub struct BridgeConfig {
-    /// Bridge interface name (default: `k3rs0`).
+    /// Device name (default: `k3rs0`).
     pub name: String,
-    /// Link-local IPv6 gateway assigned to the bridge.
-    pub gateway_ipv6: String,
 }
 
 impl Default for BridgeConfig {
     fn default() -> Self {
         Self {
             name: pkg_constants::network::BRIDGE_NAME.to_string(),
-            gateway_ipv6: pkg_constants::network::BRIDGE_GATEWAY_IPV6.to_string(),
         }
     }
 }
 
-/// Check whether a bridge interface exists.
+/// Check whether the device exists.
 pub async fn bridge_exists(name: &str) -> bool {
     tokio::process::Command::new("ip")
         .args(["link", "show", name])
@@ -33,9 +34,9 @@ pub async fn bridge_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Create the k3rs0 bridge, assign the link-local gateway, bring it up,
-/// and enable IPv6 forwarding. Idempotent — skips creation if the bridge
-/// already exists. Always ensures the ghost route and DNS VIP are present.
+/// Create the k3rs0 dummy device, bring it up, and enable IPv6 forwarding.
+/// Idempotent — skips creation if the device already exists.
+/// Always ensures the ghost route and DNS VIP are present.
 pub async fn ensure_bridge(config: &BridgeConfig) -> Result<()> {
     let already_exists = bridge_exists(&config.name).await;
 
@@ -44,9 +45,9 @@ pub async fn ensure_bridge(config: &BridgeConfig) -> Result<()> {
     }
 
     if !already_exists {
-        // Create bridge
+        // Create dummy device (replaces bridge — no L2 switching needed)
         let output = tokio::process::Command::new("ip")
-            .args(["link", "add", &config.name, "type", "bridge"])
+            .args(["link", "add", &config.name, "type", "dummy"])
             .output()
             .await?;
         if !output.status.success() {
@@ -60,20 +61,7 @@ pub async fn ensure_bridge(config: &BridgeConfig) -> Result<()> {
             }
         }
 
-        // Assign link-local IPv6 gateway
-        let gw_cidr = format!("{}/64", config.gateway_ipv6);
-        let output = tokio::process::Command::new("ip")
-            .args(["-6", "addr", "add", &gw_cidr, "dev", &config.name])
-            .output()
-            .await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.contains("File exists") {
-                warn!("[bridge] ip -6 addr add warning: {}", stderr.trim());
-            }
-        }
-
-        // Bring bridge up
+        // Bring device up
         let output = tokio::process::Command::new("ip")
             .args(["link", "set", &config.name, "up"])
             .output()
@@ -82,17 +70,6 @@ pub async fn ensure_bridge(config: &BridgeConfig) -> Result<()> {
             warn!(
                 "[bridge] ip link set up warning: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-
-        // Disable multicast snooping so NDP solicitations (solicited-node multicast)
-        // are flooded to all bridge ports. Without this, the bridge drops NDP for pods
-        // that haven't sent MLD reports, breaking cross-pod IPv6 routing.
-        let mcast_path = format!("/sys/class/net/{}/bridge/multicast_snooping", config.name);
-        if let Err(e) = tokio::fs::write(&mcast_path, "0").await {
-            warn!(
-                "[bridge] Failed to disable multicast_snooping on {}: {}",
-                config.name, e
             );
         }
 
@@ -116,14 +93,14 @@ pub async fn ensure_bridge(config: &BridgeConfig) -> Result<()> {
     let ghost_prefix = crate::wireguard::GHOST_ROUTE_PREFIX;
     ensure_addr_or_route(&config.name, AddrOrRoute::Route(ghost_prefix)).await;
 
-    // Ensure DNS VIP on bridge so pods can reach the DNS server
+    // Ensure DNS VIP on device so pods can reach the DNS server
     let dns_vip = pkg_constants::network::DNS_VIP;
     let dns_cidr = format!("{}/128", dns_vip);
     ensure_addr_or_route(&config.name, AddrOrRoute::Addr(&dns_cidr)).await;
 
     info!(
-        "[bridge] {} ready (gateway: {}/64, route: {}, dns: {})",
-        config.name, config.gateway_ipv6, ghost_prefix, dns_vip
+        "[bridge] {} ready (route: {}, dns: {})",
+        config.name, ghost_prefix, dns_vip
     );
     Ok(())
 }
@@ -133,14 +110,14 @@ enum AddrOrRoute<'a> {
     Route(&'a str),
 }
 
-async fn ensure_addr_or_route(bridge: &str, kind: AddrOrRoute<'_>) {
+async fn ensure_addr_or_route(dev: &str, kind: AddrOrRoute<'_>) {
     let (args, label): (Vec<&str>, &str) = match &kind {
         AddrOrRoute::Addr(cidr) => (
-            vec!["-6", "addr", "add", cidr, "dev", bridge],
+            vec!["-6", "addr", "add", cidr, "dev", dev],
             cidr,
         ),
         AddrOrRoute::Route(prefix) => (
-            vec!["-6", "route", "add", prefix, "dev", bridge],
+            vec!["-6", "route", "add", prefix, "dev", dev],
             prefix,
         ),
     };
