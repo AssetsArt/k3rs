@@ -30,7 +30,8 @@ use pkg_constants::paths::DATA_DIR;
 const STREAM_PREFIX: u8 = pkg_constants::vm::VSOCK_STREAM_PREFIX;
 
 /// Read timeout for one-shot exec (waiting for the guest command to finish).
-const EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(pkg_constants::timings::VM_EXEC_TIMEOUT_SECS);
+const EXEC_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(pkg_constants::timings::VM_EXEC_TIMEOUT_SECS);
 
 /// Global VM ID for cleanup on exit (set by boot command).
 static ACTIVE_VM_ID: OnceLock<String> = OnceLock::new();

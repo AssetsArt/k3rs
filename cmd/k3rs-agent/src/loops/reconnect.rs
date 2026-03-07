@@ -24,7 +24,10 @@ pub fn start(
             // When connected, idle and reset attempt counter
             if connectivity.is_connected() {
                 attempt = 0;
-                tokio::time::sleep(std::time::Duration::from_secs(pkg_constants::timings::RECONNECT_IDLE_SECS)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    pkg_constants::timings::RECONNECT_IDLE_SECS,
+                ))
+                .await;
                 continue;
             }
 

@@ -21,10 +21,10 @@ pub const AGENT_CAPS: &[&str] = &[
 /// Capabilities for k3rs-vpc.
 /// eBPF enforcement, NAT64, reads default route.
 pub const VPC_CAPS: &[&str] = &[
-    "CAP_NET_ADMIN",  // ip route, iptables, NAT64
-    "CAP_BPF",        // load/attach eBPF programs
-    "CAP_SYS_ADMIN",  // pinned BPF maps, sysctl
-    "CAP_PERFMON",    // eBPF perf events
+    "CAP_NET_ADMIN", // ip route, iptables, NAT64
+    "CAP_BPF",       // load/attach eBPF programs
+    "CAP_SYS_ADMIN", // pinned BPF maps, sysctl
+    "CAP_PERFMON",   // eBPF perf events
 ];
 
 /// Capabilities for k3rs-ui.

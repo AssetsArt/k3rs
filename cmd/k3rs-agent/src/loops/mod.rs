@@ -59,8 +59,8 @@ pub fn start_controller_loops(
                         // Initialize k3rs0 dummy device for DNS VIP + routing anchor (Linux only, non-fatal)
                         #[cfg(target_os = "linux")]
                         {
-                            let bridge_config = pkg_network::bridge::BridgeConfig::default();
-                            if let Err(e) = pkg_network::bridge::ensure_bridge(&bridge_config).await
+                            let bridge_config = pkg_network::linux::bridge::BridgeConfig::default();
+                            if let Err(e) = pkg_network::linux::bridge::ensure_bridge(&bridge_config).await
                             {
                                 warn!(
                                     "Failed to create k3rs0 device: {} (pod networking may be unavailable)",
@@ -141,8 +141,8 @@ pub fn start_controller_loops(
 
             // macOS: create userspace switch for VM VPC networking
             #[cfg(target_os = "macos")]
-            let mac_switch: Option<Arc<pkg_network::switch::MacSwitch>> = {
-                let switch = Arc::new(pkg_network::switch::MacSwitch::new(53));
+            let mac_switch: Option<Arc<pkg_network::macos::switch::MacSwitch>> = {
+                let switch = Arc::new(pkg_network::macos::switch::MacSwitch::new(53));
                 switch.clone().start();
                 info!("macOS userspace switch started");
                 Some(switch)

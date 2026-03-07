@@ -243,10 +243,7 @@ fn apply_capabilities(bin: &Path, component: &ComponentName) {
         .join(",")
         + "+eip";
 
-    let status = Command::new("setcap")
-        .arg(&cap_str)
-        .arg(bin)
-        .status();
+    let status = Command::new("setcap").arg(&cap_str).arg(bin).status();
 
     match status {
         Ok(s) if s.success() => {

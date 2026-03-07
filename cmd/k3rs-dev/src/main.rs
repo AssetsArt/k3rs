@@ -40,7 +40,10 @@ impl Component {
 }
 
 #[derive(Parser)]
-#[command(name = "k3rs-dev", about = "Run k3rs components in dev mode with auto-rebuild")]
+#[command(
+    name = "k3rs-dev",
+    about = "Run k3rs components in dev mode with auto-rebuild"
+)]
 struct Cli {
     /// Component(s) to run in dev mode (server, agent, vpc, ui, or all)
     component: Component,
@@ -81,6 +84,7 @@ fn server_config() -> DevConfig {
 }
 
 fn agent_config() -> DevConfig {
+    let vpc_socket = format!("{}/k3rs-vpc.sock", pkg_constants::paths::DATA_DIR);
     DevConfig {
         label: "agent",
         bin_name: "k3rs-agent",
@@ -98,7 +102,7 @@ fn agent_config() -> DevConfig {
             "--dns-port",
             &pkg_constants::network::DEFAULT_DNS_PORT.to_string(),
             "--vpc-socket",
-            pkg_constants::paths::VPC_SOCKET,
+            &vpc_socket,
         ]
         .iter()
         .map(|s| s.to_string())
@@ -114,6 +118,7 @@ fn agent_config() -> DevConfig {
 }
 
 fn vpc_config() -> DevConfig {
+    let vpc_socket = format!("{}/k3rs-vpc.sock", pkg_constants::paths::DATA_DIR);
     DevConfig {
         label: "vpc",
         bin_name: "k3rs-vpc",
@@ -123,7 +128,7 @@ fn vpc_config() -> DevConfig {
             "--token",
             pkg_constants::auth::DEFAULT_JOIN_TOKEN,
             "--socket",
-            pkg_constants::paths::VPC_SOCKET,
+            &vpc_socket,
             "--data-dir",
             &format!("{}/vpc-state.db", pkg_constants::paths::DATA_DIR),
         ]
@@ -472,7 +477,9 @@ fn check_file_has_caps(path: &str, required: &[&str]) -> bool {
     match output {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout).to_lowercase();
-            required.iter().all(|cap| stdout.contains(&cap.to_lowercase()))
+            required
+                .iter()
+                .all(|cap| stdout.contains(&cap.to_lowercase()))
         }
         _ => false,
     }

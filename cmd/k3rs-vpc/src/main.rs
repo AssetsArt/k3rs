@@ -175,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
     let socket_path = cli
         .socket
         .or(file_cfg.socket)
-        .unwrap_or_else(|| pkg_constants::paths::VPC_SOCKET.to_string());
+        .unwrap_or_else(|| format!("{}/k3rs-vpc.sock", data_dir));
 
     info!(
         "server_url={}, data_dir={}, socket={}",
@@ -242,7 +242,10 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| nat64_detected.as_ref().map(|(iface, _)| iface.clone()));
 
     if let (Some(ipv4), Some(phys)) = (&node_ipv4, &phys_iface) {
-        match enforcer.install_nat64(ipv4, pkg_constants::network::BRIDGE_NAME, phys).await {
+        match enforcer
+            .install_nat64(ipv4, pkg_constants::network::BRIDGE_NAME, phys)
+            .await
+        {
             Ok(()) => info!("NAT64 installed (node_ipv4={}, phys_iface={})", ipv4, phys),
             Err(e) => warn!(
                 "NAT64 install failed: {} (pods cannot reach external IPv4)",

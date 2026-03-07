@@ -92,7 +92,7 @@ log "Platform: ${PLATFORM}/${ARCH_LABEL}"
 # ─── Determine components to build ───────────────────────────────────
 if [[ ${#COMPONENTS[@]} -eq 0 ]]; then
     # Default: build platform-appropriate components
-    COMPONENTS=(server agent ctl ui)
+    COMPONENTS=(server agent ctl ui dev)
     if [[ "$PLATFORM" == "linux" ]]; then
         COMPONENTS+=(vpc init)
     elif [[ "$PLATFORM" == "macos" ]]; then
@@ -100,52 +100,52 @@ if [[ ${#COMPONENTS[@]} -eq 0 ]]; then
     fi
 fi
 
-# Map component names to cargo packages and binary names
-declare -A PKG_MAP=(
-    [server]="k3rs-server"
-    [agent]="k3rs-agent"
-    [ctl]="k3rsctl"
-    [ui]="k3rs-ui"
-    [vpc]="k3rs-vpc"
-    [init]="k3rs-init"
-    [vmm]="k3rs-vmm"
-)
+# Map component name → cargo package / binary name (bash 3.2 compatible)
+pkg_for() {
+    case "$1" in
+        server) echo "k3rs-server" ;;
+        agent)  echo "k3rs-agent" ;;
+        ctl)    echo "k3rsctl" ;;
+        ui)     echo "k3rs-ui" ;;
+        vpc)    echo "k3rs-vpc" ;;
+        init)   echo "k3rs-init" ;;
+        vmm)    echo "k3rs-vmm" ;;
+        dev)    echo "k3rs-dev" ;;
+        *)      echo "" ;;
+    esac
+}
 
-declare -A BIN_MAP=(
-    [server]="k3rs-server"
-    [agent]="k3rs-agent"
-    [ctl]="k3rsctl"
-    [ui]="k3rs-ui"
-    [vpc]="k3rs-vpc"
-    [init]="k3rs-init"
-    [vmm]="k3rs-vmm"
-)
+bin_for() {
+    # Currently package name == binary name for all components
+    pkg_for "$1"
+}
 
 # ─── Validate components ─────────────────────────────────────────────
+VALID_COMPONENTS=()
 for comp in "${COMPONENTS[@]}"; do
-    if [[ -z "${PKG_MAP[$comp]:-}" ]]; then
+    if [[ -z "$(pkg_for "$comp")" ]]; then
         error "Unknown component: $comp"
-        error "Valid components: server agent ctl ui vpc init vmm"
+        error "Valid components: server agent ctl ui vpc init vmm dev"
         exit 1
     fi
 
     # Platform checks
     if [[ "$comp" == "vmm" && "$PLATFORM" != "macos" ]]; then
         warn "Skipping k3rs-vmm (macOS only)"
-        COMPONENTS=("${COMPONENTS[@]/$comp}")
+        continue
     fi
     if [[ "$comp" == "init" && "$PLATFORM" != "linux" ]]; then
         warn "Skipping k3rs-init (Linux only)"
-        COMPONENTS=("${COMPONENTS[@]/$comp}")
+        continue
     fi
     if [[ "$comp" == "vpc" && "$PLATFORM" != "linux" ]]; then
         warn "Skipping k3rs-vpc (Linux only)"
-        COMPONENTS=("${COMPONENTS[@]/$comp}")
+        continue
     fi
+    VALID_COMPONENTS+=("$comp")
 done
 
-# Remove empty entries
-COMPONENTS=(${COMPONENTS[@]})
+COMPONENTS=("${VALID_COMPONENTS[@]}")
 
 if [[ ${#COMPONENTS[@]} -eq 0 ]]; then
     error "No components to build"
@@ -179,8 +179,8 @@ BUILT_BINARIES=()
 FAILED=()
 
 for comp in "${COMPONENTS[@]}"; do
-    pkg="${PKG_MAP[$comp]}"
-    bin="${BIN_MAP[$comp]}"
+    pkg="$(pkg_for "$comp")"
+    bin="$(bin_for "$comp")"
 
     log "Building ${pkg}..."
 
@@ -270,7 +270,7 @@ done
 if [[ ${#FAILED[@]} -gt 0 ]]; then
     echo ""
     for comp in "${FAILED[@]}"; do
-        error "  FAILED: ${PKG_MAP[$comp]}"
+        error "  FAILED: $(pkg_for "$comp")"
     done
 fi
 

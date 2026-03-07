@@ -51,7 +51,9 @@ pub fn run(component: &ComponentName) -> Result<()> {
 
         // Monitor loop
         loop {
-            thread::sleep(Duration::from_secs(pkg_constants::timings::WATCHDOG_POLL_INTERVAL_SECS));
+            thread::sleep(Duration::from_secs(
+                pkg_constants::timings::WATCHDOG_POLL_INTERVAL_SECS,
+            ));
 
             if !is_alive(pid) {
                 break; // Process died — handle restart below
@@ -116,7 +118,10 @@ pub fn run(component: &ComponentName) -> Result<()> {
         }
 
         // Exponential backoff: 1s, 2s, 4s, 8s, ... capped at max backoff
-        let delay_secs = std::cmp::min(pkg_constants::timings::BACKOFF_MAX_SECS, 1u64 << restart_count.min(4));
+        let delay_secs = std::cmp::min(
+            pkg_constants::timings::BACKOFF_MAX_SECS,
+            1u64 << restart_count.min(4),
+        );
         thread::sleep(Duration::from_secs(delay_secs));
 
         // Increment restart count

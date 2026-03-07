@@ -68,8 +68,7 @@ impl Utun {
             ctl_id: 0,
             ctl_name: [0u8; 96],
         };
-        info.ctl_name[..UTUN_CONTROL_NAME.len()]
-            .copy_from_slice(UTUN_CONTROL_NAME);
+        info.ctl_name[..UTUN_CONTROL_NAME.len()].copy_from_slice(UTUN_CONTROL_NAME);
 
         let ret = unsafe { libc::ioctl(fd.as_raw_fd(), CTLIOCGINFO, &mut info) };
         if ret < 0 {

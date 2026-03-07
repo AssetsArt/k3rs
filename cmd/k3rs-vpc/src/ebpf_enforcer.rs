@@ -173,11 +173,9 @@ impl NetworkEnforcer for EbpfEnforcer {
             }
 
             // Recover ENDPOINTS count from pinned map
-            if let Ok(map) =
-                BpfHashMap::<&aya::maps::MapData, EndpointKey, EndpointValue>::try_from(
-                    self.bpf.map("ENDPOINTS").unwrap(),
-                )
-            {
+            if let Ok(map) = BpfHashMap::<&aya::maps::MapData, EndpointKey, EndpointValue>::try_from(
+                self.bpf.map("ENDPOINTS").unwrap(),
+            ) {
                 let count = map.iter().filter(|i| i.is_ok()).count();
                 if count > 0 {
                     info!("ebpf: found {} endpoint entries in pinned maps", count);
@@ -495,9 +493,11 @@ impl NetworkEnforcer for EbpfEnforcer {
             let ep_key = EndpointKey {
                 ghost_ipv6: ipv6_bytes,
             };
-            if let Ok(mut ep_map) = BpfHashMap::<&mut aya::maps::MapData, EndpointKey, EndpointValue>::try_from(
-                self.bpf.map_mut("ENDPOINTS").unwrap(),
-            ) {
+            if let Ok(mut ep_map) =
+                BpfHashMap::<&mut aya::maps::MapData, EndpointKey, EndpointValue>::try_from(
+                    self.bpf.map_mut("ENDPOINTS").unwrap(),
+                )
+            {
                 ep_map.remove(&ep_key).ok();
             }
 
@@ -709,10 +709,7 @@ impl NetworkEnforcer for EbpfEnforcer {
             for item in map.iter() {
                 if let Ok((k, v)) = item {
                     let ipv6 = std::net::Ipv6Addr::from(k.ghost_ipv6);
-                    out.push_str(&format!(
-                        "  {} → ifindex={}\n",
-                        ipv6, v.nk_ifindex
-                    ));
+                    out.push_str(&format!("  {} → ifindex={}\n", ipv6, v.nk_ifindex));
                 }
             }
         }

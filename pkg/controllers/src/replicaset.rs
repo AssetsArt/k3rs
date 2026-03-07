@@ -25,7 +25,9 @@ impl ReplicaSetController {
         Self {
             store,
             scheduler,
-            check_interval: Duration::from_secs(pkg_constants::timings::REPLICASET_CHECK_INTERVAL_SECS),
+            check_interval: Duration::from_secs(
+                pkg_constants::timings::REPLICASET_CHECK_INTERVAL_SECS,
+            ),
         }
     }
 

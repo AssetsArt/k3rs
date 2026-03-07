@@ -56,22 +56,26 @@ impl ContainerRuntime {
                 e
             })?;
 
-        let backend: Arc<dyn RuntimeBackend> = if cfg!(target_os = "macos") {
-            // macOS: Virtualization.framework microVM is the only supported backend.
-            // OCI runtimes (youki/crun) require Linux namespaces/cgroups which are
-            // not available on macOS.
-            let virt = crate::virt::VirtualizationBackend::new(&data_dir).await?;
+        // macOS: Virtualization.framework microVM is the only supported backend.
+        // OCI runtimes (youki/crun) require Linux namespaces/cgroups which are
+        // not available on macOS.
+        #[cfg(target_os = "macos")]
+        let backend: Arc<dyn RuntimeBackend> = {
+            let virt = crate::macos::virt::VirtualizationBackend::new(&data_dir).await?;
             info!(
                 "Using Virtualization.framework runtime: {} ({})",
                 virt.name(),
                 virt.version()
             );
             Arc::new(virt)
-        } else {
-            // Linux: prefer OCI runtimes; Firecracker is only a fallback when
-            // no OCI runtime is available but KVM is present.
-            // This ensures backend_name() correctly reflects the active runtime
-            // (e.g. "youki") rather than always showing "vm".
+        };
+
+        // Linux: prefer OCI runtimes; Firecracker is only a fallback when
+        // no OCI runtime is available but KVM is present.
+        // This ensures backend_name() correctly reflects the active runtime
+        // (e.g. "youki") rather than always showing "vm".
+        #[cfg(target_os = "linux")]
+        let backend: Arc<dyn RuntimeBackend> = {
             match OciBackend::detect(&data_dir) {
                 Ok(oci) => {
                     info!("Using OCI runtime: {} ({})", oci.name(), oci.version());
@@ -97,7 +101,9 @@ impl ContainerRuntime {
                                 info!(
                                     "OCI unavailable — falling back to Firecracker microVM runtime"
                                 );
-                                match crate::firecracker::FirecrackerBackend::new(&data_dir).await {
+                                match crate::linux::firecracker::FirecrackerBackend::new(&data_dir)
+                                    .await
+                                {
                                     Ok(fc) => {
                                         info!(
                                             "Using Firecracker runtime: {} ({})",
@@ -207,10 +213,15 @@ impl ContainerRuntime {
         env: &HashMap<String, String>,
         runtime_name: Option<&str>,
     ) -> Result<()> {
-        let backend = if cfg!(target_os = "macos") {
-            // macOS: always use VM backend — OCI runtimes are not supported.
+        // macOS: always use VM backend — OCI runtimes are not supported.
+        #[cfg(target_os = "macos")]
+        let backend = {
+            let _ = runtime_name; // unused on macOS
             self.get_or_init_vm_backend().await?
-        } else if let Some(name) = runtime_name {
+        };
+
+        #[cfg(target_os = "linux")]
+        let backend = if let Some(name) = runtime_name {
             if name == "vm" {
                 self.get_or_init_vm_backend().await?
             } else if name == "youki" || name == "crun" {
@@ -334,11 +345,16 @@ impl ContainerRuntime {
     async fn get_or_init_vm_backend(&self) -> Result<Arc<dyn RuntimeBackend>> {
         self.vm_backend
             .get_or_try_init(|| async {
-                if cfg!(target_os = "macos") {
-                    let virt = crate::virt::VirtualizationBackend::new(&self.data_dir).await?;
+                #[cfg(target_os = "macos")]
+                {
+                    let virt =
+                        crate::macos::virt::VirtualizationBackend::new(&self.data_dir).await?;
                     Ok(Arc::new(virt) as Arc<dyn RuntimeBackend>)
-                } else {
-                    let fc = crate::firecracker::FirecrackerBackend::new(&self.data_dir).await?;
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let fc =
+                        crate::linux::firecracker::FirecrackerBackend::new(&self.data_dir).await?;
                     Ok(Arc::new(fc) as Arc<dyn RuntimeBackend>)
                 }
             })
@@ -543,35 +559,40 @@ impl ContainerRuntime {
     /// This is used by pod_sync to configure the socketpair and kernel cmdline
     /// VPC parameters for the VM.
     #[cfg(target_os = "macos")]
-    pub async fn set_vm_network_config(
-        &self,
-        id: &str,
-        config: crate::virt::VmNetworkConfig,
-    ) {
+    pub async fn set_vm_network_config(&self, id: &str, config: crate::vm_utils::VmNetworkConfig) {
         // Try the main backend first, then the VM backend
-        if let Some(virt) = self.backend.as_any().downcast_ref::<crate::virt::VirtualizationBackend>() {
+        if let Some(virt) = self
+            .backend
+            .as_any()
+            .downcast_ref::<crate::macos::virt::VirtualizationBackend>()
+        {
             virt.set_vm_network_config(id, config).await;
-        } else if let Some(vm) = self.vm_backend.get() {
-            if let Some(virt) = vm.as_any().downcast_ref::<crate::virt::VirtualizationBackend>() {
-                virt.set_vm_network_config(id, config).await;
-            }
+        } else if let Some(vm) = self.vm_backend.get()
+            && let Some(virt) = vm
+                .as_any()
+                .downcast_ref::<crate::macos::virt::VirtualizationBackend>()
+        {
+            virt.set_vm_network_config(id, config).await;
         }
     }
 
     /// Take the host-side network socket for a VM (macOS only).
     /// Used by pod_sync to register the socket with the userspace switch.
     #[cfg(target_os = "macos")]
-    pub async fn take_vm_net_socket(
-        &self,
-        id: &str,
-    ) -> Option<std::os::unix::io::OwnedFd> {
-        if let Some(virt) = self.backend.as_any().downcast_ref::<crate::virt::VirtualizationBackend>() {
+    pub async fn take_vm_net_socket(&self, id: &str) -> Option<std::os::unix::io::OwnedFd> {
+        if let Some(virt) = self
+            .backend
+            .as_any()
+            .downcast_ref::<crate::macos::virt::VirtualizationBackend>()
+        {
             return virt.take_net_socket(id).await;
         }
-        if let Some(vm) = self.vm_backend.get() {
-            if let Some(virt) = vm.as_any().downcast_ref::<crate::virt::VirtualizationBackend>() {
-                return virt.take_net_socket(id).await;
-            }
+        if let Some(vm) = self.vm_backend.get()
+            && let Some(virt) = vm
+                .as_any()
+                .downcast_ref::<crate::macos::virt::VirtualizationBackend>()
+        {
+            return virt.take_net_socket(id).await;
         }
         None
     }

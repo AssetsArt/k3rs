@@ -217,28 +217,31 @@ fn configure_vpc_networking(
     set_ipv4_netmask(sock, "eth0", mask)?;
     log_info!("eth0: netmask set to /{}", prefix_len);
 
-    // 3. Derive gateway IP: first IP in the /30 link subnet.
-    //    The TAP uses a link-local /30: gateway is at .1 of the /30 subnet.
-    //    We compute it from the VPC CIDR network as network.0.0.1 — but actually
-    //    the gateway IP doesn't matter for ARP since we use static ARP.
-    //    We use 169.254.0.1 as a synthetic link-local gateway.
+    // 3. Add static ARP entry FIRST: map synthetic gateway IP to well-known MAC.
+    //    Must be done before adding routes so the kernel considers the gateway reachable.
     let gw_ip = "169.254.0.1";
-    add_default_route(sock, gw_ip)?;
-    log_info!("eth0: default route via {}", gw_ip);
-
-    // 4. Add static ARP entry: map gateway IP to well-known MAC.
-    //    Critical because the TAP has no IPv4 address — normal ARP won't work.
     let mac_bytes = parse_mac(gw_mac)?;
     add_static_arp(sock, "eth0", gw_ip, &mac_bytes)?;
     log_info!("eth0: static ARP {} → {}", gw_ip, gw_mac);
 
+    // 4. Add scope-link route to the synthetic gateway IP.
+    //    169.254.0.1 is outside the VPC CIDR (e.g. 10.42.0.0/16), so the kernel
+    //    won't accept it as a gateway unless we first make it "reachable" via a
+    //    /32 onlink route on eth0.
+    add_onlink_route(sock, "eth0", gw_ip)?;
+    log_info!("eth0: onlink route to {}", gw_ip);
+
+    // 5. Add default route via the synthetic gateway.
+    add_default_route(sock, gw_ip)?;
+    log_info!("eth0: default route via {}", gw_ip);
+
     unsafe { libc::close(sock) };
 
-    // 5. Add Ghost IPv6 address to eth0
+    // 6. Add Ghost IPv6 address to eth0
     add_ipv6_addr("eth0", ipv6)?;
     log_info!("eth0: IPv6 address set to {}", ipv6);
 
-    // 6. Write /etc/resolv.conf to use the switch DNS proxy
+    // 7. Write /etc/resolv.conf to use the switch DNS proxy
     write_resolv_conf(&[pkg_constants::network::DNS_PROXY_IPV4.to_string()]);
 
     Ok(())
@@ -341,6 +344,54 @@ fn add_default_route(sock: i32, gateway: &str) -> Result<(), Box<dyn std::error:
         // Ignore "File exists" (route already present)
         if err.raw_os_error() != Some(libc::EEXIST) {
             return Err(format!("SIOCADDRT failed: {}", err).into());
+        }
+    }
+    Ok(())
+}
+
+/// Add a /32 scope-link (onlink) route to make a host reachable via an interface.
+/// Equivalent to: `ip route add <ip>/32 dev <iface> scope link`
+#[cfg(target_os = "linux")]
+fn add_onlink_route(
+    sock: i32,
+    iface: &str,
+    host_ip: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ip = parse_ipv4(host_ip)?;
+
+    let mut rt: libc::rtentry = unsafe { std::mem::zeroed() };
+
+    // Destination: the host IP
+    let dst = make_sockaddr_in(ip);
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            &dst as *const libc::sockaddr_in as *const u8,
+            &mut rt.rt_dst as *mut libc::sockaddr as *mut u8,
+            std::mem::size_of::<libc::sockaddr_in>(),
+        );
+    }
+
+    // Netmask: 255.255.255.255 (/32)
+    let mask = make_sockaddr_in(0xFFFF_FFFFu32.to_be());
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            &mask as *const libc::sockaddr_in as *const u8,
+            &mut rt.rt_genmask as *mut libc::sockaddr as *mut u8,
+            std::mem::size_of::<libc::sockaddr_in>(),
+        );
+    }
+
+    // Flags: UP + HOST (scope link, no gateway)
+    rt.rt_flags = (libc::RTF_UP | libc::RTF_HOST) as u16;
+
+    // Device name
+    let dev_cstr = std::ffi::CString::new(iface)?;
+    rt.rt_dev = dev_cstr.as_ptr() as *mut _;
+
+    if unsafe { libc::ioctl(sock, libc::SIOCADDRT as _, &rt) } < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EEXIST) {
+            return Err(format!("SIOCADDRT (onlink {}) failed: {}", host_ip, err).into());
         }
     }
     Ok(())
