@@ -40,6 +40,6 @@ pub struct Cli {
     pub data_dir: String,
 
     /// Path to the VPC daemon Unix socket
-    #[arg(long, default_value_t = pkg_constants::paths::VPC_SOCKET.to_string())]
+    #[arg(long, default_value_t = format!("{}/k3rs-vpc.sock", pkg_constants::paths::DATA_DIR))]
     pub vpc_socket: String,
 }

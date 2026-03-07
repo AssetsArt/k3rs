@@ -84,6 +84,7 @@ fn server_config() -> DevConfig {
 }
 
 fn agent_config() -> DevConfig {
+    let vpc_socket = format!("{}/k3rs-vpc.sock", pkg_constants::paths::DATA_DIR);
     DevConfig {
         label: "agent",
         bin_name: "k3rs-agent",
@@ -101,7 +102,7 @@ fn agent_config() -> DevConfig {
             "--dns-port",
             &pkg_constants::network::DEFAULT_DNS_PORT.to_string(),
             "--vpc-socket",
-            pkg_constants::paths::VPC_SOCKET,
+            &vpc_socket,
         ]
         .iter()
         .map(|s| s.to_string())
@@ -117,6 +118,7 @@ fn agent_config() -> DevConfig {
 }
 
 fn vpc_config() -> DevConfig {
+    let vpc_socket = format!("{}/k3rs-vpc.sock", pkg_constants::paths::DATA_DIR);
     DevConfig {
         label: "vpc",
         bin_name: "k3rs-vpc",
@@ -126,7 +128,7 @@ fn vpc_config() -> DevConfig {
             "--token",
             pkg_constants::auth::DEFAULT_JOIN_TOKEN,
             "--socket",
-            pkg_constants::paths::VPC_SOCKET,
+            &vpc_socket,
             "--data-dir",
             &format!("{}/vpc-state.db", pkg_constants::paths::DATA_DIR),
         ]

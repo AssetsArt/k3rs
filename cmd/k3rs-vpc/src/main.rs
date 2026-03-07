@@ -175,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
     let socket_path = cli
         .socket
         .or(file_cfg.socket)
-        .unwrap_or_else(|| pkg_constants::paths::VPC_SOCKET.to_string());
+        .unwrap_or_else(|| format!("{}/k3rs-vpc.sock", data_dir));
 
     info!(
         "server_url={}, data_dir={}, socket={}",

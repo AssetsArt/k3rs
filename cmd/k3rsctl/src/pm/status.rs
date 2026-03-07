@@ -161,8 +161,8 @@ fn check_agent_health() -> String {
 
 /// VPC health: check if the Unix socket responds
 fn check_vpc_health() -> String {
-    let sock_path = pkg_constants::paths::VPC_SOCKET;
-    if std::path::Path::new(sock_path).exists() {
+    let sock_path = format!("{}/k3rs-vpc.sock", pkg_constants::paths::DATA_DIR);
+    if std::path::Path::new(&sock_path).exists() {
         format!("\x1b[32m✓ Socket exists ({})\x1b[0m", sock_path)
     } else {
         format!("\x1b[31m✕ Socket not found ({})\x1b[0m", sock_path)

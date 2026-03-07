@@ -17,11 +17,3 @@ pub const DATA_DIR: &str = "/tmp/k3rs-data";
 /// Base directory for all k3rs log files.
 // pub const LOG_DIR: &str = "/var/logs/k3rs";
 pub const LOG_DIR: &str = "/tmp/k3rs-logs";
-
-/// Unix socket path for the VPC daemon.
-// pub const VPC_SOCKET: &str = "/run/k3rs-vpc.sock";
-pub const VPC_SOCKET: &str = "/tmp/k3rs-data/k3rs-vpc.sock";
-
-/// Base directory for Firecracker Jailer chroot jails.
-// pub const JAILER_DIR: &str = "/var/lib/k3rs/jailer";
-pub const JAILER_DIR: &str = "/tmp/k3rs-jailer";
