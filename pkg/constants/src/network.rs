@@ -80,6 +80,20 @@ pub const GATEWAY_MAC: [u8; 6] = [0x02, 0xfc, 0x00, 0x00, 0x00, 0x01];
 /// VMs write `nameserver 169.254.0.53` in `/etc/resolv.conf`.
 pub const DNS_PROXY_IPV4: &str = "169.254.0.53";
 
+// ─── macOS utun / NAT ──────────────────────────────────────────
+
+/// utun host-side IP (point-to-point endpoint, not a pod address).
+pub const UTUN_HOST_IP: &str = "10.254.254.1";
+
+/// utun peer IP (point-to-point other end, not assigned to anything).
+pub const UTUN_PEER_IP: &str = "10.254.254.2";
+
+/// pfctl anchor name for k3rs NAT rules (isolated from user rules).
+pub const PFCTL_ANCHOR: &str = "com.k3rs.nat";
+
+/// Default pod CIDR routed through the utun device.
+pub const DEFAULT_POD_CIDR: &str = "10.42.0.0/16";
+
 // ─── Pod netns ────────────────────────────────────────────────────
 
 /// Interface name assigned inside the container network namespace.

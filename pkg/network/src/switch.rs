@@ -61,11 +61,54 @@ mod inner {
         ip_to_id: Arc<RwLock<HashMap<Ipv4Addr, String>>>,
         /// DNS server address on the host
         dns_addr: SocketAddr,
+        /// utun device for external IPv4 routing (None if creation failed)
+        utun: Option<Arc<crate::utun::Utun>>,
+    }
+
+    impl Drop for MacSwitch {
+        fn drop(&mut self) {
+            if let Some(ref utun) = self.utun {
+                crate::pfnat::teardown_nat(&utun.name, pkg_constants::network::DEFAULT_POD_CIDR);
+            }
+        }
     }
 
     impl MacSwitch {
         /// Create a new switch. `dns_port` is the port of the k3rs DNS server on localhost.
         pub fn new(dns_port: u16) -> Self {
+            // Create utun device for external IPv4 routing (best-effort)
+            let utun = match crate::utun::Utun::create() {
+                Ok(u) => {
+                    info!("[switch] created utun device: {}", u.name);
+
+                    // Set non-blocking for poll loop
+                    unsafe {
+                        let flags = libc::fcntl(u.as_raw_fd(), libc::F_GETFL);
+                        libc::fcntl(u.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+                    }
+
+                    // Setup NAT: ifconfig, route, pfctl
+                    if let Err(e) = crate::pfnat::setup_nat(
+                        &u.name,
+                        pkg_constants::network::DEFAULT_POD_CIDR,
+                    ) {
+                        warn!(
+                            "[switch] pfctl NAT setup failed: {} (external access unavailable)",
+                            e
+                        );
+                    }
+
+                    Some(Arc::new(u))
+                }
+                Err(e) => {
+                    warn!(
+                        "[switch] failed to create utun: {} (external access unavailable)",
+                        e
+                    );
+                    None
+                }
+            };
+
             Self {
                 endpoints: Arc::new(RwLock::new(HashMap::new())),
                 ip_to_id: Arc::new(RwLock::new(HashMap::new())),
@@ -73,6 +116,7 @@ mod inner {
                     std::net::IpAddr::V4(Ipv4Addr::LOCALHOST),
                     dns_port,
                 ),
+                utun,
             }
         }
 
@@ -181,6 +225,25 @@ mod inner {
                             _ => {
                                 trace!("[switch] dropping frame with ethertype 0x{:04x} from {}", ethertype, id);
                             }
+                        }
+                    }
+
+                    // Poll utun for incoming reply packets (non-blocking)
+                    if let Some(ref utun) = switch.utun {
+                        let mut buf = [0u8; 2048];
+                        let n = unsafe {
+                            libc::recv(
+                                utun.as_raw_fd(),
+                                buf.as_mut_ptr() as *mut libc::c_void,
+                                buf.len(),
+                                libc::MSG_DONTWAIT,
+                            )
+                        };
+                        if n > 4 {
+                            let n = n as usize;
+                            // Skip 4-byte AF protocol header → raw IP packet
+                            let ip_packet = &buf[4..n];
+                            switch.handle_utun_reply(ip_packet).await;
                         }
                     }
 
@@ -316,9 +379,43 @@ mod inner {
                 }
             }
 
-            // Destination is external — for now, drop with a warning.
-            // TODO: implement utun NAT for external traffic
-            trace!("[switch] external traffic from {} to {} (not yet implemented)", src_id, dst_ip);
+            // Destination is external — forward via utun
+            if let Some(ref utun) = self.utun {
+                let ip_packet = &frame[14..]; // strip Ethernet header
+
+                // utun requires a 4-byte AF protocol header before the IP packet
+                let af_inet = (libc::AF_INET as u32).to_be_bytes();
+                let mut utun_buf = Vec::with_capacity(4 + ip_packet.len());
+                utun_buf.extend_from_slice(&af_inet);
+                utun_buf.extend_from_slice(ip_packet);
+
+                let ret = unsafe {
+                    libc::write(
+                        utun.as_raw_fd(),
+                        utun_buf.as_ptr() as *const libc::c_void,
+                        utun_buf.len(),
+                    )
+                };
+                if ret < 0 {
+                    warn!(
+                        "[switch] utun write failed: {}",
+                        io::Error::last_os_error()
+                    );
+                } else {
+                    trace!(
+                        "[switch] external: {} → {} ({} bytes via utun)",
+                        src_id,
+                        dst_ip,
+                        ip_packet.len()
+                    );
+                }
+            } else {
+                trace!(
+                    "[switch] external traffic from {} to {} (utun unavailable)",
+                    src_id,
+                    dst_ip
+                );
+            }
         }
 
         /// Handle DNS query: extract UDP payload and forward to k3rs DNS server.
@@ -431,6 +528,66 @@ mod inner {
                 warn!("[switch] failed to send DNS response to {}: {}", src_id, io::Error::last_os_error());
             } else {
                 debug!("[switch] DNS response sent to {} ({} bytes)", src_id, resp_frame.len());
+            }
+        }
+
+        /// Handle a reply packet from utun: wrap in Ethernet and deliver to the destination VM.
+        async fn handle_utun_reply(&self, ip_packet: &[u8]) {
+            if ip_packet.len() < 20 {
+                return; // too small for IPv4 header
+            }
+
+            // Parse destination IP from IP header (bytes 16-19)
+            let dst_ip = Ipv4Addr::new(
+                ip_packet[16],
+                ip_packet[17],
+                ip_packet[18],
+                ip_packet[19],
+            );
+
+            // Look up which VM owns this IP
+            let vm_id = match self.ip_to_id.read().await.get(&dst_ip).cloned() {
+                Some(id) => id,
+                None => {
+                    trace!("[switch] utun reply for unknown IP {}, dropping", dst_ip);
+                    return;
+                }
+            };
+
+            let eps = self.endpoints.read().await;
+            let ep = match eps.get(&vm_id) {
+                Some(ep) => ep,
+                None => return,
+            };
+
+            // Build Ethernet frame: dst=VM_MAC, src=GATEWAY_MAC, type=IPv4
+            let mut frame = Vec::with_capacity(14 + ip_packet.len());
+            frame.extend_from_slice(&ep.vm_mac); // dst MAC = VM
+            frame.extend_from_slice(&GATEWAY_MAC); // src MAC = gateway
+            frame.extend_from_slice(&ETH_P_IPV4.to_be_bytes());
+            frame.extend_from_slice(ip_packet);
+
+            let ret = unsafe {
+                libc::send(
+                    ep.raw_fd,
+                    frame.as_ptr() as *const libc::c_void,
+                    frame.len(),
+                    0,
+                )
+            };
+            if ret < 0 {
+                warn!(
+                    "[switch] failed to send utun reply to {}: {}",
+                    vm_id,
+                    io::Error::last_os_error()
+                );
+            } else {
+                trace!(
+                    "[switch] utun reply: {} bytes → {} ({})",
+                    ip_packet.len(),
+                    vm_id,
+                    dst_ip
+                );
             }
         }
     }

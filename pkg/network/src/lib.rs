@@ -2,5 +2,9 @@ pub mod bridge;
 pub mod cni;
 pub mod dns;
 pub mod netns;
+#[cfg(target_os = "macos")]
+pub mod pfnat;
 pub mod switch;
+#[cfg(target_os = "macos")]
+pub mod utun;
 pub mod wireguard;
