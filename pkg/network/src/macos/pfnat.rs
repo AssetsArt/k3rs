@@ -3,7 +3,11 @@
 //! Configures:
 //! - IP forwarding (`sysctl net.inet.ip.forwarding=1`)
 //! - Route for pod CIDR through utun device
-//! - pfctl NAT masquerade rule in a dedicated anchor
+//! - pfctl NAT masquerade rule
+//!
+//! NAT rules are loaded into the main PF ruleset (not an anchor) because
+//! macOS's default `/etc/pf.conf` only evaluates `com.apple/*` anchors.
+//! We preserve existing rules and prepend our NAT rule.
 
 use std::io::{self, Write};
 use std::process::Command;
@@ -68,25 +72,39 @@ pub fn setup_nat(utun_name: &str, pod_cidr: &str) -> io::Result<()> {
         .args(["add", "-net", pod_cidr, "-interface", utun_name])
         .output();
 
-    // 4. Load pfctl NAT rule into dedicated anchor
-    let rule = format!(
-        "nat on {} from {} to any -> ({})\n",
-        ext_if, pod_cidr, ext_if
-    );
+    // 4. Build a full PF ruleset that includes our NAT rule.
+    //    Read existing rules from /etc/pf.conf (the macOS default),
+    //    prepend our NAT rule, and load everything as one ruleset.
+    //    This ensures the NAT rule is evaluated (anchors like com.k3rs.*
+    //    are not referenced by macOS's default pf.conf).
+    let nat_rule = format!("nat on {} from {} to any -> ({})", ext_if, pod_cidr, ext_if);
+
+    let existing_conf = std::fs::read_to_string("/etc/pf.conf").unwrap_or_default();
+
+    // Remove any previous k3rs NAT rule to avoid duplicates
+    let cleaned: String = existing_conf
+        .lines()
+        .filter(|line| !line.contains("# k3rs-nat"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let full_ruleset = format!("{} # k3rs-nat\n{}\n", nat_rule, cleaned);
 
     let mut child = Command::new("pfctl")
-        .args(["-a", pkg_constants::network::PFCTL_ANCHOR, "-f", "-"])
+        .args(["-f", "-"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
 
     if let Some(ref mut stdin) = child.stdin {
-        stdin.write_all(rule.as_bytes())?;
+        stdin.write_all(full_ruleset.as_bytes())?;
     }
-    // Drop stdin to close it before wait
     drop(child.stdin.take());
-    child.wait()?;
+    let exit = child.wait()?;
+    if !exit.success() {
+        warn!("[pfnat] pfctl -f - failed (exit {:?})", exit.code());
+    }
 
     // 5. Enable PF (idempotent)
     let _ = Command::new("pfctl")
@@ -103,18 +121,18 @@ pub fn setup_nat(utun_name: &str, pod_cidr: &str) -> io::Result<()> {
 }
 
 /// Tear down pfctl NAT rules and routes.
-pub fn teardown_nat(utun_name: &str, pod_cidr: &str) {
+pub fn teardown_nat(_utun_name: &str, pod_cidr: &str) {
     // Remove route
     let _ = Command::new("route")
         .args(["delete", "-net", pod_cidr])
         .output();
 
-    // Flush anchor rules
+    // Reload /etc/pf.conf without our NAT rule
     let _ = Command::new("pfctl")
-        .args(["-a", pkg_constants::network::PFCTL_ANCHOR, "-F", "all"])
+        .args(["-f", "/etc/pf.conf"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output();
 
-    info!("[pfnat] NAT teardown complete for {}", utun_name);
+    info!("[pfnat] NAT teardown complete for {}", pod_cidr);
 }

@@ -15,7 +15,6 @@ use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 
-use tokio::io::unix::AsyncFd;
 use tokio::sync::RwLock;
 use tracing::{debug, info, trace, warn};
 
@@ -31,9 +30,7 @@ const ETH_P_IPV4: u16 = 0x0800;
 
 /// A registered VM endpoint in the switch.
 struct Endpoint {
-    /// AsyncFd wrapping the host-side datagram socket
-    fd: AsyncFd<RawFdWrapper>,
-    /// Raw FD for send/recv (kept alive by OwnedFd in fd_owner)
+    /// Raw FD for send/recv (kept alive by OwnedFd in _fd_owner)
     raw_fd: RawFd,
     /// Owns the file descriptor lifetime
     _fd_owner: OwnedFd,
@@ -41,14 +38,6 @@ struct Endpoint {
     vpc_id: u16,
     /// VM's virtio-net MAC (learned from first frame or assigned)
     vm_mac: [u8; 6],
-}
-
-/// Wrapper to impl AsRawFd for AsyncFd
-struct RawFdWrapper(RawFd);
-impl AsRawFd for RawFdWrapper {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0
-    }
 }
 
 /// Userspace Ethernet switch for macOS VM networking.
@@ -124,16 +113,13 @@ impl MacSwitch {
         vpc_id: u16,
     ) -> io::Result<()> {
         let raw_fd = socket.as_raw_fd();
-        // Set non-blocking for tokio AsyncFd
+        // Set non-blocking for MSG_DONTWAIT recv polling
         unsafe {
             let flags = libc::fcntl(raw_fd, libc::F_GETFL);
             libc::fcntl(raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
 
-        let async_fd = AsyncFd::new(RawFdWrapper(raw_fd))?;
-
         let endpoint = Endpoint {
-            fd: async_fd,
             raw_fd,
             _fd_owner: socket,
             guest_ipv4,
@@ -159,29 +145,30 @@ impl MacSwitch {
         }
     }
 
-    /// Run the switch event loop. Spawns a task per VM that reads frames.
+    /// Run the switch event loop.
     /// Call this once; new VMs are picked up dynamically.
     pub fn start(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
         let switch = self;
         tokio::spawn(async move {
             info!("[switch] macOS userspace switch started");
-            // Poll loop: check for readable sockets every 1ms
-            // A production switch would use epoll/kqueue, but for macOS VM
-            // counts (typically <50 pods) this is fine.
+            // Non-blocking poll loop: try recv on all VM sockets + utun every
+            // iteration.  If nothing was received, sleep 1ms to avoid
+            // busy-spinning.
+            //
+            // IMPORTANT: We must NOT use `readable().await` sequentially across
+            // endpoints — that would block the entire loop on the first idle VM
+            // and prevent utun replies from being delivered.
             loop {
-                let readable_ids: Vec<String> = {
+                let mut any_activity = false;
+
+                // Collect endpoint IDs (avoid holding the lock during I/O).
+                let ids: Vec<String> = {
                     let eps = switch.endpoints.read().await;
-                    let mut ready = Vec::new();
-                    for (id, ep) in eps.iter() {
-                        if let Ok(mut guard) = ep.fd.readable().await {
-                            guard.clear_ready();
-                            ready.push(id.clone());
-                        }
-                    }
-                    ready
+                    eps.keys().cloned().collect()
                 };
 
-                for id in readable_ids {
+                // Poll each VM socket (non-blocking).
+                for id in ids {
                     let mut buf = [0u8; 2048];
                     let n = {
                         let eps = switch.endpoints.read().await;
@@ -207,6 +194,7 @@ impl MacSwitch {
                         continue; // too small for Ethernet header
                     }
 
+                    any_activity = true;
                     let frame = &buf[..n];
                     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
 
@@ -226,27 +214,31 @@ impl MacSwitch {
                     }
                 }
 
-                // Poll utun for incoming reply packets (non-blocking)
+                // Poll utun for incoming reply packets (non-blocking).
                 if let Some(ref utun) = switch.utun {
-                    let mut buf = [0u8; 2048];
+                    let mut utun_buf = [0u8; 2048];
                     let n = unsafe {
                         libc::recv(
                             utun.as_raw_fd(),
-                            buf.as_mut_ptr() as *mut libc::c_void,
-                            buf.len(),
+                            utun_buf.as_mut_ptr() as *mut libc::c_void,
+                            utun_buf.len(),
                             libc::MSG_DONTWAIT,
                         )
                     };
                     if n > 4 {
+                        any_activity = true;
                         let n = n as usize;
                         // Skip 4-byte AF protocol header → raw IP packet
-                        let ip_packet = &buf[4..n];
+                        let ip_packet = &utun_buf[4..n];
                         switch.handle_utun_reply(ip_packet).await;
                     }
                 }
 
-                // Small yield to avoid busy-spinning
-                tokio::task::yield_now().await;
+                if any_activity {
+                    tokio::task::yield_now().await;
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
             }
         })
     }
