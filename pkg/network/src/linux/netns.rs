@@ -152,7 +152,20 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
 
     // 5. Assign Ghost IPv6 (/128) and guest IPv4 (/32) to eth0
     let ipv6_cidr = format!("{}/128", config.ghost_ipv6);
-    nsenter_run(pid, &["ip", "-6", "addr", "add", &ipv6_cidr, "dev", GUEST_IFACE, "nodad"]).await?;
+    nsenter_run(
+        pid,
+        &[
+            "ip",
+            "-6",
+            "addr",
+            "add",
+            &ipv6_cidr,
+            "dev",
+            GUEST_IFACE,
+            "nodad",
+        ],
+    )
+    .await?;
 
     let ipv4_cidr = format!("{}/32", config.guest_ipv4);
     nsenter_run(pid, &["ip", "addr", "add", &ipv4_cidr, "dev", GUEST_IFACE]).await?;
@@ -161,7 +174,15 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     nsenter_run(
         pid,
         &[
-            "ip", "-6", "route", "add", "default", "via", BRIDGE_GATEWAY_IPV6, "dev", GUEST_IFACE,
+            "ip",
+            "-6",
+            "route",
+            "add",
+            "default",
+            "via",
+            BRIDGE_GATEWAY_IPV6,
+            "dev",
+            GUEST_IFACE,
         ],
     )
     .await?;
@@ -214,7 +235,11 @@ pub async fn setup_pod_network(config: &PodNetworkConfig) -> Result<()> {
     let resolv_content = format!("nameserver {}\noptions ndots:{}\n", DNS_VIP, DNS_NDOTS);
     if let Err(e) = nsenter_run_with_mount(
         pid,
-        &["sh", "-c", &format!("echo '{}' > /etc/resolv.conf", resolv_content.trim())],
+        &[
+            "sh",
+            "-c",
+            &format!("echo '{}' > /etc/resolv.conf", resolv_content.trim()),
+        ],
     )
     .await
     {

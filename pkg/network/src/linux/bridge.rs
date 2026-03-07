@@ -112,14 +112,8 @@ enum AddrOrRoute<'a> {
 
 async fn ensure_addr_or_route(dev: &str, kind: AddrOrRoute<'_>) {
     let (args, label): (Vec<&str>, &str) = match &kind {
-        AddrOrRoute::Addr(cidr) => (
-            vec!["-6", "addr", "add", cidr, "dev", dev],
-            cidr,
-        ),
-        AddrOrRoute::Route(prefix) => (
-            vec!["-6", "route", "add", prefix, "dev", dev],
-            prefix,
-        ),
+        AddrOrRoute::Addr(cidr) => (vec!["-6", "addr", "add", cidr, "dev", dev], cidr),
+        AddrOrRoute::Route(prefix) => (vec!["-6", "route", "add", prefix, "dev", dev], prefix),
     };
     let output = tokio::process::Command::new("ip")
         .args(&args)

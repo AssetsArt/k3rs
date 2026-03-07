@@ -40,7 +40,10 @@ impl Component {
 }
 
 #[derive(Parser)]
-#[command(name = "k3rs-dev", about = "Run k3rs components in dev mode with auto-rebuild")]
+#[command(
+    name = "k3rs-dev",
+    about = "Run k3rs components in dev mode with auto-rebuild"
+)]
 struct Cli {
     /// Component(s) to run in dev mode (server, agent, vpc, ui, or all)
     component: Component,
@@ -472,7 +475,9 @@ fn check_file_has_caps(path: &str, required: &[&str]) -> bool {
     match output {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout).to_lowercase();
-            required.iter().all(|cap| stdout.contains(&cap.to_lowercase()))
+            required
+                .iter()
+                .all(|cap| stdout.contains(&cap.to_lowercase()))
         }
         _ => false,
     }

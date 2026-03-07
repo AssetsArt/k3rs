@@ -18,7 +18,9 @@ impl EvictionController {
     pub fn new(store: StateStore) -> Self {
         Self {
             store,
-            check_interval: Duration::from_secs(pkg_constants::timings::EVICTION_CHECK_INTERVAL_SECS),
+            check_interval: Duration::from_secs(
+                pkg_constants::timings::EVICTION_CHECK_INTERVAL_SECS,
+            ),
             grace_period: Duration::from_secs(pkg_constants::timings::EVICTION_GRACE_PERIOD_SECS),
         }
     }

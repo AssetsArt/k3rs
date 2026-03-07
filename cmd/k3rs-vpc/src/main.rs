@@ -242,7 +242,10 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| nat64_detected.as_ref().map(|(iface, _)| iface.clone()));
 
     if let (Some(ipv4), Some(phys)) = (&node_ipv4, &phys_iface) {
-        match enforcer.install_nat64(ipv4, pkg_constants::network::BRIDGE_NAME, phys).await {
+        match enforcer
+            .install_nat64(ipv4, pkg_constants::network::BRIDGE_NAME, phys)
+            .await
+        {
             Ok(()) => info!("NAT64 installed (node_ipv4={}, phys_iface={})", ipv4, phys),
             Err(e) => warn!(
                 "NAT64 install failed: {} (pods cannot reach external IPv4)",

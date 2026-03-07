@@ -14,7 +14,9 @@ pub fn start(
     connectivity: Arc<ConnectivityManager>,
 ) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(pkg_constants::timings::IMAGE_REPORT_INTERVAL_SECS));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+            pkg_constants::timings::IMAGE_REPORT_INTERVAL_SECS,
+        ));
         loop {
             interval.tick().await;
 

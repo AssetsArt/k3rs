@@ -47,7 +47,9 @@ pub fn start_heartbeat_loop(
                 match client
                     .put(&url)
                     .header("Authorization", format!("Bearer {}", token))
-                    .timeout(std::time::Duration::from_secs(pkg_constants::timings::HEARTBEAT_TIMEOUT_SECS))
+                    .timeout(std::time::Duration::from_secs(
+                        pkg_constants::timings::HEARTBEAT_TIMEOUT_SECS,
+                    ))
                     .send()
                     .await
                 {

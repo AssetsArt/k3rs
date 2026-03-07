@@ -269,7 +269,7 @@ impl FirecrackerBackend {
 
         // Inject k3rs-init
         let init_dest = rootfs_dir.join("sbin/k3rs-init");
-        if let Some(init_src) = crate::virt::find_k3rs_init() {
+        if let Some(init_src) = crate::vm_utils::find_k3rs_init() {
             tokio::fs::copy(&init_src, &init_dest)
                 .await
                 .with_context(|| {
@@ -695,7 +695,7 @@ impl RuntimeBackend for FirecrackerBackend {
         };
 
         // Parse entrypoint + env from bundle config.json
-        let (command, env) = crate::virt::parse_bundle_config(bundle);
+        let (command, env) = crate::vm_utils::parse_bundle_config(bundle);
 
         // Prepare rootfs (inject k3rs-init, create ext4 or start virtiofsd)
         let rootfs_mode = self.prepare_rootfs(&rootfs_dir, id, &command, &env).await?;

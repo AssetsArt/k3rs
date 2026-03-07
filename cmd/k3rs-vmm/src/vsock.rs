@@ -35,7 +35,8 @@ use tracing::{error, info};
 const VSOCK_EXEC_PORT: u32 = pkg_constants::vm::VSOCK_EXEC_PORT;
 
 /// How long to wait for a vsock connection to be established.
-const VSOCK_CONNECT_TIMEOUT: Duration = Duration::from_secs(pkg_constants::timings::VSOCK_CONNECT_TIMEOUT_SECS);
+const VSOCK_CONNECT_TIMEOUT: Duration =
+    Duration::from_secs(pkg_constants::timings::VSOCK_CONNECT_TIMEOUT_SECS);
 
 /// Execute a command in the guest via vsock, returning combined stdout+stderr.
 ///

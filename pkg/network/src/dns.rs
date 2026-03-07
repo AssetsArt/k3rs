@@ -5,9 +5,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use pkg_constants::dns::{
-    NAT64_PREFIX, QTYPE_A, QTYPE_AAAA, UPSTREAM_DNS_TIMEOUT_SECS,
-};
+use pkg_constants::dns::{NAT64_PREFIX, QTYPE_A, QTYPE_AAAA, UPSTREAM_DNS_TIMEOUT_SECS};
 use pkg_constants::network::{DEFAULT_VPC_ID, GHOST_VERSION, PLATFORM_PREFIX};
 
 /// FQDN → (ClusterIP, vpc_name, vpc_id) shared map.

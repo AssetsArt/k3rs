@@ -3,9 +3,9 @@ use crate::connectivity::ConnectivityManager;
 use crate::store::AgentStore;
 use crate::vpc_client::VpcClient;
 use chrono::Utc;
-#[cfg(target_os = "macos")]
-use pkg_network::switch::MacSwitch;
 use pkg_container::ContainerRuntime;
+#[cfg(target_os = "macos")]
+use pkg_network::macos::switch::MacSwitch;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -26,7 +26,9 @@ pub fn start(
     let in_flight: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(pkg_constants::timings::POD_SYNC_INTERVAL_SECS));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+            pkg_constants::timings::POD_SYNC_INTERVAL_SECS,
+        ));
         loop {
             interval.tick().await;
 
@@ -148,7 +150,7 @@ async fn check_running_pods(
 
                 // Tear down pod network (best-effort)
                 #[cfg(target_os = "linux")]
-                pkg_network::netns::teardown_pod_network(&pod.id, None).await;
+                pkg_network::linux::netns::teardown_pod_network(&pod.id, None).await;
 
                 // Release VPC allocation (best-effort)
                 let vpc_name = pod
@@ -203,7 +205,7 @@ async fn check_running_pods(
 
                 // Tear down pod network (best-effort)
                 #[cfg(target_os = "linux")]
-                pkg_network::netns::teardown_pod_network(&pod.id, None).await;
+                pkg_network::linux::netns::teardown_pod_network(&pod.id, None).await;
 
                 // Release VPC allocation (best-effort)
                 let vpc_name = pod
@@ -234,6 +236,7 @@ async fn check_running_pods(
 }
 
 /// Schedule pods that are in Scheduled or ContainerCreating status.
+#[allow(clippy::too_many_arguments)]
 fn schedule_new_pods(
     pods: &[pkg_types::pod::Pod],
     runtime: &Option<Arc<ContainerRuntime>>,
@@ -316,6 +319,7 @@ fn schedule_new_pods(
 }
 
 /// Full pod lifecycle: allocate VPC → pull image → create container → start → report.
+#[allow(clippy::too_many_arguments)]
 async fn run_pod_lifecycle(
     pod: pkg_types::pod::Pod,
     runtime: Arc<ContainerRuntime>,
@@ -347,7 +351,11 @@ async fn run_pod_lifecycle(
     let mut env = container_spec.map(|c| c.env.clone()).unwrap_or_default();
 
     // 0. Allocate VPC address
-    let vpc_name = pod.spec.vpc.as_deref().unwrap_or(pkg_constants::network::DEFAULT_VPC_NAME);
+    let vpc_name = pod
+        .spec
+        .vpc
+        .as_deref()
+        .unwrap_or(pkg_constants::network::DEFAULT_VPC_NAME);
     let vpc_alloc = match vpc_client.allocate(&pod.id, vpc_name).await {
         Ok(alloc) => {
             info!(
@@ -423,13 +431,13 @@ async fn run_pod_lifecycle(
         && let Some((ref guest_ipv4, ref ghost_ipv6, vpc_id, ref vpc_cidr)) = vpc_alloc
     {
         if let Some(pid) = runtime.container_pid(&pod.id) {
-            let net_config = pkg_network::netns::PodNetworkConfig {
+            let net_config = pkg_network::linux::netns::PodNetworkConfig {
                 pod_id: pod.id.clone(),
                 ghost_ipv6: ghost_ipv6.clone(),
                 guest_ipv4: guest_ipv4.clone(),
                 container_pid: pid,
             };
-            if let Err(e) = pkg_network::netns::setup_pod_network(&net_config).await {
+            if let Err(e) = pkg_network::linux::netns::setup_pod_network(&net_config).await {
                 warn!(
                     "[pod:{}] Pod network setup failed: {} (continuing without network)",
                     pod.name, e
@@ -462,7 +470,7 @@ async fn run_pod_lifecycle(
     if runtime.backend_name_for(&pod.id) == "vm"
         && let Some((ref guest_ipv4, ref ghost_ipv6, vpc_id, ref vpc_cidr)) = vpc_alloc
     {
-        let vpc_config = pkg_container::virt::VmNetworkConfig {
+        let vpc_config = pkg_container::vm_utils::VmNetworkConfig {
             guest_ipv4: guest_ipv4.clone(),
             guest_ipv6: ghost_ipv6.clone(),
             vpc_id,
@@ -512,17 +520,14 @@ async fn run_pod_lifecycle(
     if runtime.backend_name_for(&pod.id) == "vm"
         && let Some((ref guest_ipv4, _, vpc_id, _)) = vpc_alloc
         && let Some(switch) = &mac_switch
+        && let Some(socket) = runtime.take_vm_net_socket(&pod.id).await
+        && let Ok(ip) = guest_ipv4.parse()
+        && let Err(e) = switch.add_vm(pod.id.clone(), socket, ip, vpc_id).await
     {
-        if let Some(socket) = runtime.take_vm_net_socket(&pod.id).await {
-            if let Ok(ip) = guest_ipv4.parse() {
-                if let Err(e) = switch.add_vm(pod.id.clone(), socket, ip, vpc_id).await {
-                    warn!(
-                        "[pod:{}] Failed to register VM with switch: {}",
-                        pod.name, e
-                    );
-                }
-            }
-        }
+        warn!(
+            "[pod:{}] Failed to register VM with switch: {}",
+            pod.name, e
+        );
     }
 
     // 4. Success

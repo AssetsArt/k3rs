@@ -61,9 +61,7 @@ pub fn setup_nat(utun_name: &str, pod_cidr: &str) -> io::Result<()> {
     }
 
     // Bring the interface up
-    let _ = Command::new("ifconfig")
-        .args([utun_name, "up"])
-        .status();
+    let _ = Command::new("ifconfig").args([utun_name, "up"]).status();
 
     // 3. Add route for pod CIDR through the utun device
     let _ = Command::new("route")
@@ -71,7 +69,10 @@ pub fn setup_nat(utun_name: &str, pod_cidr: &str) -> io::Result<()> {
         .output();
 
     // 4. Load pfctl NAT rule into dedicated anchor
-    let rule = format!("nat on {} from {} to any -> ({})\n", ext_if, pod_cidr, ext_if);
+    let rule = format!(
+        "nat on {} from {} to any -> ({})\n",
+        ext_if, pod_cidr, ext_if
+    );
 
     let mut child = Command::new("pfctl")
         .args(["-a", pkg_constants::network::PFCTL_ANCHOR, "-f", "-"])

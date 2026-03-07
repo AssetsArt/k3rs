@@ -14,8 +14,8 @@ use std::path::Path;
 
 use objc2::AllocAnyThread;
 use objc2::rc::Retained;
-use objc2_foundation::{NSArray, NSString, NSURL};
 use objc2_foundation::NSFileHandle;
+use objc2_foundation::{NSArray, NSString, NSURL};
 use objc2_virtualization::{
     VZFileHandleNetworkDeviceAttachment, VZFileSerialPortAttachment, VZLinuxBootLoader,
     VZNATNetworkDeviceAttachment, VZSerialPortConfiguration, VZSharedDirectory,
@@ -136,7 +136,12 @@ fn boot_loader(config: &VmConfig) -> Retained<VZLinuxBootLoader> {
             write!(cmdline, " k3rs.vpc_id={}", vpc.vpc_id).unwrap();
             write!(cmdline, " k3rs.vpc_cidr={}", vpc.vpc_cidr).unwrap();
             write!(cmdline, " k3rs.gw_mac={}", vpc.gw_mac).unwrap();
-            write!(cmdline, " k3rs.platform_prefix=0x{:08x}", vpc.platform_prefix).unwrap();
+            write!(
+                cmdline,
+                " k3rs.platform_prefix=0x{:08x}",
+                vpc.platform_prefix
+            )
+            .unwrap();
             write!(cmdline, " k3rs.cluster_id={}", vpc.cluster_id).unwrap();
             info!("kernel cmdline VPC params appended");
         }

@@ -18,8 +18,12 @@ impl NodeController {
         Self {
             store,
             check_interval: Duration::from_secs(pkg_constants::timings::NODE_CHECK_INTERVAL_SECS),
-            not_ready_threshold: Duration::from_secs(pkg_constants::timings::NODE_NOT_READY_THRESHOLD_SECS),
-            unknown_threshold: Duration::from_secs(pkg_constants::timings::NODE_UNKNOWN_THRESHOLD_SECS),
+            not_ready_threshold: Duration::from_secs(
+                pkg_constants::timings::NODE_NOT_READY_THRESHOLD_SECS,
+            ),
+            unknown_threshold: Duration::from_secs(
+                pkg_constants::timings::NODE_UNKNOWN_THRESHOLD_SECS,
+            ),
         }
     }
 
