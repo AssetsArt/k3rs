@@ -1069,7 +1069,15 @@ impl RuntimeBackend for VirtualizationBackend {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Find the k3rs-vmm helper binary in PATH or common build locations.
+/// Automatically codesigns with Virtualization.framework entitlements if needed.
 async fn which_vmm() -> Option<String> {
+    let path = find_vmm_binary().await?;
+    ensure_vmm_entitlements(&path).await;
+    Some(path)
+}
+
+/// Locate the k3rs-vmm binary without signing.
+async fn find_vmm_binary() -> Option<String> {
     if let Ok(output) = tokio::process::Command::new("which")
         .arg("k3rs-vmm")
         .output()
@@ -1095,6 +1103,72 @@ async fn which_vmm() -> Option<String> {
     }
 
     None
+}
+
+/// Ensure k3rs-vmm has the com.apple.security.virtualization entitlement.
+/// This is required by Apple's Virtualization.framework — without it the VM
+/// config validation panics immediately.
+async fn ensure_vmm_entitlements(vmm_path: &str) {
+    // Check if already signed with the correct entitlement
+    if let Ok(output) = tokio::process::Command::new("codesign")
+        .args(["-d", "--entitlements", "-", vmm_path])
+        .output()
+        .await
+    {
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if output.status.success() && combined.contains("com.apple.security.virtualization") {
+            return; // already signed
+        }
+    }
+
+    // Find the entitlements plist
+    let entitlements_candidates = [
+        "cmd/k3rs-vmm/k3rs-vmm.entitlements".to_string(),
+        format!("{}/k3rs-vmm.entitlements", DATA_DIR),
+    ];
+    let entitlements = entitlements_candidates
+        .iter()
+        .find(|p| std::path::Path::new(p).exists());
+
+    let Some(entitlements) = entitlements else {
+        tracing::warn!(
+            "[virt] k3rs-vmm entitlements file not found — VM boot will fail. \
+             Expected at cmd/k3rs-vmm/k3rs-vmm.entitlements"
+        );
+        return;
+    };
+
+    tracing::info!("[virt] Signing k3rs-vmm with Virtualization.framework entitlements...");
+    match tokio::process::Command::new("codesign")
+        .args([
+            "--entitlements",
+            entitlements,
+            "--force",
+            "-s",
+            "-",
+            vmm_path,
+        ])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => {
+            tracing::info!("[virt] k3rs-vmm signed: {}", vmm_path);
+        }
+        Ok(o) => {
+            tracing::warn!(
+                "[virt] codesign failed for {}: {}",
+                vmm_path,
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+        }
+        Err(e) => {
+            tracing::warn!("[virt] codesign exec failed: {}", e);
+        }
+    }
 }
 
 /// Find the k3rs-init Linux binary to inject into the guest rootfs.
