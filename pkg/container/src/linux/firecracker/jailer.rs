@@ -21,7 +21,7 @@ impl Jailer {
     pub fn new(jailer_bin: &Path) -> Self {
         Self {
             jailer_bin: jailer_bin.to_path_buf(),
-            chroot_base: PathBuf::from("/tmp/k3rs-jailer"),
+            chroot_base: PathBuf::from(pkg_constants::paths::JAILER_DIR),
         }
     }
 
@@ -146,18 +146,16 @@ mod tests {
     #[test]
     fn test_chroot_dir() {
         let jailer = Jailer::new(Path::new("/usr/local/bin/jailer"));
-        assert_eq!(
-            jailer.chroot_dir("test-vm"),
-            PathBuf::from("/tmp/k3rs-jailer/firecracker/test-vm/root")
-        );
+        let expected =
+            PathBuf::from(pkg_constants::paths::JAILER_DIR).join("firecracker/test-vm/root");
+        assert_eq!(jailer.chroot_dir("test-vm"), expected);
     }
 
     #[test]
     fn test_api_socket_in_chroot() {
         let jailer = Jailer::new(Path::new("/usr/local/bin/jailer"));
-        assert_eq!(
-            jailer.api_socket_in_chroot("test-vm", "api.sock"),
-            PathBuf::from("/tmp/k3rs-jailer/firecracker/test-vm/root/api.sock")
-        );
+        let expected = PathBuf::from(pkg_constants::paths::JAILER_DIR)
+            .join("firecracker/test-vm/root/api.sock");
+        assert_eq!(jailer.api_socket_in_chroot("test-vm", "api.sock"), expected);
     }
 }
